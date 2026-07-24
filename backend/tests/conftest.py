@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -16,14 +16,6 @@ def db_session():
     )
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
-
-    # Auto-refresh objects after flush to populate relationships
-    @event.listens_for(session, "after_flush")
-    def refresh_relationships(session, flush_context):
-        for obj in session.identity_map.values():
-            if hasattr(obj.__class__, "reply"):
-                session.expire(obj, ["reply"])
-
     yield session
     session.close()
 

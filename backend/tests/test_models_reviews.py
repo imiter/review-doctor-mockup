@@ -37,6 +37,7 @@ def test_review_defaults_and_reply(db_session):
     )
     db_session.add(reply)
     db_session.flush()
+    db_session.refresh(review)
     assert review.reply.content == "감사합니다!"
 
 

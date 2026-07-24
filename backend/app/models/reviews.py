@@ -19,7 +19,7 @@ class Review(Base):
     created_at: Mapped[datetime]
 
     store_platform: Mapped["StorePlatform"] = relationship()
-    reply: Mapped["ReviewReply | None"] = relationship(back_populates="review", lazy="selectin")
+    reply: Mapped["ReviewReply | None"] = relationship(back_populates="review")
 
 
 class ReplyStyle(Base):
