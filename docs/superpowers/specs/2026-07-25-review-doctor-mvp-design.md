@@ -116,6 +116,7 @@ owners ──< stores ──< store_platforms >── platforms
 
 | 메서드 | 엔드포인트 | 동작 |
 |---|---|---|
+| GET | `/api/reply-styles` | 답글 스타일 목록 (화면 드롭다운용) |
 | GET | `/api/reviews` | 리뷰 목록 (매장·플랫폼·답글상태 필터) |
 | POST | `/api/reviews/{id}/reply/draft` | 스타일 선택 → 템플릿 기반 답글 초안 반환 (저장 안 함) |
 | POST | `/api/reviews/{id}/reply` | 수정된 답글 저장, 리뷰 상태 '완료' 전이 |
