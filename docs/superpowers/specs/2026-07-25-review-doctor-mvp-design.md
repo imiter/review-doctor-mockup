@@ -122,13 +122,13 @@ owners ──< stores ──< store_platforms >── platforms
 | GET | `/api/settlements` | 정산 목록 (기간·플랫폼 필터) |
 | GET | `/api/settlements/{id}` | 차액 분해: 주문총액 → 공제 타입별 합계 → 실입금액 + 소속 주문 목록 |
 | GET | `/api/ad-campaigns` | 광고 대시보드 행 (캠페인+최신 스냅샷+대기 추천 조인) |
-| POST | `/api/ads/refresh` | Mock 시간 1시간 전진 → 다음 스냅샷 공개 |
+| POST | `/api/ads/refresh` | Mock 시간 10분 전진 → 다음 스냅샷 공개 |
 | POST | `/api/ad-recommendations/{id}/apply` | CPC 변경 + `bid_history` 기록 + 추천 '적용' |
 | POST | `/api/ad-recommendations/{id}/dismiss` | 추천 '무시' |
 
 ### Mock 시간 메커니즘
 
-`mock_clock.mock_now`가 현재 시각. `/api/ads/refresh`가 1시간 전진시키고, 조회는 `snapshot_at <= mock_now`인 최신 스냅샷을 반환한다. seed에 미래 시점 스냅샷이 미리 있으므로 새로고침마다 순위 변동이 재현된다. 시뮬레이션 엔진 없음.
+`mock_clock.mock_now`가 현재 시각. `/api/ads/refresh`가 10분 전진시키고, 조회는 `snapshot_at <= mock_now`인 최신 스냅샷을 반환한다. seed에 미래 시점 스냅샷이 미리 있으므로 새로고침마다 순위 변동이 재현된다. 시뮬레이션 엔진 없음.
 
 ### 추천 생성 규칙 (Mock 지능의 전부)
 
@@ -140,7 +140,7 @@ refresh로 공개된 새 스냅샷에서 `my_rank > target_rank`이고 해당 �
 - **주문/정산**: 최근 60일, 약 400건. 플랫폼별 공제 구조를 다르게 구성 (배민: 중개수수료+결제수수료+배달비 / 쿠팡이츠: 수수료율 상이)
 - **리뷰**: 약 40건. 별점 분포 현실적으로(5점 다수, 1–2점 소수), 절반은 답글 대기
 - **답글 템플릿**: 3 스타일 × 3 별점대 = 9개
-- **광고**: 캠페인 2개, 캠페인당 1시간 간격 스냅샷 30개. 경쟁 CPC 상승으로 순위가 3위→7위로 밀리는 구간 포함 (데모 하이라이트)
+- **광고**: 캠페인 2개, 캠페인당 10분 간격 스냅샷 30개 (약 5시간 분량). 경쟁 CPC 상승으로 순위가 3위→7위로 밀리는 구간 포함 (데모 하이라이트)
 - **정합성 원칙**: seed는 스크립트로 생성하며 `settlements.net_payout = Σ주문총액 − Σ공제`가 항상 성립해야 한다
 
 ## 7. 에러 처리 & 테스트
