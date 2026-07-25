@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers.reviews import router as reviews_router
+from app.routers.settlements import router as settlements_router
 
 app = FastAPI(title="Review Doctor MVP")
 
@@ -19,3 +20,4 @@ def health():
 
 
 app.include_router(reviews_router)
+app.include_router(settlements_router)
