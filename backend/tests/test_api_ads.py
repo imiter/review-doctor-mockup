@@ -67,3 +67,15 @@ def test_dismiss(client, db_session):
     assert client.post(f"/api/ad-recommendations/{rec.id}/dismiss").status_code == 200
     db_session.expire_all()
     assert rec.status == "dismissed"
+
+
+def test_recommendation_not_found(client, db_session):
+    setup_campaign(db_session)
+    assert client.post("/api/ad-recommendations/99999/apply").status_code == 404
+    assert client.post("/api/ad-recommendations/99999/dismiss").status_code == 404
+
+
+def test_clock_uninitialized_returns_500(client, db_session):
+    make_sp(db_session)  # 캠페인/시계 없이 매장만
+    res = client.get("/api/ad-campaigns")
+    assert res.status_code == 500
