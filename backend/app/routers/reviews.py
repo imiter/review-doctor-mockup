@@ -3,10 +3,10 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.db import get_db
-from app.models import ReplyStyle, ReplyTemplate, Review, ReviewReply
+from app.models import ReplyStyle, ReplyTemplate, Review, ReviewReply, StorePlatform
 
 router = APIRouter(prefix="/api", tags=["reviews"])
 
@@ -40,7 +40,14 @@ def list_reviews(
     store_platform_id: int | None = None,
     db: Session = Depends(get_db),
 ):
-    stmt = select(Review).order_by(Review.created_at.desc())
+    stmt = (
+        select(Review)
+        .options(
+            joinedload(Review.store_platform).joinedload(StorePlatform.store),
+            joinedload(Review.store_platform).joinedload(StorePlatform.platform),
+        )
+        .order_by(Review.created_at.desc())
+    )
     if status:
         stmt = stmt.where(Review.status == status)
     if store_platform_id:
