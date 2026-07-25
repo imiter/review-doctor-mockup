@@ -118,6 +118,8 @@ def seed_all(session: Session) -> None:
                     session.add(OrderDeduction(order_id=order.id, type=dtype, amount=amount))
                 orders_by_sp[sp.id].append(order)
 
+    session.flush()  # Ensure all order deductions are persisted before settlement invariant calculation
+
     # ---- 주 단위 정산 (월~일, 입금 = 종료 +3일) ----
     for sp in sps:
         by_week: dict[date, list[Order]] = {}
