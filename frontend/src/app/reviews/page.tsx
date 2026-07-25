@@ -14,6 +14,10 @@ function ReviewCard({ review, styles, onSaved }: { review: Review; styles: Style
   const [styleId, setStyleId] = useState(styles[0]?.id ?? 0);
   const [draft, setDraft] = useState("");
 
+  useEffect(() => {
+    if (styles.length > 0 && styleId === 0) setStyleId(styles[0].id);
+  }, [styles, styleId]);
+
   const generate = async () => {
     const res = await apiPost<{ content: string }>(`/api/reviews/${review.id}/reply/draft`, { style_id: styleId });
     setDraft(res.content);
