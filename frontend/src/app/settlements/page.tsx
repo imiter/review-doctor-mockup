@@ -24,13 +24,19 @@ const PLATFORM_OPTIONS = [
 export default function SettlementsPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [platform, setPlatform] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
   const [detail, setDetail] = useState<Detail | null>(null);
   const detailReq = useRef(0);
   const listReq = useRef(0);
 
   const load = useCallback(async () => {
     const token = ++listReq.current;
-    const qs = platform ? `?platform_code=${platform}` : "";
+    const params = new URLSearchParams();
+    if (platform) params.set("platform_code", platform);
+    if (fromDate) params.set("from_date", fromDate);
+    if (toDate) params.set("to_date", toDate);
+    const qs = params.toString() ? `?${params.toString()}` : "";
     try {
       const data = await apiGet<Row[]>(`/api/settlements${qs}`);
       if (listReq.current === token) {
@@ -43,16 +49,21 @@ export default function SettlementsPage() {
         setRows([]);
       }
     }
-  }, [platform]);
+  }, [platform, fromDate, toDate]);
 
   useEffect(() => { load(); }, [load]);
 
   return (
     <main className="mx-auto max-w-5xl p-8">
       <h1 className="text-xl font-bold">정산 차액 분해</h1>
-      <select value={platform} onChange={(e) => setPlatform(e.target.value)} className="mt-3 rounded border px-2 py-1 text-sm">
-        {PLATFORM_OPTIONS.map((p) => <option key={p.code} value={p.code}>{p.label}</option>)}
-      </select>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <select value={platform} onChange={(e) => setPlatform(e.target.value)} className="rounded border px-2 py-1 text-sm">
+          {PLATFORM_OPTIONS.map((p) => <option key={p.code} value={p.code}>{p.label}</option>)}
+        </select>
+        <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="rounded border px-2 py-1 text-sm" aria-label="시작일" />
+        <span className="text-sm text-gray-400">~</span>
+        <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="rounded border px-2 py-1 text-sm" aria-label="종료일" />
+      </div>
       <div className="mt-4 grid grid-cols-1 gap-6 md:grid-cols-2">
         <table className="w-full text-sm">
           <thead><tr className="border-b text-left text-gray-500">
