@@ -1,11 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers.ads import router as ads_router
-from app.routers.reviews import router as reviews_router
-from app.routers.settlements import router as settlements_router
+from app.routers import ads, auth, dashboard, orders, reviews, sales
 
-app = FastAPI(title="Review Doctor MVP")
+app = FastAPI(title="Delivery Review & Store Insight MVP")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,6 +18,9 @@ def health():
     return {"status": "ok"}
 
 
-app.include_router(ads_router)
-app.include_router(reviews_router)
-app.include_router(settlements_router)
+app.include_router(auth.router)
+app.include_router(dashboard.router)
+app.include_router(reviews.router)
+app.include_router(orders.router)
+app.include_router(ads.router)
+app.include_router(sales.router)

@@ -1,108 +1,88 @@
-from datetime import timedelta
+"""광고 성과(ACoS 실계산) + 광고 순위 모니터링(Mock 스냅샷). 실제 CPC 자동입찰·순위 크롤링 없음."""
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from datetime import date, timedelta
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.acos import calculate_performance
+from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
-from app.models import AdBidHistory, AdCampaign, AdRankSnapshot, AdRecommendation, MockClock
+from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, User
 
-router = APIRouter(prefix="/api", tags=["ads"])
-
-
-def _clock(db: Session) -> MockClock:
-    clock = db.get(MockClock, 1)
-    if clock is None:
-        raise HTTPException(500, "mock_clock 미초기화 — seed를 먼저 실행하세요")
-    return clock
+router = APIRouter(tags=["ads"])
 
 
-def _latest_snapshot(db: Session, campaign_id: int, mock_now) -> AdRankSnapshot | None:
-    return db.scalar(
-        select(AdRankSnapshot)
-        .where(AdRankSnapshot.campaign_id == campaign_id, AdRankSnapshot.snapshot_at <= mock_now)
-        .order_by(AdRankSnapshot.snapshot_at.desc())
-        .limit(1)
-    )
+@router.get("/ads/performance")
+def ads_performance(
+    store_id: int | None = None,
+    days: int = Query(14, ge=1, le=90),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    sid = store_id or get_user_default_store_id(user, db)
+    campaigns = db.scalars(select(AdCampaign).where(AdCampaign.store_id == sid)).all()
+    since = date.today() - timedelta(days=days)
 
-
-def _pending_rec(db: Session, campaign_id: int) -> AdRecommendation | None:
-    return db.scalar(
-        select(AdRecommendation).where(
-            AdRecommendation.campaign_id == campaign_id, AdRecommendation.status == "pending"
-        )
-    )
-
-
-@router.get("/ad-campaigns")
-def dashboard(db: Session = Depends(get_db)):
-    clock = _clock(db)
-    campaigns = db.scalars(select(AdCampaign).order_by(AdCampaign.id)).all()
-    rows = []
+    result = []
     for c in campaigns:
-        snap = _latest_snapshot(db, c.id, clock.mock_now)
-        rec = _pending_rec(db, c.id)
-        rows.append({
-            "id": c.id,
-            "store_name": c.store_platform.store.name,
-            "platform_name": c.store_platform.platform.name,
+        agg = db.execute(
+            select(
+                func.coalesce(func.sum(AdPerformanceMetric.ad_spend), 0),
+                func.coalesce(func.sum(AdPerformanceMetric.clicks), 0),
+                func.coalesce(func.sum(AdPerformanceMetric.ad_orders), 0),
+                func.coalesce(func.sum(AdPerformanceMetric.ad_revenue), 0),
+            ).where(AdPerformanceMetric.campaign_id == c.id, AdPerformanceMetric.metric_date >= since)
+        ).one()
+        perf = calculate_performance(*agg)
+        result.append({
+            "campaign_id": c.id,
+            "category": c.category,
+            "current_cpc": c.current_cpc,
+            "status": c.status,
+            "period_days": days,
+            "ad_spend": perf.ad_spend,
+            "clicks": perf.clicks,
+            "ad_orders": perf.ad_orders,
+            "ad_revenue": perf.ad_revenue,
+            "cpc": perf.cpc,
+            "cvr": perf.cvr,
+            "aov": perf.aov,
+            "acos": perf.acos,
+            "score": perf.score,
+        })
+    return result
+
+
+@router.get("/ads/rank-monitoring")
+def ads_rank_monitoring(
+    store_id: int | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    sid = store_id or get_user_default_store_id(user, db)
+    campaigns = db.scalars(select(AdCampaign).where(AdCampaign.store_id == sid)).all()
+
+    result = []
+    for c in campaigns:
+        latest = db.scalar(
+            select(AdRankSnapshot)
+            .where(AdRankSnapshot.campaign_id == c.id)
+            .order_by(AdRankSnapshot.snapshot_at.desc())
+            .limit(1)
+        )
+        result.append({
+            "campaign_id": c.id,
             "category": c.category,
             "current_cpc": c.current_cpc,
             "target_rank": c.target_rank,
-            "my_rank": snap.my_rank if snap else None,
-            "competitor_est_cpc": snap.competitor_est_cpc if snap else None,
             "status": c.status,
-            "recommendation": (
-                {"id": rec.id, "action_type": rec.action_type, "suggested_cpc": rec.suggested_cpc}
-                if rec else None
-            ),
+            "current_rank": latest.current_rank if latest else None,
+            "competitor_est_cpc": latest.competitor_est_cpc if latest else None,
+            "rank_status": latest.status if latest else None,
+            "recommended_action": latest.recommended_action if latest else "keep",
+            "suggested_cpc": latest.suggested_cpc if latest else None,
+            "snapshot_at": latest.snapshot_at.isoformat() if latest else None,
         })
-    return {"mock_now": clock.mock_now.isoformat(), "campaigns": rows}
-
-
-@router.post("/ads/refresh")
-def refresh(db: Session = Depends(get_db)):
-    clock = _clock(db)
-    clock.mock_now = clock.mock_now + timedelta(minutes=10)
-    for c in db.scalars(select(AdCampaign).where(AdCampaign.status == "active")).all():
-        snap = _latest_snapshot(db, c.id, clock.mock_now)
-        if snap and snap.my_rank > c.target_rank and _pending_rec(db, c.id) is None:
-            db.add(AdRecommendation(
-                campaign_id=c.id, snapshot_id=snap.id,
-                action_type="raise_cpc", suggested_cpc=snap.competitor_est_cpc + 50,
-                status="pending", created_at=clock.mock_now,
-            ))
-    db.commit()
-    return {"mock_now": clock.mock_now.isoformat()}
-
-
-@router.post("/ad-recommendations/{rec_id}/apply")
-def apply_recommendation(rec_id: int, db: Session = Depends(get_db)):
-    rec = db.get(AdRecommendation, rec_id)
-    if rec is None:
-        raise HTTPException(404, "추천 없음")
-    if rec.status != "pending":
-        raise HTTPException(409, "대기 상태 추천만 적용 가능")
-    campaign = db.get(AdCampaign, rec.campaign_id)
-    clock = _clock(db)
-    db.add(AdBidHistory(
-        campaign_id=campaign.id, recommendation_id=rec.id,
-        old_cpc=campaign.current_cpc, new_cpc=rec.suggested_cpc,
-        applied_at=clock.mock_now,
-    ))
-    campaign.current_cpc = rec.suggested_cpc
-    rec.status = "applied"
-    db.commit()
-    return {"current_cpc": campaign.current_cpc}
-
-
-@router.post("/ad-recommendations/{rec_id}/dismiss")
-def dismiss_recommendation(rec_id: int, db: Session = Depends(get_db)):
-    rec = db.get(AdRecommendation, rec_id)
-    if rec is None:
-        raise HTTPException(404, "추천 없음")
-    if rec.status != "pending":
-        raise HTTPException(409, "대기 상태 추천만 무시 가능")
-    rec.status = "dismissed"
-    db.commit()
-    return {"status": rec.status}
+    return result

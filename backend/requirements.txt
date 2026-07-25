@@ -2,7 +2,9 @@ fastapi
 uvicorn[standard]
 sqlalchemy
 psycopg[binary]
-alembic
 pydantic
+pydantic[email]
+bcrypt
+PyJWT
 pytest
 httpx

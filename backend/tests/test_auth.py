@@ -1,0 +1,53 @@
+def test_signup_creates_user_store_and_subscription(client, platforms):
+    res = client.post("/auth/signup", json={
+        "email": "new@test.com", "password": "pw12345!", "nickname": "새사장",
+        "phone": "010-1234-5678", "marketing_agreed": True,
+    })
+    assert res.status_code == 201
+    body = res.json()
+    assert body["user"]["email"] == "new@test.com"
+    assert "access_token" in body
+
+    me = client.get("/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"})
+    assert me.status_code == 200
+    assert me.json()["nickname"] == "새사장"
+
+    stores = client.get("/stores", headers={"Authorization": f"Bearer {body['access_token']}"}).json()
+    assert len(stores) == 1  # 가입 직후 빈 대시보드 방지용 기본 매장
+
+
+def test_phone_never_stored_raw(client, platforms, db_session):
+    from app.models import User
+
+    client.post("/auth/signup", json={
+        "email": "phonecheck@test.com", "password": "pw12345!", "nickname": "테스트",
+        "phone": "010-9999-0000",
+    })
+    user = db_session.query(User).filter_by(email="phonecheck@test.com").one()
+    assert user.phone_hash is not None
+    assert user.phone_hash != "010-9999-0000"
+    assert len(user.phone_hash) == 64  # SHA-256 hex
+
+
+def test_duplicate_signup_rejected(client, platforms):
+    payload = {"email": "dup@test.com", "password": "pw12345!", "nickname": "중복"}
+    assert client.post("/auth/signup", json=payload).status_code == 201
+    assert client.post("/auth/signup", json=payload).status_code == 409
+
+
+def test_login_wrong_password_rejected(client, seeded_user):
+    res = client.post("/auth/login", json={"email": "demo@dris.kr", "password": "wrong"})
+    assert res.status_code == 401
+
+
+def test_login_success_returns_token(auth_headers):
+    assert "Authorization" in auth_headers
+
+
+def test_protected_route_requires_token(client):
+    assert client.get("/dashboard").status_code == 401
+
+
+def test_protected_route_rejects_garbage_token(client):
+    res = client.get("/dashboard", headers={"Authorization": "Bearer not-a-real-token"})
+    assert res.status_code == 401
