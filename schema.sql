@@ -106,14 +106,16 @@ CREATE TABLE reply_styles (
 -- 7. reply_settings — 가게별 답글 설정. stores 1:1
 -- ----------------------------------------------------------------------------
 CREATE TABLE reply_settings (
-    id                 BIGSERIAL PRIMARY KEY,
-    store_id           BIGINT       NOT NULL UNIQUE REFERENCES stores(id)       ON DELETE CASCADE,
-    style_id           INT          NOT NULL        REFERENCES reply_styles(id) ON DELETE RESTRICT,
-    promo_text         VARCHAR(400),               -- 답글 끝에 붙는 홍보 문구 (최대 400자)
-    include_nickname   BOOLEAN      NOT NULL DEFAULT TRUE,
-    include_menu       BOOLEAN      NOT NULL DEFAULT TRUE,
-    include_store_name BOOLEAN      NOT NULL DEFAULT TRUE,
-    promo_on_negative  BOOLEAN      NOT NULL DEFAULT FALSE  -- 부정 리뷰에도 홍보 문구 포함 여부
+    id                    BIGSERIAL PRIMARY KEY,
+    store_id              BIGINT       NOT NULL UNIQUE REFERENCES stores(id)       ON DELETE CASCADE,
+    style_id              INT          NOT NULL        REFERENCES reply_styles(id) ON DELETE RESTRICT,
+    promo_text            VARCHAR(400),               -- 답글 끝에 붙는 홍보 문구 (최대 400자)
+    include_nickname      BOOLEAN      NOT NULL DEFAULT TRUE,
+    include_menu          BOOLEAN      NOT NULL DEFAULT TRUE,
+    include_store_name    BOOLEAN      NOT NULL DEFAULT TRUE,
+    promo_on_negative     BOOLEAN      NOT NULL DEFAULT FALSE, -- 부정 리뷰에도 홍보 문구 포함 여부
+    auto_reply_enabled    BOOLEAN      NOT NULL DEFAULT FALSE, -- 답글 규칙 설정 화면. Mock 뿐 — 실제 자동 등록은 하지 않는다
+    auto_reply_min_rating SMALLINT     NOT NULL DEFAULT 1 CHECK (auto_reply_min_rating BETWEEN 1 AND 5)
 );
 
 -- ----------------------------------------------------------------------------
@@ -153,12 +155,13 @@ CREATE TABLE reviews (
 CREATE INDEX idx_reviews_status ON reviews(status);
 
 -- ----------------------------------------------------------------------------
--- 10. review_replies — 답글. reviews 1:N (AI 추천 Mock 초안 + 사장 최종 답글)
+-- 10. review_replies — 답글. reviews 1:N
+--     ai_draft  = Mock 초안 / final = 사장 최종 답글 / secondary = 답글 완료 리뷰에 붙이는 2차(추가) 답글
 -- ----------------------------------------------------------------------------
 CREATE TABLE review_replies (
     id         BIGSERIAL PRIMARY KEY,
     review_id  BIGINT      NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
-    reply_type VARCHAR(10) NOT NULL CHECK (reply_type IN ('ai_draft', 'final')),
+    reply_type VARCHAR(10) NOT NULL CHECK (reply_type IN ('ai_draft', 'final', 'secondary')),
     style_id   INT         REFERENCES reply_styles(id) ON DELETE SET NULL,  -- 생성 당시 스타일 (이력 보존)
     content    TEXT        NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()

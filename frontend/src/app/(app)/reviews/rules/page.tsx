@@ -1,0 +1,96 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { Card } from "@/components/Card";
+import { apiGet, apiPut } from "@/lib/api";
+import { useStoreContext } from "@/lib/store-context";
+
+type ReplySettings = {
+  auto_reply_enabled: boolean;
+  auto_reply_min_rating: number;
+};
+
+export default function ReplyRulesPage() {
+  const { storeId } = useStoreContext();
+  const [settings, setSettings] = useState<ReplySettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (!storeId) return;
+    apiGet<ReplySettings>(`/reply-settings?store_id=${storeId}`).then(setSettings);
+  }, [storeId]);
+
+  const save = async (patch: Partial<ReplySettings>) => {
+    if (!settings || !storeId) return;
+    const next = { ...settings, ...patch };
+    setSettings(next);
+    setSaving(true);
+    setSaved(false);
+    try {
+      await apiPut(`/reply-settings?store_id=${storeId}`, patch);
+      setSaved(true);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!settings) return <p className="text-sm text-muted">불러오는 중...</p>;
+
+  return (
+    <div className="max-w-2xl space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold">답글 규칙 설정</h1>
+        <p className="text-sm text-muted">
+          자동 답글을 켜도 실제로 답글이 자동 등록되지 않습니다 (Mock) — 리뷰 관리 화면에서
+          조건에 맞는 리뷰에 안내 배지만 표시됩니다.
+        </p>
+      </div>
+
+      <Card>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium">자동 답글</p>
+            <p className="text-xs text-muted">{settings.auto_reply_enabled ? "켜짐" : "꺼짐"}</p>
+          </div>
+          <button
+            onClick={() => save({ auto_reply_enabled: !settings.auto_reply_enabled })}
+            className={`relative h-7 w-12 rounded-full transition ${settings.auto_reply_enabled ? "bg-accent" : "bg-surface-2"}`}
+          >
+            <span
+              className={`absolute top-1 h-5 w-5 rounded-full bg-white transition ${settings.auto_reply_enabled ? "left-6" : "left-1"}`}
+            />
+          </button>
+        </div>
+
+        {settings.auto_reply_enabled && (
+          <div className="mt-5 border-t border-border-subtle pt-5">
+            <label className="mb-2 block text-xs text-muted">
+              몇 점 이상 리뷰에 자동 답글을 적용할까요?
+            </label>
+            <div className="flex gap-2">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <button
+                  key={n}
+                  onClick={() => save({ auto_reply_min_rating: n })}
+                  className={`flex-1 rounded-lg py-2 text-sm font-medium transition ${
+                    settings.auto_reply_min_rating === n
+                      ? "bg-accent text-white"
+                      : "border border-border-subtle text-muted hover:text-foreground"
+                  }`}
+                >
+                  {n}점 ↑
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-muted">
+              현재: {settings.auto_reply_min_rating}점 이상 리뷰만 자동 답글 대상
+            </p>
+          </div>
+        )}
+
+        <p className="mt-4 text-xs text-muted">{saving ? "저장 중..." : saved ? "저장됨" : ""}</p>
+      </Card>
+    </div>
+  );
+}

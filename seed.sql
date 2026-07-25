@@ -89,9 +89,9 @@ INSERT INTO reply_styles (name, description, template_high, template_mid, templa
 -- ----------------------------------------------------------------------------
 -- 7. reply_settings — 가게별 답글 설정 (1호점: 발랄 이모지 파티, 2호점: 진중맨)
 -- ----------------------------------------------------------------------------
-INSERT INTO reply_settings (store_id, style_id, promo_text, include_nickname, include_menu, include_store_name, promo_on_negative) VALUES
-(1, 1, '📌 매주 화요일은 치즈볼 서비스 데이! 리뷰 이벤트도 진행 중이에요 💙', TRUE, TRUE, TRUE, FALSE),
-(2, 2, '점심 특선 1인 세트 새로 출시했습니다. 많은 관심 부탁드립니다.', TRUE, TRUE, TRUE, FALSE);
+INSERT INTO reply_settings (store_id, style_id, promo_text, include_nickname, include_menu, include_store_name, promo_on_negative, auto_reply_enabled, auto_reply_min_rating) VALUES
+(1, 1, '📌 매주 화요일은 치즈볼 서비스 데이! 리뷰 이벤트도 진행 중이에요 💙', TRUE, TRUE, TRUE, FALSE, TRUE, 4),
+(2, 2, '점심 특선 1인 세트 새로 출시했습니다. 많은 관심 부탁드립니다.', TRUE, TRUE, TRUE, FALSE, FALSE, 1);
 
 -- ----------------------------------------------------------------------------
 -- 8. orders — 최근 60일, 연결(매장×플랫폼)마다 하루 1~3건 (약 500건)
@@ -244,6 +244,10 @@ INSERT INTO ad_campaigns (store_id, category, current_cpc, target_rank, status) 
 --     캠페인1: CVR ≈ 0.17, AOV ≈ 25,000 → ACoS 한 자릿수 (양호)
 --     캠페인2: CVR ≈ 0.06, AOV ≈ 20,000 → ACoS 20%대 후반 (개선 필요 구간 포함)
 --     ※ ACoS·점수는 저장하지 않는다. acos.py가 조회 시 실제 공식으로 계산.
+--     ※ ACoS는 CPC/CVR/AOV "비율"에만 좌우되므로 clicks 절대량은 자유롭게 줄여도 무관하다.
+--       ad_orders는 반드시 같은 매장의 실제 주문(orders) 총량보다 작아야
+--       "우가클 주문 비중"(ad_orders÷전체 주문)이 100%를 넘지 않는다 — store_platform_connections당
+--       하루 1~3건인 orders 시드 규모에 맞춰 clicks를 작게 잡는다.
 -- ----------------------------------------------------------------------------
 INSERT INTO ad_performance_metrics (campaign_id, metric_date, ad_spend, clicks, ad_orders, ad_revenue)
 SELECT c.id, d.d::date,
@@ -254,7 +258,9 @@ SELECT c.id, d.d::date,
 FROM ad_campaigns c
 CROSS JOIN generate_series(CURRENT_DATE - 14, CURRENT_DATE - 1, interval '1 day') AS d(d)
 CROSS JOIN LATERAL (
-    SELECT CASE c.id WHEN 1 THEN 90 + floor(random() * 50)::int ELSE 40 + floor(random() * 30)::int END AS clicks
+    -- 캠페인2는 CVR이 낮아(0.04~0.09) clicks가 너무 작으면 반올림이 항상 최소 1건으로
+    -- 뭉개져 의도한 CVR을 못 낸다 — clicks를 더 크게 잡아 반올림 왜곡을 피한다.
+    SELECT CASE c.id WHEN 1 THEN 6 + floor(random() * 6)::int ELSE 15 + floor(random() * 10)::int END AS clicks
 ) cl
 CROSS JOIN LATERAL (
     SELECT greatest(1, round(cl.clicks * CASE c.id WHEN 1 THEN 0.15 + random() * 0.06 ELSE 0.04 + random() * 0.05 END)::int) AS ad_orders

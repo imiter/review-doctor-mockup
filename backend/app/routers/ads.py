@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.acos import calculate_performance
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
-from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, User
+from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, Order, User
 
 router = APIRouter(tags=["ads"])
 
@@ -25,6 +25,10 @@ def ads_performance(
     campaigns = db.scalars(select(AdCampaign).where(AdCampaign.store_id == sid)).all()
     since = date.today() - timedelta(days=days)
 
+    total_orders = db.scalar(
+        select(func.count(Order.id)).where(Order.store_id == sid, Order.ordered_at >= since)
+    )
+
     result = []
     for c in campaigns:
         agg = db.execute(
@@ -36,6 +40,7 @@ def ads_performance(
             ).where(AdPerformanceMetric.campaign_id == c.id, AdPerformanceMetric.metric_date >= since)
         ).one()
         perf = calculate_performance(*agg)
+        order_share = round(perf.ad_orders / total_orders, 4) if total_orders else None
         result.append({
             "campaign_id": c.id,
             "category": c.category,
@@ -51,6 +56,7 @@ def ads_performance(
             "aov": perf.aov,
             "acos": perf.acos,
             "score": perf.score,
+            "order_share": order_share,
         })
     return result
 

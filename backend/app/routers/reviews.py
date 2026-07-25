@@ -59,6 +59,7 @@ def list_reviews(
     for r in reviews:
         final_reply = next((rp for rp in r.replies if rp.reply_type == "final"), None)
         draft_reply = next((rp for rp in r.replies if rp.reply_type == "ai_draft"), None)
+        secondary_replies = [rp for rp in r.replies if rp.reply_type == "secondary"]
         result.append({
             "id": r.id,
             "order_id": r.order_id,
@@ -72,6 +73,10 @@ def list_reviews(
             "created_at": r.created_at.isoformat(),
             "final_reply": {"content": final_reply.content, "style_id": final_reply.style_id} if final_reply else None,
             "draft_reply": {"content": draft_reply.content, "style_id": draft_reply.style_id} if draft_reply else None,
+            "secondary_replies": [
+                {"id": rp.id, "content": rp.content, "created_at": rp.created_at.isoformat()}
+                for rp in sorted(secondary_replies, key=lambda rp: rp.created_at)
+            ],
         })
     return result
 
@@ -128,6 +133,31 @@ def save_final_reply(
         content=body.content, created_at=datetime.now(timezone.utc),
     )
     review.status = "answered"
+    db.add(reply)
+    db.commit()
+    return {"id": reply.id, "content": reply.content}
+
+
+class SecondaryReplyRequest(BaseModel):
+    content: str
+
+
+@router.post("/reviews/{review_id}/secondary-reply")
+def add_secondary_reply(
+    review_id: int, body: SecondaryReplyRequest,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """답글 완료 리뷰에 덧붙이는 2차(추가) 답글. 고객이 리뷰를 수정했거나 추가 안내가 필요할 때 사용."""
+    review = db.get(Review, review_id, options=[joinedload(Review.order).joinedload(Order.store)])
+    if review is None or review.order.store.user_id != user.id:
+        raise HTTPException(404, "리뷰 없음")
+    if review.status != "answered":
+        raise HTTPException(409, "1차 답글이 등록된 리뷰에만 2차 답글을 추가할 수 있습니다")
+
+    reply = ReviewReply(
+        review_id=review.id, reply_type="secondary", style_id=None,
+        content=body.content, created_at=datetime.now(timezone.utc),
+    )
     db.add(reply)
     db.commit()
     return {"id": reply.id, "content": reply.content}

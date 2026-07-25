@@ -100,6 +100,8 @@ class ReplySetting(Base):
     include_menu: Mapped[bool] = mapped_column(default=True)
     include_store_name: Mapped[bool] = mapped_column(default=True)
     promo_on_negative: Mapped[bool] = mapped_column(default=False)
+    auto_reply_enabled: Mapped[bool] = mapped_column(default=False)
+    auto_reply_min_rating: Mapped[int] = mapped_column(default=1)
 
     style: Mapped[ReplyStyle] = relationship()
 

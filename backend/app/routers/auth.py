@@ -35,7 +35,13 @@ class TokenResponse(BaseModel):
 
 
 def _user_dict(user: User) -> dict:
-    return {"id": user.id, "email": user.email, "nickname": user.nickname}
+    return {
+        "id": user.id,
+        "email": user.email,
+        "nickname": user.nickname,
+        "has_phone": user.phone_hash is not None,
+        "marketing_agreed": user.marketing_agreed,
+    }
 
 
 @router.post("/signup", status_code=201)
@@ -85,4 +91,22 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 
 @router.get("/me")
 def me(user: User = Depends(get_current_user)):
+    return _user_dict(user)
+
+
+class UpdateProfileRequest(BaseModel):
+    nickname: str | None = None
+    phone: str | None = None  # 원문은 저장하지 않고 즉시 해시
+    marketing_agreed: bool | None = None
+
+
+@router.patch("/me")
+def update_me(body: UpdateProfileRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if body.nickname is not None:
+        user.nickname = body.nickname
+    if body.phone is not None:
+        user.phone_hash = hashlib.sha256(body.phone.encode()).hexdigest()
+    if body.marketing_agreed is not None:
+        user.marketing_agreed = body.marketing_agreed
+    db.commit()
     return _user_dict(user)

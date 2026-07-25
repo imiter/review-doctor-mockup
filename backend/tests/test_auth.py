@@ -51,3 +51,30 @@ def test_protected_route_requires_token(client):
 def test_protected_route_rejects_garbage_token(client):
     res = client.get("/dashboard", headers={"Authorization": "Bearer not-a-real-token"})
     assert res.status_code == 401
+
+
+def test_update_profile_nickname(client, auth_headers):
+    res = client.patch("/auth/me", json={"nickname": "새사장님"}, headers=auth_headers)
+    assert res.status_code == 200
+    assert res.json()["nickname"] == "새사장님"
+
+    me = client.get("/auth/me", headers=auth_headers).json()
+    assert me["nickname"] == "새사장님"
+
+
+def test_update_profile_phone_is_hashed_not_stored_raw(client, db_session, seeded_user, auth_headers):
+    from app.models import User
+
+    res = client.patch("/auth/me", json={"phone": "010-5555-6666"}, headers=auth_headers)
+    assert res.status_code == 200
+    assert res.json()["has_phone"] is True
+
+    user = db_session.query(User).filter_by(email="demo@dris.kr").one()
+    assert user.phone_hash != "010-5555-6666"
+    assert len(user.phone_hash) == 64
+
+
+def test_update_profile_partial_does_not_clear_other_fields(client, auth_headers):
+    client.patch("/auth/me", json={"marketing_agreed": True}, headers=auth_headers)
+    res = client.patch("/auth/me", json={"nickname": "그대로"}, headers=auth_headers)
+    assert res.json()["marketing_agreed"] is True  # 앞서 켠 값 유지

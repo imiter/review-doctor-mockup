@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from "rea
 import { useRouter } from "next/navigation";
 import { apiGet, clearToken, getToken } from "@/lib/api";
 
-type MeResponse = { id: number; email: string; nickname: string };
+type MeResponse = { id: number; email: string; nickname: string; has_phone: boolean; marketing_agreed: boolean };
 type StoreOption = { id: number; name: string; category: string };
 
 type StoreContextValue = {
@@ -14,6 +14,7 @@ type StoreContextValue = {
   setStoreId: (id: number) => void;
   ready: boolean;
   logout: () => void;
+  refreshUser: () => Promise<void>;
 };
 
 const StoreContext = createContext<StoreContextValue | null>(null);
@@ -52,8 +53,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     router.replace("/login");
   }, [router]);
 
+  const refreshUser = useCallback(async () => {
+    setUser(await apiGet<MeResponse>("/auth/me"));
+  }, []);
+
   return (
-    <StoreContext.Provider value={{ user, stores, storeId, setStoreId, ready, logout }}>
+    <StoreContext.Provider value={{ user, stores, storeId, setStoreId, ready, logout, refreshUser }}>
       {children}
     </StoreContext.Provider>
   );

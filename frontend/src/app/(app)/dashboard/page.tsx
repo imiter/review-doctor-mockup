@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Card } from "@/components/Card";
+import { Modal } from "@/components/Modal";
 import { apiGet, percent, won } from "@/lib/api";
 import { useStoreContext } from "@/lib/store-context";
 
@@ -16,20 +18,157 @@ const PERIODS: { key: Period; label: string }[] = [
 type SummaryResponse = { total_sales?: number; total_deposit?: number; from_date: string; to_date: string };
 type DashboardResponse = {
   store: { id: number; name: string; category: string };
-  sales_today: number;
-  deposit_today: number;
   unanswered_reviews: number;
   repurchase_rate_adjusted: number | null;
   ad_performance: { campaign_id: number; category: string; acos: number | null; score: number | null } | null;
   unread_alerts: number;
 };
 type Alert = { id: number; alert_type: string; message: string; created_at: string };
+type AdPerformance = {
+  category: string; cpc: number; cvr: number; aov: number; acos: number | null; score: number | null;
+  order_share: number | null; clicks: number; ad_orders: number;
+};
+type DailyRow = { date: string; amount: number };
+type RepurchaseRow = { metric_date: string; new_orders: number; repeat_orders: number; rate_raw: number; rate_adjusted: number };
+type BreakdownRow = { platform_name: string; sales_amount: number; commission_estimate: number; payment_fee_estimate: number; net_estimate: number; actual_deposit: number };
 
 const ALERT_LABEL: Record<string, { label: string; color: string }> = {
   negative_review: { label: "부정 리뷰", color: "text-danger" },
   unanswered_review: { label: "미답변", color: "text-warning" },
   rank_drop: { label: "순위 하락", color: "text-danger" },
 };
+
+function ClickableCard({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      className="w-full rounded-2xl border border-border-subtle bg-surface p-5 text-left transition hover:border-accent hover:bg-surface-2"
+    >
+      <h2 className="mb-4 text-sm font-semibold text-foreground">{title}</h2>
+      {children}
+    </button>
+  );
+}
+
+function UgacleModal({ storeId }: { storeId: number }) {
+  const [perf, setPerf] = useState<AdPerformance | null>(null);
+  useEffect(() => {
+    apiGet<AdPerformance[]>(`/ads/performance?store_id=${storeId}&days=14`).then((rows) => setPerf(rows[0] ?? null));
+  }, [storeId]);
+
+  if (perf === null) return <p className="text-sm text-muted">등록된 광고 캠페인이 없어 우가클 점수를 계산할 수 없습니다.</p>;
+  return (
+    <div>
+      <p className="mb-4 rounded-lg bg-surface-2 p-3 text-xs text-muted">
+        조회 시점의 클릭당 단가 기준으로 지표를 계산합니다. 최근 14일 광고 성과 원본을 집계한 값입니다.
+      </p>
+      <p className="mb-3 text-sm font-medium">{perf.category} 캠페인</p>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-lg bg-surface-2 p-3">
+          <p className="text-xs text-muted">주문전환율 (CVR)</p>
+          <p className="mt-1 text-lg font-bold">{(perf.cvr * 100).toFixed(1)}%</p>
+        </div>
+        <div className="rounded-lg bg-surface-2 p-3">
+          <p className="text-xs text-muted">주문당 광고비율 (ACoS)</p>
+          <p className="mt-1 text-lg font-bold">{perf.acos !== null ? `${perf.acos}%` : "—"}</p>
+        </div>
+        <div className="rounded-lg bg-surface-2 p-3">
+          <p className="text-xs text-muted">우가클 주문 비중</p>
+          <p className="mt-1 text-lg font-bold">{perf.order_share !== null ? percent(perf.order_share) : "—"}</p>
+          <p className="mt-0.5 text-[11px] text-muted">전체 주문 중 광고 경유 비중</p>
+        </div>
+        <div className="rounded-lg bg-surface-2 p-3">
+          <p className="text-xs text-muted">클릭당 단가 (CPC)</p>
+          <p className="mt-1 text-lg font-bold">{won(Math.round(perf.cpc))}</p>
+        </div>
+      </div>
+      <div className="mt-4 flex items-center justify-between rounded-lg border border-accent/30 bg-accent-soft p-3">
+        <span className="text-xs text-muted">종합 성과 점수</span>
+        <span className="text-xl font-bold text-accent">{perf.score ?? "—"}점</span>
+      </div>
+    </div>
+  );
+}
+
+function SalesBreakdownModal({ storeId, period }: { storeId: number; period: Period }) {
+  const [data, setData] = useState<{ platforms: BreakdownRow[] } | null>(null);
+  useEffect(() => {
+    apiGet<{ platforms: BreakdownRow[] }>(`/sales/breakdown?period=${period}&store_id=${storeId}`).then(setData);
+  }, [storeId, period]);
+
+  if (!data) return <p className="text-sm text-muted">불러오는 중...</p>;
+  if (data.platforms.length === 0) return <p className="text-sm text-muted">해당 기간 매출 데이터가 없습니다.</p>;
+
+  return (
+    <div className="space-y-4">
+      <p className="rounded-lg bg-surface-2 p-3 text-xs text-muted">
+        중개수수료·결제수수료는 플랫폼 기본 요율로 추정한 값입니다. 실제 입금액은 정산 주기(D+3)
+        차이로 추정치와 다를 수 있습니다 — 이 차이가 &quot;매출과 입금이 다르다&quot;는 현장 문제입니다.
+      </p>
+      {data.platforms.map((p) => (
+        <div key={p.platform_name} className="rounded-lg border border-border-subtle p-4">
+          <p className="mb-2 text-sm font-medium text-accent">{p.platform_name}</p>
+          <dl className="space-y-1 text-sm">
+            <div className="flex justify-between"><dt className="text-muted">매출액</dt><dd>{won(p.sales_amount)}</dd></div>
+            <div className="flex justify-between text-danger"><dt>− 중개수수료(추정)</dt><dd>−{won(p.commission_estimate)}</dd></div>
+            <div className="flex justify-between text-danger"><dt>− 결제수수료(추정)</dt><dd>−{won(p.payment_fee_estimate)}</dd></div>
+            <div className="flex justify-between border-t border-border-subtle pt-1 font-semibold"><dt>추정 정산액</dt><dd>{won(p.net_estimate)}</dd></div>
+            <div className="flex justify-between text-success"><dt>실제 입금액</dt><dd>{won(p.actual_deposit)}</dd></div>
+          </dl>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RepurchaseModal({ storeId }: { storeId: number }) {
+  const [rows, setRows] = useState<RepurchaseRow[]>([]);
+  useEffect(() => {
+    apiGet<RepurchaseRow[]>(`/repurchase/summary?store_id=${storeId}&days=14`).then((r) => setRows(r.reverse()));
+  }, [storeId]);
+
+  return (
+    <div className="space-y-2">
+      <p className="mb-2 rounded-lg bg-surface-2 p-3 text-xs text-muted">
+        보정 후 재주문율은 해당 날짜 기준 이전 7일 합산 기준입니다.
+      </p>
+      {rows.map((r) => (
+        <div key={r.metric_date} className="flex items-center justify-between rounded-lg border border-border-subtle px-4 py-2.5 text-sm">
+          <span className="text-muted">{r.metric_date}</span>
+          <span>신규 {r.new_orders} · 재주문 {r.repeat_orders}</span>
+          <span className="font-semibold text-accent">{percent(r.rate_adjusted)}</span>
+        </div>
+      ))}
+      {rows.length === 0 && <p className="text-sm text-muted">데이터가 없습니다.</p>}
+    </div>
+  );
+}
+
+function DailyAmountModal({ storeId, endpoint, positive }: { storeId: number; endpoint: string; positive: boolean }) {
+  const [rows, setRows] = useState<DailyRow[]>([]);
+  useEffect(() => {
+    apiGet<DailyRow[]>(`${endpoint}?store_id=${storeId}&days=14`).then((r) => setRows([...r].reverse()));
+  }, [storeId, endpoint]);
+
+  const max = Math.max(1, ...rows.map((r) => r.amount));
+  return (
+    <div className="space-y-2">
+      {rows.map((r) => (
+        <div key={r.date} className="flex items-center gap-3">
+          <span className="w-24 shrink-0 text-xs text-muted">{r.date}</span>
+          <div className="h-2 flex-1 overflow-hidden rounded-full bg-surface-2">
+            <div
+              className={`h-full rounded-full ${positive ? "bg-success" : "bg-accent"}`}
+              style={{ width: `${(r.amount / max) * 100}%` }}
+            />
+          </div>
+          <span className="w-28 shrink-0 text-right text-sm font-medium">{won(r.amount)}</span>
+        </div>
+      ))}
+      {rows.length === 0 && <p className="text-sm text-muted">데이터가 없습니다.</p>}
+    </div>
+  );
+}
 
 export default function DashboardPage() {
   const { storeId } = useStoreContext();
@@ -38,6 +177,7 @@ export default function DashboardPage() {
   const [sales, setSales] = useState<SummaryResponse | null>(null);
   const [deposits, setDeposits] = useState<SummaryResponse | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [openModal, setOpenModal] = useState<"ugacle" | "sales_breakdown" | "repurchase" | "sales_daily" | "deposit_daily" | null>(null);
 
   useEffect(() => {
     if (!storeId) return;
@@ -51,13 +191,13 @@ export default function DashboardPage() {
     apiGet<SummaryResponse>(`/deposits/summary?period=${period}&store_id=${storeId}`).then(setDeposits);
   }, [storeId, period]);
 
-  if (!dashboard) return <p className="text-sm text-muted">불러오는 중...</p>;
+  if (!dashboard || !storeId) return <p className="text-sm text-muted">불러오는 중...</p>;
 
   return (
     <div className="max-w-6xl space-y-6">
       <div>
         <h1 className="text-xl font-semibold">{dashboard.store.name}</h1>
-        <p className="text-sm text-muted">{dashboard.store.category} · 대시보드 요약 (Mock 데이터)</p>
+        <p className="text-sm text-muted">{dashboard.store.category} · 카드를 클릭하면 상세를 볼 수 있습니다 (Mock 데이터)</p>
       </div>
 
       <div className="flex items-center gap-2">
@@ -74,48 +214,41 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Card title="매출">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <ClickableCard title="우가클 점수" onClick={() => setOpenModal("ugacle")}>
+          <p className="text-2xl font-bold text-accent">{dashboard.ad_performance?.score ?? "—"}점</p>
+          <p className="mt-1 text-xs text-muted">ACoS {dashboard.ad_performance?.acos ?? "—"}%</p>
+        </ClickableCard>
+        <ClickableCard title="매출 분석" onClick={() => setOpenModal("sales_breakdown")}>
           <p className="text-2xl font-bold">{sales ? won(sales.total_sales ?? 0) : "…"}</p>
-          <p className="mt-1 text-xs text-muted">{sales ? `${sales.from_date} ~ ${sales.to_date}` : ""}</p>
-        </Card>
-        <Card title="입금">
-          <p className="text-2xl font-bold text-success">{deposits ? won(deposits.total_deposit ?? 0) : "…"}</p>
-          <p className="mt-1 text-xs text-muted">정산 지연 반영 (D+3 가정)</p>
-        </Card>
-        <Card title="답글 대기 리뷰">
-          <p className="text-2xl font-bold text-warning">{dashboard.unanswered_reviews}건</p>
-          <p className="mt-1 text-xs text-muted">리뷰 관리에서 바로 답글 생성</p>
-        </Card>
-        <Card title="재주문율 (보정 후)">
+          <p className="mt-1 text-xs text-muted">정산표 · 손익 상세 보기</p>
+        </ClickableCard>
+        <ClickableCard title="재주문율 (보정 후)" onClick={() => setOpenModal("repurchase")}>
           <p className="text-2xl font-bold">
             {dashboard.repurchase_rate_adjusted !== null ? percent(dashboard.repurchase_rate_adjusted) : "—"}
           </p>
           <p className="mt-1 text-xs text-muted">최근 7일 합산 기준</p>
-        </Card>
+        </ClickableCard>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <ClickableCard title="매출" onClick={() => setOpenModal("sales_daily")}>
+          <p className="text-2xl font-bold">{sales ? won(sales.total_sales ?? 0) : "…"}</p>
+          <p className="mt-1 text-xs text-muted">{sales ? `${sales.from_date} ~ ${sales.to_date}` : ""}</p>
+        </ClickableCard>
+        <ClickableCard title="입금" onClick={() => setOpenModal("deposit_daily")}>
+          <p className="text-2xl font-bold text-success">{deposits ? won(deposits.total_deposit ?? 0) : "…"}</p>
+          <p className="mt-1 text-xs text-muted">정산 지연 반영 (D+3 가정)</p>
+        </ClickableCard>
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card title="광고 성과 (ACoS)">
-          {dashboard.ad_performance ? (
-            <div className="flex items-end justify-between">
-              <div>
-                <p className="text-xs text-muted">{dashboard.ad_performance.category} 캠페인</p>
-                <p className="mt-1 text-2xl font-bold">
-                  {dashboard.ad_performance.acos !== null ? `${dashboard.ad_performance.acos}%` : "—"}
-                </p>
-              </div>
-              <div className="text-right">
-                <p className="text-xs text-muted">성과 점수</p>
-                <p className="text-lg font-semibold text-accent">{dashboard.ad_performance.score ?? "—"}점</p>
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm text-muted">등록된 광고 캠페인이 없습니다.</p>
-          )}
-          <p className="mt-3 text-[11px] text-muted">ACoS = CPC ÷ (CVR × AOV) × 100 — 최근 14일 실계산</p>
+        <Card title="답글 대기 리뷰">
+          <div className="flex items-end justify-between">
+            <p className="text-2xl font-bold text-warning">{dashboard.unanswered_reviews}건</p>
+            <Link href="/reviews" className="text-xs text-accent hover:underline">리뷰 관리로 이동 →</Link>
+          </div>
         </Card>
-
         <Card title={`알림 (${dashboard.unread_alerts}건 안읽음)`}>
           {alerts.length === 0 ? (
             <p className="text-sm text-muted">알림이 없습니다.</p>
@@ -136,6 +269,22 @@ export default function DashboardPage() {
           )}
         </Card>
       </div>
+
+      {openModal === "ugacle" && (
+        <Modal title="우가클 점수" onClose={() => setOpenModal(null)}><UgacleModal storeId={storeId} /></Modal>
+      )}
+      {openModal === "sales_breakdown" && (
+        <Modal title="매출 분석" onClose={() => setOpenModal(null)}><SalesBreakdownModal storeId={storeId} period={period} /></Modal>
+      )}
+      {openModal === "repurchase" && (
+        <Modal title="재주문율" onClose={() => setOpenModal(null)}><RepurchaseModal storeId={storeId} /></Modal>
+      )}
+      {openModal === "sales_daily" && (
+        <Modal title="일별 매출" onClose={() => setOpenModal(null)}><DailyAmountModal storeId={storeId} endpoint="/sales/daily" positive={false} /></Modal>
+      )}
+      {openModal === "deposit_daily" && (
+        <Modal title="일별 입금" onClose={() => setOpenModal(null)}><DailyAmountModal storeId={storeId} endpoint="/deposits/daily" positive={true} /></Modal>
+      )}
     </div>
   );
 }
