@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, won } from "@/lib/api";
 
 type Row = {
@@ -25,11 +25,24 @@ export default function SettlementsPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [platform, setPlatform] = useState("");
   const [detail, setDetail] = useState<Detail | null>(null);
+  const detailReq = useRef(0);
+  const listReq = useRef(0);
 
   const load = useCallback(async () => {
+    const token = ++listReq.current;
     const qs = platform ? `?platform_code=${platform}` : "";
-    setRows(await apiGet<Row[]>(`/api/settlements${qs}`));
-    setDetail(null);
+    try {
+      const data = await apiGet<Row[]>(`/api/settlements${qs}`);
+      if (listReq.current === token) {
+        setRows(data);
+        setDetail(null);
+      }
+    } catch (e) {
+      if (listReq.current === token) {
+        console.error(e);
+        setRows([]);
+      }
+    }
   }, [platform]);
 
   useEffect(() => { load(); }, [load]);
@@ -47,7 +60,18 @@ export default function SettlementsPage() {
           </tr></thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.id} onClick={async () => setDetail(await apiGet<Detail>(`/api/settlements/${r.id}`))}
+              <tr key={r.id} onClick={async () => {
+                const token = ++detailReq.current;
+                try {
+                  const d = await apiGet<Detail>(`/api/settlements/${r.id}`);
+                  if (detailReq.current === token) setDetail(d);
+                } catch (e) {
+                  if (detailReq.current === token) {
+                    console.error(e);
+                    setDetail(null);
+                  }
+                }
+              }}
                 className={`cursor-pointer border-b hover:bg-gray-50 ${detail?.id === r.id ? "bg-blue-50" : ""}`}>
                 <td className="py-2">{r.period_start} ~ {r.period_end}</td>
                 <td>{r.store_name}<span className="text-gray-400"> · {r.platform_name}</span></td>
