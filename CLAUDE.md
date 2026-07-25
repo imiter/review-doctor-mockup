@@ -121,3 +121,8 @@ CPC, 상태, 추천 액션을 담는다. 실제 순위 수집(크롤링/스크�
 ## 추가 합의 사항 (대화에서 확정)
 - 로그인: 이메일 기반 간단 로그인 구현 (소셜 로그인 제외, 추후 추가).
 - 결제/구독 결제 플로우: 추후. subscriptions 테이블과 플랜 표시까지만.
+- users에 password_hash 컬럼 추가 (bcrypt, 이메일 로그인용. 비밀번호 원문 저장 금지).
+- orders에 platform_id FK 추가 (주문내역 플랫폼 표시, 플랫폼별 분석용).
+- ad_performance_metrics는 원본(광고비·클릭수·광고주문수·광고매출)만 저장.
+  CPC/CVR/AOV/ACoS/점수는 acos.py가 조회 시 실제 공식으로 계산 (정규화 원칙 준수).
+- Alembic 제거. schema.sql + seed.sql이 DB 정본 산출물. SQLAlchemy 모델은 schema.sql에 1:1로 맞춤.

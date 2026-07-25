@@ -1,0 +1,266 @@
+-- ============================================================================
+-- Delivery Review & Store Insight MVP — PostgreSQL Schema
+-- ============================================================================
+-- 16개 테이블. 모든 FK에 ON DELETE 정책 명시.
+--
+-- 삭제 정책 원칙:
+--   ON DELETE CASCADE  — 부모에 종속된 소유 데이터 (사장 탈퇴 → 매장/주문/리뷰 연쇄 삭제)
+--   ON DELETE RESTRICT — 마스터 테이블 보호 (참조 중인 플랫폼/스타일은 삭제 불가)
+--   ON DELETE SET NULL — 이력 보존 (스타일이 삭제돼도 과거 답글은 남긴다)
+--
+-- 개인정보 원칙:
+--   전화번호는 phone_hash(SHA-256)로만 저장. 원문 저장 금지.
+--   사업자번호·스토어 아이디·주문번호는 전부 Mock 값.
+--   주민번호·실명은 받지 않는다.
+--
+-- 금액은 전부 원 단위 정수(INT). 비율(CVR, 재주문율)은 소수 0~1의 NUMERIC.
+-- ============================================================================
+
+BEGIN;
+
+DROP TABLE IF EXISTS
+    alerts, ad_rank_snapshots, ad_performance_metrics, ad_campaigns,
+    repurchase_metrics, daily_settlements, review_replies, reviews, orders,
+    reply_settings, reply_styles, subscriptions, store_platform_connections,
+    platforms, stores, users
+CASCADE;
+
+-- ----------------------------------------------------------------------------
+-- 1. users — 사장 계정 (컬럼 최소화, 개인정보 비식별화)
+-- ----------------------------------------------------------------------------
+CREATE TABLE users (
+    id               BIGSERIAL PRIMARY KEY,
+    email            VARCHAR(255) NOT NULL UNIQUE,
+    password_hash    VARCHAR(255) NOT NULL,        -- bcrypt. 이메일 로그인용 (합의 사항)
+    nickname         VARCHAR(50)  NOT NULL,
+    phone_hash       CHAR(64),                     -- SHA-256 hex. 전화번호 원문 저장 금지
+    marketing_agreed BOOLEAN      NOT NULL DEFAULT FALSE,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- ----------------------------------------------------------------------------
+-- 2. stores — 매장. users 1:N stores
+-- ----------------------------------------------------------------------------
+CREATE TABLE stores (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT       NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name       VARCHAR(100) NOT NULL,
+    category   VARCHAR(30)  NOT NULL,              -- 치킨, 닭갈비 등 (광고 카테고리와 동일 체계)
+    address    VARCHAR(200),
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_stores_user ON stores(user_id);
+
+-- ----------------------------------------------------------------------------
+-- 3. platforms — 배달 플랫폼 마스터 (로고/수수료율 확장 대비)
+-- ----------------------------------------------------------------------------
+CREATE TABLE platforms (
+    id                      SERIAL PRIMARY KEY,
+    code                    VARCHAR(20) NOT NULL UNIQUE,  -- baemin | coupang_eats | yogiyo ...
+    name                    VARCHAR(50) NOT NULL,
+    brand_color             VARCHAR(7),                   -- 화면 뱃지용 HEX (로고 확장 대비)
+    default_commission_rate NUMERIC(5,4)                  -- 0.0680 = 6.8% (확장 대비)
+);
+
+-- ----------------------------------------------------------------------------
+-- 4. store_platform_connections — 매장:플랫폼 N:M 중간 테이블 (가게 연결 화면)
+-- ----------------------------------------------------------------------------
+CREATE TABLE store_platform_connections (
+    id                BIGSERIAL PRIMARY KEY,
+    store_id          BIGINT      NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
+    platform_id       INT         NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
+    platform_store_id VARCHAR(30) NOT NULL,       -- Mock 스토어 아이디
+    business_number   VARCHAR(20),                -- Mock 사업자번호
+    connected_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (store_id, platform_id)
+);
+
+-- ----------------------------------------------------------------------------
+-- 5. subscriptions — Basic/Pro 플랜, 하루 답글 생성 한도 (결제 플로우는 범위 외)
+-- ----------------------------------------------------------------------------
+CREATE TABLE subscriptions (
+    id                BIGSERIAL PRIMARY KEY,
+    user_id           BIGINT      NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    plan              VARCHAR(10) NOT NULL DEFAULT 'basic' CHECK (plan IN ('basic', 'pro')),
+    daily_reply_limit INT         NOT NULL DEFAULT 10,     -- basic: 하루 답글 생성 한도
+    started_at        DATE        NOT NULL,
+    expires_at        DATE                                 -- NULL = 무기한 (무료 플랜)
+);
+
+-- ----------------------------------------------------------------------------
+-- 6. reply_styles — 답글 말투 스타일 마스터 (페르소나 4종)
+--    답글 생성은 템플릿 기반 Mock이므로, 별점대별 템플릿을 스타일에 내장한다.
+--    플레이스홀더: {nickname}, {menu}, {store}
+-- ----------------------------------------------------------------------------
+CREATE TABLE reply_styles (
+    id            SERIAL PRIMARY KEY,
+    name          VARCHAR(30)  NOT NULL UNIQUE,   -- 발랄 이모지 파티 / 진중맨 / 무난 요정 / 진지한 하이개그
+    description   VARCHAR(200) NOT NULL,          -- 페르소나 설명 (예: 발랄한 20대 여사장님 말투)
+    template_high TEXT         NOT NULL,          -- 4~5점 리뷰용 템플릿
+    template_mid  TEXT         NOT NULL,          -- 3점 리뷰용 템플릿
+    template_low  TEXT         NOT NULL           -- 1~2점 리뷰용 템플릿
+);
+
+-- ----------------------------------------------------------------------------
+-- 7. reply_settings — 가게별 답글 설정. stores 1:1
+-- ----------------------------------------------------------------------------
+CREATE TABLE reply_settings (
+    id                 BIGSERIAL PRIMARY KEY,
+    store_id           BIGINT       NOT NULL UNIQUE REFERENCES stores(id)       ON DELETE CASCADE,
+    style_id           INT          NOT NULL        REFERENCES reply_styles(id) ON DELETE RESTRICT,
+    promo_text         VARCHAR(400),               -- 답글 끝에 붙는 홍보 문구 (최대 400자)
+    include_nickname   BOOLEAN      NOT NULL DEFAULT TRUE,
+    include_menu       BOOLEAN      NOT NULL DEFAULT TRUE,
+    include_store_name BOOLEAN      NOT NULL DEFAULT TRUE,
+    promo_on_negative  BOOLEAN      NOT NULL DEFAULT FALSE  -- 부정 리뷰에도 홍보 문구 포함 여부
+);
+
+-- ----------------------------------------------------------------------------
+-- 8. orders — 주문내역. stores 1:N orders
+--    platform_id: 주문내역 화면의 플랫폼 뱃지·플랫폼별 분석용 (합의 사항)
+-- ----------------------------------------------------------------------------
+CREATE TABLE orders (
+    id           BIGSERIAL PRIMARY KEY,
+    store_id     BIGINT       NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
+    platform_id  INT          NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
+    order_no     VARCHAR(30)  NOT NULL UNIQUE,    -- Mock 주문번호 (예: T2ET0001K2T5)
+    ordered_at   TIMESTAMPTZ  NOT NULL,
+    menu_summary VARCHAR(200) NOT NULL,           -- 주문 메뉴 요약 (예: [20%할인]숯불바베큐두마리 SET)
+    order_type   VARCHAR(10)  NOT NULL CHECK (order_type IN ('delivery', 'takeout')),
+    amount       INT          NOT NULL CHECK (amount >= 0)   -- 주문금액 (원)
+);
+
+CREATE INDEX idx_orders_store_time    ON orders(store_id, ordered_at);
+CREATE INDEX idx_orders_platform_time ON orders(platform_id, ordered_at);
+
+-- ----------------------------------------------------------------------------
+-- 9. reviews — 리뷰. orders 1:1 reviews (핵심 외래키: reviews.order_id)
+--    상태: unanswered(미등록) → pending(등록 대기: AI 초안 생성됨) → answered(등록 완료)
+-- ----------------------------------------------------------------------------
+CREATE TABLE reviews (
+    id                   BIGSERIAL PRIMARY KEY,
+    order_id             BIGINT      NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+    rating               SMALLINT    NOT NULL CHECK (rating BETWEEN 1 AND 5),
+    content              TEXT        NOT NULL,
+    customer_nickname    VARCHAR(50) NOT NULL,    -- 닉네임만 저장, 실명 아님
+    customer_order_count INT         NOT NULL DEFAULT 1,  -- 이 고객의 누적 주문 횟수 (n회 주문 표시)
+    status               VARCHAR(12) NOT NULL DEFAULT 'unanswered'
+                         CHECK (status IN ('unanswered', 'pending', 'answered')),
+    created_at           TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX idx_reviews_status ON reviews(status);
+
+-- ----------------------------------------------------------------------------
+-- 10. review_replies — 답글. reviews 1:N (AI 추천 Mock 초안 + 사장 최종 답글)
+-- ----------------------------------------------------------------------------
+CREATE TABLE review_replies (
+    id         BIGSERIAL PRIMARY KEY,
+    review_id  BIGINT      NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+    reply_type VARCHAR(10) NOT NULL CHECK (reply_type IN ('ai_draft', 'final')),
+    style_id   INT         REFERENCES reply_styles(id) ON DELETE SET NULL,  -- 생성 당시 스타일 (이력 보존)
+    content    TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_review_replies_review ON review_replies(review_id);
+
+-- ----------------------------------------------------------------------------
+-- 11. daily_settlements — 일별 매출과 입금을 함께 저장 (정산 지연 반영)
+--     매출 요약 테이블은 따로 두지 않는다. 기간 요약은 이 테이블을 집계한다.
+-- ----------------------------------------------------------------------------
+CREATE TABLE daily_settlements (
+    id             BIGSERIAL PRIMARY KEY,
+    store_id       BIGINT NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
+    platform_id    INT    NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
+    settle_date    DATE   NOT NULL,
+    sales_amount   INT    NOT NULL DEFAULT 0 CHECK (sales_amount >= 0),   -- 그날 발생한 매출액 (원)
+    deposit_amount INT    NOT NULL DEFAULT 0 CHECK (deposit_amount >= 0), -- 그날 실제 입금된 금액 (원)
+    UNIQUE (store_id, platform_id, settle_date)
+);
+
+-- ----------------------------------------------------------------------------
+-- 12. repurchase_metrics — 날짜별 재주문율 (보정 전 = 당일, 보정 후 = 이전 7일 합산)
+--     비율은 반드시 소수 0~1로 저장한다 (25.5% = 0.2550)
+-- ----------------------------------------------------------------------------
+CREATE TABLE repurchase_metrics (
+    id            BIGSERIAL PRIMARY KEY,
+    store_id      BIGINT       NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
+    platform_id   INT          NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
+    metric_date   DATE         NOT NULL,
+    new_orders    INT          NOT NULL DEFAULT 0,
+    repeat_orders INT          NOT NULL DEFAULT 0,
+    rate_raw      NUMERIC(5,4) NOT NULL CHECK (rate_raw      BETWEEN 0 AND 1),  -- 보정 전
+    rate_adjusted NUMERIC(5,4) NOT NULL CHECK (rate_adjusted BETWEEN 0 AND 1),  -- 보정 후 (7일 합산)
+    UNIQUE (store_id, platform_id, metric_date)
+);
+
+-- ----------------------------------------------------------------------------
+-- 13. ad_campaigns — 광고 캠페인. stores 1:N
+-- ----------------------------------------------------------------------------
+CREATE TABLE ad_campaigns (
+    id          BIGSERIAL PRIMARY KEY,
+    store_id    BIGINT      NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    category    VARCHAR(30) NOT NULL,               -- 노출 카테고리 (예: 치킨)
+    current_cpc INT         NOT NULL CHECK (current_cpc >= 0),   -- 현재 클릭당 단가 (원)
+    target_rank SMALLINT    NOT NULL CHECK (target_rank >= 1),   -- 목표 순위
+    status      VARCHAR(10) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused'))
+);
+
+CREATE INDEX idx_ad_campaigns_store ON ad_campaigns(store_id);
+
+-- ----------------------------------------------------------------------------
+-- 14. ad_performance_metrics — 일별 광고 성과 원본
+--     계산값(CPC·CVR·AOV·ACoS·점수)은 저장하지 않는다 (정규화 원칙, 합의 사항).
+--     acos.py가 조회 시 실제 공식으로 계산:
+--       CPC = ad_spend ÷ clicks
+--       CVR = ad_orders ÷ clicks          (소수 0~1. 18.4% = 0.184)
+--       AOV = ad_revenue ÷ ad_orders
+--       ACoS(%) = CPC ÷ (CVR × AOV) × 100
+-- ----------------------------------------------------------------------------
+CREATE TABLE ad_performance_metrics (
+    id          BIGSERIAL PRIMARY KEY,
+    campaign_id BIGINT NOT NULL REFERENCES ad_campaigns(id) ON DELETE CASCADE,
+    metric_date DATE   NOT NULL,
+    ad_spend    INT    NOT NULL DEFAULT 0 CHECK (ad_spend   >= 0),  -- 광고비 (원)
+    clicks      INT    NOT NULL DEFAULT 0 CHECK (clicks     >= 0),  -- 클릭수
+    ad_orders   INT    NOT NULL DEFAULT 0 CHECK (ad_orders  >= 0),  -- 광고 경유 주문수
+    ad_revenue  INT    NOT NULL DEFAULT 0 CHECK (ad_revenue >= 0),  -- 광고 경유 매출 (원)
+    UNIQUE (campaign_id, metric_date)
+);
+
+-- ----------------------------------------------------------------------------
+-- 15. ad_rank_snapshots — 시간별 순위 스냅샷 (창의 기능: 광고 순위 모니터링)
+--     실제 순위 수집은 하지 않는다. 수집됐다고 가정한 결과만 Mock으로 저장.
+--     suggested_cpc: 추천 액션이 raise/lower일 때 제안 CPC ("CPC 700원으로 인상" 표시용)
+-- ----------------------------------------------------------------------------
+CREATE TABLE ad_rank_snapshots (
+    id                 BIGSERIAL PRIMARY KEY,
+    campaign_id        BIGINT      NOT NULL REFERENCES ad_campaigns(id) ON DELETE CASCADE,
+    snapshot_at        TIMESTAMPTZ NOT NULL,
+    current_rank       SMALLINT    NOT NULL CHECK (current_rank >= 1),
+    competitor_est_cpc INT         NOT NULL CHECK (competitor_est_cpc >= 0),  -- 경쟁 가게 예상 CPC (Mock)
+    status             VARCHAR(12) NOT NULL CHECK (status IN ('normal', 'rank_dropped')),
+    recommended_action VARCHAR(10) NOT NULL DEFAULT 'keep'
+                       CHECK (recommended_action IN ('keep', 'raise_cpc', 'lower_cpc')),
+    suggested_cpc      INT         CHECK (suggested_cpc >= 0),
+    UNIQUE (campaign_id, snapshot_at)
+);
+
+-- ----------------------------------------------------------------------------
+-- 16. alerts — 알림 (부정 리뷰 / 미답변 / 순위 하락). 발송은 하지 않고 화면 표시만.
+-- ----------------------------------------------------------------------------
+CREATE TABLE alerts (
+    id         BIGSERIAL PRIMARY KEY,
+    store_id   BIGINT       NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    alert_type VARCHAR(20)  NOT NULL
+               CHECK (alert_type IN ('negative_review', 'unanswered_review', 'rank_drop')),
+    message    VARCHAR(300) NOT NULL,
+    is_read    BOOLEAN      NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_alerts_store_unread ON alerts(store_id, is_read);
+
+COMMIT;
