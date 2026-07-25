@@ -47,3 +47,8 @@ def test_settlement_detail_breakdown(client, db_session):
     by_type = {d["type"]: d["amount"] for d in body["deductions_by_type"]}
     assert by_type == {"platform_commission": 1224, "delivery_fee": 3300}
     assert body["orders"][0]["deduction_total"] == 4524
+
+
+def test_settlement_detail_404(client, db_session):
+    res = client.get("/api/settlements/99999")
+    assert res.status_code == 404

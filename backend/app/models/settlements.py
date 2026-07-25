@@ -19,6 +19,7 @@ class Settlement(Base):
     net_payout: Mapped[int]
     status: Mapped[str] = mapped_column(String(20))  # scheduled | paid
 
+    store_platform: Mapped["StorePlatform"] = relationship()
     orders: Mapped[list["Order"]] = relationship(back_populates="settlement")
 
 
@@ -47,3 +48,6 @@ class OrderDeduction(Base):
     amount: Mapped[int]
 
     order: Mapped[Order] = relationship(back_populates="deductions")
+
+
+from app.models.core import StorePlatform  # noqa: E402  (관계 타입 해석용)
