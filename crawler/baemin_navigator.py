@@ -107,9 +107,22 @@ def navigate_to_category(driver, category_label: str) -> None:
         time.sleep(2)
 
 
-def scroll_and_collect(driver, max_scrolls: int = 30) -> list[str]:
-    """리스트를 아래로 스크롤하며 매번 page_source를 누적 수집한다."""
+def scroll_and_collect(driver, max_scrolls: int = 30, target_name: str | None = None) -> list[str]:
+    """리스트를 아래로 스크롤하며 매번 page_source를 누적 수집한다.
+
+    target_name을 주면 매 스크롤 후 누적 소스에서 해당 가게를 찾았는지
+    확인해 찾으면 즉시 멈춘다 — 스펙의 "가게를 찾은 시점에 스크린샷을
+    저장한다" 요구사항을 만족하려면 호출부가 이 함수가 반환한 직후 곧바로
+    스크린샷을 찍어야 화면에 가게가 보이는 증빙이 남는다(호출부 책임)."""
+    from rank_finder import find_rank, parse_items  # 순환 의존 방지용 지역 임포트
+
+    def _already_found(sources: list[str]) -> bool:
+        return target_name is not None and find_rank(parse_items(sources), target_name)["rank"] is not None
+
     sources = [driver.page_source]
+    if _already_found(sources):
+        return sources
+
     size = driver.get_window_size()
     start_y = int(size["height"] * 0.8)
     end_y = int(size["height"] * 0.2)
@@ -122,4 +135,6 @@ def scroll_and_collect(driver, max_scrolls: int = 30) -> list[str]:
         })
         time.sleep(0.5)
         sources.append(driver.page_source)
+        if _already_found(sources):
+            break
     return sources

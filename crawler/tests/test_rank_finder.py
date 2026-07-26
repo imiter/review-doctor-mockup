@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from rank_finder import find_rank, parse_items
+import pytest
+
+from rank_finder import StoreNameUnmatchableError, check_store_name_matchable, find_rank, parse_items
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_category_page_source.xml"
 
@@ -72,3 +74,27 @@ def test_parse_items_strips_operating_status_suffix():
     )
     items = parse_items([xml])
     assert items == [{"name": "큰집닭강정당고개점", "is_ad": False}]
+
+
+def test_parse_items_ignores_address_bar_node():
+    # 상단 주소 표시줄(", 상계동 000-0000")처럼 콤마로 시작하는 content-desc는
+    # _clean_store_name이 빈 문자열로 정리한다 — 빈 이름은 항목에 넣지 않는다.
+    xml = (
+        '<hierarchy>'
+        '<node index="0" text="" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">'
+        '<node index="1" text="" resource-id="" class="android.view.View" '
+        'content-desc=", 상계동 000-0000" bounds="[0,256][391,362]" />'
+        '</node>'
+        '</hierarchy>'
+    )
+    items = parse_items([xml])
+    assert items == []
+
+
+def test_check_store_name_matchable_passes_for_normal_name():
+    check_store_name_matchable("미친피자 노원직영점")  # 예외 없이 통과해야 함
+
+
+def test_check_store_name_matchable_raises_for_decorated_name():
+    with pytest.raises(StoreNameUnmatchableError):
+        check_store_name_matchable("990원치킨")

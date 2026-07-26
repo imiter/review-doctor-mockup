@@ -47,6 +47,26 @@ def _is_decorated(text: str) -> bool:
     return any(p.search(text) for p in _DECORATION_PATTERNS)
 
 
+class StoreNameUnmatchableError(Exception):
+    """STORE_DISPLAY_NAME이 장식 필터에 걸려 절대 매칭될 수 없을 때 발생한다."""
+
+
+def check_store_name_matchable(store_display_name: str) -> None:
+    """STORE_DISPLAY_NAME이 장식 필터(_is_decorated)에 걸리면 즉시 실패시킨다.
+
+    장식 필터에 걸리는 이름은 parse_items가 절대 가게 항목으로 인식하지
+    못해 항상 NOT_FOUND가 나온다 — 이 실패는 "가게가 리스트에 없음"과
+    구별이 안 돼서 조용히 잘못된 결론(예: 배달 반경 밖)으로 오인되기
+    쉽다. 크롤링 시작 전에 이 함수로 미리 걸러낸다."""
+    if _is_decorated(store_display_name):
+        raise StoreNameUnmatchableError(
+            f"STORE_DISPLAY_NAME '{store_display_name}'이 장식 문구 필터에 걸려 "
+            "가게 항목으로 인식될 수 없습니다 (숫자+원/%/km/개/점, '!', "
+            "'쿠폰' 등 포함 여부를 확인하세요). 이 상태로 실행하면 항상 "
+            "NOT_FOUND만 나옵니다."
+        )
+
+
 def _bounds_width(bounds: str) -> int:
     m = _BOUNDS_RE.match(bounds)
     if not m:
@@ -114,7 +134,9 @@ def parse_items(xml_sources: list[str]) -> list[dict]:
                     is_ad = True
                 j += 1
 
-            if name not in seen_names:
+            # content-desc가 콤마로 시작하면(예: 주소 표시줄 ", 상계동 ...")
+            # 정리 후 빈 문자열이 남는다 — 항목으로 넣지 않는다.
+            if name and name not in seen_names:
                 seen_names.add(name)
                 items.append({"name": name, "is_ad": is_ad})
 
