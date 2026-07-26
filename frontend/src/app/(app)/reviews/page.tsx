@@ -43,7 +43,10 @@ function ReviewCard({ review, styles, onSaved }: { review: Review; styles: Reply
     try {
       const res = await apiPost<{ content: string }>(`/reviews/${review.id}/generate-reply`, { style_id: styleId });
       setDraft(res.content);
-      onSaved();
+      // onSaved()를 여기서 부르지 않는다 — 목록을 새로고침하면 이 리뷰가
+      // 서버에서 이미 pending으로 바뀌어 "답글 대기" 필터에서 사라지고,
+      // 사장님이 미리보기를 확인·수정하기도 전에 카드가 없어져 버린다.
+      // 목록 갱신은 최종 "답글 등록"을 눌렀을 때만 한다.
     } finally {
       setGenerating(false);
     }
@@ -97,20 +100,30 @@ function ReviewCard({ review, styles, onSaved }: { review: Review; styles: Reply
             </button>
           </div>
           {draft && (
-            <div className="space-y-2">
+            <div className="space-y-2 rounded-lg border border-accent/40 bg-accent-soft/40 p-3">
+              <p className="text-xs font-medium text-accent">미리보기 — 등록 전 자유롭게 수정하세요</p>
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 rows={3}
                 className="w-full rounded-lg border border-border-subtle bg-surface p-2.5 text-sm outline-none focus:border-accent"
               />
-              <button
-                onClick={save}
-                disabled={saving}
-                className="rounded-lg border border-success px-3 py-1.5 text-xs font-medium text-success transition hover:bg-success/10 disabled:opacity-50"
-              >
-                {saving ? "등록 중..." : "답글 등록하기"}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={save}
+                  disabled={saving || !draft.trim()}
+                  className="rounded-lg bg-success px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+                >
+                  {saving ? "등록 중..." : "이대로 답글 등록"}
+                </button>
+                <button
+                  onClick={() => setDraft("")}
+                  disabled={saving}
+                  className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs text-muted transition hover:text-foreground disabled:opacity-50"
+                >
+                  취소
+                </button>
+              </div>
             </div>
           )}
         </div>

@@ -1,18 +1,22 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Card } from "@/components/Card";
 import { apiGet, apiPut } from "@/lib/api";
 import { useStoreContext } from "@/lib/store-context";
 
 type ReplySettings = {
+  style_id: number;
   auto_reply_enabled: boolean;
   auto_reply_min_rating: number;
 };
+type ReplyStyle = { id: number; name: string; description: string };
 
 export default function ReplyRulesPage() {
   const { storeId } = useStoreContext();
   const [settings, setSettings] = useState<ReplySettings | null>(null);
+  const [styles, setStyles] = useState<ReplyStyle[]>([]);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -20,6 +24,9 @@ export default function ReplyRulesPage() {
     if (!storeId) return;
     apiGet<ReplySettings>(`/reply-settings?store_id=${storeId}`).then(setSettings);
   }, [storeId]);
+  useEffect(() => {
+    apiGet<ReplyStyle[]>("/reply-styles").then(setStyles);
+  }, []);
 
   const save = async (patch: Partial<ReplySettings>) => {
     if (!settings || !storeId) return;
@@ -36,6 +43,8 @@ export default function ReplyRulesPage() {
   };
 
   if (!settings) return <p className="text-sm text-muted">불러오는 중...</p>;
+
+  const currentStyle = styles.find((s) => s.id === settings.style_id);
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -64,28 +73,45 @@ export default function ReplyRulesPage() {
         </div>
 
         {settings.auto_reply_enabled && (
-          <div className="mt-5 border-t border-border-subtle pt-5">
-            <label className="mb-2 block text-xs text-muted">
-              몇 점 이상 리뷰에 자동 답글을 적용할까요?
-            </label>
-            <div className="flex gap-2">
-              {[1, 2, 3, 4, 5].map((n) => (
-                <button
-                  key={n}
-                  onClick={() => save({ auto_reply_min_rating: n })}
-                  className={`flex-1 rounded-lg py-2 text-sm font-medium transition ${
-                    settings.auto_reply_min_rating === n
-                      ? "bg-accent text-white"
-                      : "border border-border-subtle text-muted hover:text-foreground"
-                  }`}
-                >
-                  {n}점 ↑
-                </button>
-              ))}
+          <div className="mt-5 space-y-5 border-t border-border-subtle pt-5">
+            <div>
+              <label className="mb-2 block text-xs text-muted">
+                몇 점 이상 리뷰에 자동 답글을 적용할까요?
+              </label>
+              <div className="flex gap-2">
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <button
+                    key={n}
+                    onClick={() => save({ auto_reply_min_rating: n })}
+                    className={`flex-1 rounded-lg py-2 text-sm font-medium transition ${
+                      settings.auto_reply_min_rating === n
+                        ? "bg-accent text-white"
+                        : "border border-border-subtle text-muted hover:text-foreground"
+                    }`}
+                  >
+                    {n}점 ↑
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 text-xs text-muted">
+                현재: {settings.auto_reply_min_rating}점 이상 리뷰만 자동 답글 대상
+              </p>
             </div>
-            <p className="mt-2 text-xs text-muted">
-              현재: {settings.auto_reply_min_rating}점 이상 리뷰만 자동 답글 대상
-            </p>
+
+            <div className="rounded-lg bg-surface-2 p-3">
+              <p className="mb-1 text-xs text-muted">적용될 답글 스타일</p>
+              {currentStyle ? (
+                <>
+                  <p className="text-sm font-semibold text-accent">{currentStyle.name}</p>
+                  <p className="mt-0.5 text-xs text-muted">{currentStyle.description}</p>
+                </>
+              ) : (
+                <p className="text-sm text-muted">불러오는 중...</p>
+              )}
+              <Link href="/reviews/styles" className="mt-2 inline-block text-xs text-accent hover:underline">
+                답글 스타일 설정에서 변경 →
+              </Link>
+            </div>
           </div>
         )}
 
