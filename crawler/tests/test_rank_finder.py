@@ -41,3 +41,19 @@ def test_find_rank_not_found_returns_none():
     result = find_rank(items, "존재하지않는가게이름XYZ123")
     assert result["rank"] is None
     assert result["total_scanned"] == len(items)
+
+
+def test_parse_items_strips_operating_status_suffix():
+    # 실제 에뮬레이터 실행(Task 6)에서 확인된 케이스: 영업 준비중/마감 임박
+    # 가게는 content-desc가 "{가게명}, 오늘\n오후 01:00 오픈"처럼 영업 상태
+    # 문구가 콤마로 이어붙어 노출된다 — 콤마 앞부분만 가게명으로 남아야 한다.
+    xml = (
+        '<hierarchy>'
+        '<node index="0" text="" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">'
+        '<node index="1" text="" resource-id="" class="android.view.View" '
+        'content-desc="큰집닭강정당고개점, 오늘\n오후 01:00 오픈" bounds="[39,2031][500,2092]" />'
+        '</node>'
+        '</hierarchy>'
+    )
+    items = parse_items([xml])
+    assert items == [{"name": "큰집닭강정당고개점", "is_ad": False}]

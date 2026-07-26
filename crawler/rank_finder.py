@@ -71,6 +71,16 @@ def _is_ad_marker_node(node) -> bool:
     return "광고" in node.attrib.get("content-desc", "")
 
 
+def _clean_store_name(content_desc: str) -> str:
+    """가게명 노드의 content-desc에서 순수 가게명만 뽑아낸다.
+
+    영업 준비중/마감 임박 가게는 "{가게명}, 오늘\\n오후 01:00 오픈"처럼
+    영업 상태 문구가 콤마로 이어붙어 노출되는 경우가 실측(Task 6 실제
+    에뮬레이터 실행)으로 확인됐다 — 콤마 앞부분만 가게명으로 취급한다.
+    """
+    return content_desc.split(",")[0].strip()
+
+
 def parse_items(xml_sources: list[str]) -> list[dict]:
     """누적된 page_source XML들에서 가게 항목을 순서대로 파싱한다.
 
@@ -92,7 +102,7 @@ def parse_items(xml_sources: list[str]) -> list[dict]:
                 i += 1
                 continue
 
-            name = node.attrib["content-desc"]
+            name = _clean_store_name(node.attrib["content-desc"])
 
             # 다음 가게명 노드(또는 끝)까지 스캔하며 광고 배지 확인
             is_ad = False
