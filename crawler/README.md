@@ -13,7 +13,7 @@
 
 ## 환경 구축
 
-### 1. Android 커맨드라인 툴 + 에뮬레이터 설치
+### 1. Java + Android 커맨드라인 툴 설치
 
 ```bash
 brew install openjdk@17
@@ -23,6 +23,8 @@ brew install --cask android-commandlinetools
 `~/.zshrc` 또는 현재 셸에 추가:
 
 ```bash
+export JAVA_HOME="$(brew --prefix openjdk@17)"
+export PATH="$JAVA_HOME/bin:$PATH"
 export ANDROID_HOME="$(brew --prefix)/share/android-commandlinetools"
 export PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator"
 ```
@@ -34,7 +36,9 @@ yes | sdkmanager --licenses
 sdkmanager "platform-tools" "emulator" "platforms;android-34"
 ```
 
-시스템 이미지는 Mac 아키텍처에 맞춰 설치 (Apple Silicon vs Intel):
+### 2. 시스템 이미지 + AVD 생성 (Mac 아키텍처별)
+
+Apple Silicon (`arm64`) 또는 Intel 아키텍처에 맞춰 설치:
 
 ```bash
 ARCH=$(uname -m)
@@ -47,7 +51,9 @@ sdkmanager "$IMAGE"
 echo "no" | avdmanager create avd -n baemin_test -k "$IMAGE" --device "pixel_6"
 ```
 
-### 2. 에뮬레이터 부팅 확인 (창이 보이는 상태로 — 사람이 조작해야 함)
+### 3. 에뮬레이터 부팅 확인 (창이 보이는 상태로 — 사람이 조작해야 함)
+
+**중요**: `-no-window`는 사용하지 않는다 — 에뮬레이터 창이 화면에 떠 있어야 한다.
 
 ```bash
 emulator -avd baemin_test &
@@ -56,9 +62,19 @@ adb shell 'while [[ -z $(getprop sys.boot_completed) ]]; do sleep 1; done'
 adb devices
 ```
 
-`-no-window`는 사용하지 않는다 — 에뮬레이터 창이 화면에 떠 있어야 한다.
+### 4. 에뮬레이터 시스템 로케일을 한국어로 설정 (필수)
 
-### 3. Appium 서버 + uiautomator2 드라이버 설치
+배민 앱 카테고리/가게명이 한국어로 나오려면 AVD의 시스템 로케일을 `ko-KR`로
+설정해야 한다. `google_apis_playstore` 이미지는 non-rooted이므로 라이브 브로드캐스트
+(`android.intent.action.LOCALE_CHANGED`)가 거부된다. 대신 다음 명령으로 재부팅:
+
+```bash
+adb shell settings put system system_locales ko-KR
+adb reboot
+adb wait-for-device
+```
+
+### 5. Appium 서버 + uiautomator2 드라이버 설치
 
 ```bash
 npm install -g appium
@@ -68,7 +84,7 @@ sleep 3
 curl -s http://localhost:4723/status
 ```
 
-### 4. 파이썬 가상환경 + 의존성 설치
+### 6. 파이썬 가상환경 + 의존성 설치
 
 ```bash
 cd crawler

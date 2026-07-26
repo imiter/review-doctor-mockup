@@ -43,6 +43,21 @@ def test_find_rank_not_found_returns_none():
     assert result["total_scanned"] == len(items)
 
 
+def test_parse_items_ignores_promo_banner():
+    # 실제 에뮬레이터 실행에서 확인된 케이스: "곧 사라져요! 이번 주 한정
+    # 쿠폰 확인" 같은 프로모션 배너가 가게명으로 잘못 파싱된 적이 있었다.
+    xml = (
+        '<hierarchy>'
+        '<node index="0" text="" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">'
+        '<node index="1" text="" resource-id="" class="android.view.View" '
+        'content-desc="곧 사라져요! 이번 주 한정 쿠폰 확인" bounds="[39,2031][900,2092]" />'
+        '</node>'
+        '</hierarchy>'
+    )
+    items = parse_items([xml])
+    assert items == []
+
+
 def test_parse_items_strips_operating_status_suffix():
     # 실제 에뮬레이터 실행(Task 6)에서 확인된 케이스: 영업 준비중/마감 임박
     # 가게는 content-desc가 "{가게명}, 오늘\n오후 01:00 오픈"처럼 영업 상태

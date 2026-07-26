@@ -34,6 +34,8 @@ _DECORATION_PATTERNS = [
     re.compile("거리"),
     re.compile("메뉴"),
     re.compile("최소주문"),
+    re.compile("쿠폰"),
+    re.compile("!"),  # 프로모션 배너 문구는 느낌표를 포함하는 경우가 많고, 실제 가게명에는 거의 안 쓰인다 (실측: "곧 사라져요! 이번 주 한정 쿠폰 확인" 배너가 가게명으로 잘못 파싱됨)
 ]
 
 _MIN_STORE_NAME_NODE_WIDTH = 200  # 아이콘/버튼류 노드를 걸러내기 위한 최소 폭(px)
