@@ -19,12 +19,19 @@ _POLL_INTERVAL_SEC = 1
 #   5. 상세주소 입력칸(첫 번째 EditText)에 아무 값이나 입력해야
 #      "주소 등록" 버튼이 활성화된다(빈 값이면 비활성 상태로 남는다)
 #   6. "주소 등록" 탭 → 홈 화면으로 복귀, 주소가 갱신돼 있다
+#      단, 저장된 주소가 이미 10개면("주소는 10개까지 등록할 수 있어요.
+#      가장 오래된 주소를 지우고 새 주소를 등록할까요?") 확인 팝업이
+#      추가로 뜬다 — "저장"을 눌러야 최종 등록이 완료된다(실측으로 확인:
+#      이 팝업을 처리하지 않으면 화면이 "주소 상세"에 멈춰 있어 다음
+#      단계에서 홈 화면 요소를 못 찾고 실패한다).
 _ADDRESS_SELECTOR_CONTENT_DESC_MARKER = "현재 위치를 변경할 수 있습니다"
 _FIND_CURRENT_LOCATION_LABEL = "현재 위치로 찾기"
 _REGISTER_MAP_LOCATION_LABEL = "이 위치로 주소 등록"
 _REGISTER_ADDRESS_LABEL = "주소 등록"
+_ADDRESS_LIMIT_DIALOG_SAVE_LABEL = "저장"  # "주소 10개 한도" 확인 팝업의 저장 버튼
 _ADDRESS_DETAIL_PLACEHOLDER = "1"  # 상세주소는 내용 자체가 중요하지 않다 — 등록 버튼 활성화 조건일 뿐
 _REVERSE_GEOCODE_WAIT_SEC = 7  # 지도 로딩 + 역지오코딩에 실측으로 5~7초 걸림
+_ADDRESS_LIMIT_DIALOG_WAIT_SEC = 2  # 팝업이 뜬다면 이 시간 안에 나타난다(실측)
 
 
 def set_delivery_address_to_current_location(driver) -> None:
@@ -56,6 +63,7 @@ def set_delivery_address_to_current_location(driver) -> None:
     detail_inputs = driver.find_elements("class name", "android.widget.EditText")
     if not detail_inputs:
         raise RuntimeError("'주소 상세' 화면에서 상세주소 입력칸을 찾지 못했습니다")
+    detail_inputs[0].clear()  # 이전 시도에서 남은 값이 있을 수 있어 먼저 비운다
     detail_inputs[0].send_keys(_ADDRESS_DETAIL_PLACEHOLDER)
     time.sleep(1)
 
@@ -64,6 +72,11 @@ def set_delivery_address_to_current_location(driver) -> None:
         raise RuntimeError("'주소 상세' 화면에서 '주소 등록' 버튼을 찾지 못했습니다")
     register_address[0].click()
     time.sleep(2)
+
+    limit_dialog_save = _wait_for_text(driver, _ADDRESS_LIMIT_DIALOG_SAVE_LABEL, timeout=_ADDRESS_LIMIT_DIALOG_WAIT_SEC)
+    if limit_dialog_save:
+        limit_dialog_save[0].click()
+        time.sleep(2)
 
 # "메뉴 전체보기" 펼침 패널은 accessibility tree에 텍스트 노드가 전혀 노출되지
 # 않는 통짜 커스텀 렌더링이다(실측으로 확인 — 스펙에서 우려했던 "리스트가
