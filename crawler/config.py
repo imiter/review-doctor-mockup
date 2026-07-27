@@ -4,7 +4,10 @@ from dataclasses import dataclass
 
 from dotenv import dotenv_values
 
-RADII_KM = [1, 2, 3, 4]
+# 가게 주소를 기점으로 하는 반경 구간(사용자 확정) — 매 구간마다 가게 주소부터
+# 다시 계산한 랜덤 지점 1개씩을 뽑는다. 0km(가게 주소 자체)는 run_crawl.py에서
+# 별도로 처리한다.
+RING_KM_RANGES = [(1.5, 2.5), (2.5, 3.5)]
 
 
 @dataclass(frozen=True)

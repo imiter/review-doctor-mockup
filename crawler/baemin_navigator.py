@@ -1,6 +1,22 @@
 """배민 앱 내비게이션 — 컨트롤러가 실기기에서 확인한 실제 탐색 절차를 재현한다."""
 
+import re
 import time
+
+# "산56-21", "산150"처럼 임야(산 지번) 주소를 감지한다. "부산", "온산읍"처럼
+# 산 뒤에 숫자가 바로 오지 않는 지명은 걸리지 않는다 — 사용자 요청: 산 지번은
+# 실제 배달 가능 위치로 보기 어려워 반경 샘플링에서 제외한다.
+_MOUNTAIN_LOT_PATTERN = re.compile(r"(?<!\S)산\d")
+
+
+class MountainLotAddressError(Exception):
+    """역지오코딩된 주소가 산 지번(임야)이라 배달 주소로 부적절할 때 발생한다."""
+
+
+def contains_mountain_lot(address_text: str) -> bool:
+    """주소 문자열에 산 지번(임야) 패턴이 있는지 확인한다. 순수 함수 — 단위 테스트 가능."""
+    return bool(_MOUNTAIN_LOT_PATTERN.search(address_text))
+
 
 _HOME_CATEGORY_ENTRY_LABEL = "피자"  # 홈 화면 카테고리 그리드에 항상 노출되는 안전한 진입점
 _LOGIN_PROMPT_MARKER_TEXT = "이메일 또는 아이디로 로그인"  # 실수로 로그인 화면이 뜬 경우 감지용
@@ -58,6 +74,15 @@ def set_delivery_address_to_current_location(driver) -> None:
     register_map = _wait_for_text(driver, _REGISTER_MAP_LOCATION_LABEL, timeout=10)
     if not register_map:
         raise RuntimeError("지도 화면에서 '이 위치로 주소 등록' 버튼을 찾지 못했습니다")
+
+    # 역지오코딩된 도로명/지번 주소가 화면에 text="..."로 노출된다 — 산
+    # 지번이면 등록하지 않고 호출부(run_crawl.py)가 다른 좌표로 재샘플링할
+    # 수 있도록 예외를 던진다.
+    address_texts = re.findall(r'text="([^"]*)"', driver.page_source)
+    mountain_matches = [t for t in address_texts if contains_mountain_lot(t)]
+    if mountain_matches:
+        raise MountainLotAddressError(f"역지오코딩된 주소가 산 지번(임야)입니다: {mountain_matches}")
+
     register_map[0].click()
     time.sleep(2)
 

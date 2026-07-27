@@ -1,7 +1,7 @@
 import math
 import random
 
-from geo_sampling import destination_point, sample_points
+from geo_sampling import destination_point, sample_ring_point
 
 
 def test_destination_point_north_1km():
@@ -22,13 +22,20 @@ def test_destination_point_distance_is_correct():
     assert math.isclose(computed_km, 2, abs_tol=0.01)
 
 
-def test_sample_points_returns_one_point_per_radius():
-    points = sample_points(37.6542, 127.0620, radii_km=[1, 2, 3, 4], rng=random.Random(42))
-    assert [p["radius_km"] for p in points] == [1, 2, 3, 4]
-    assert all(0 <= p["bearing_deg"] < 360 for p in points)
+def test_sample_ring_point_distance_within_range():
+    rng = random.Random(42)
+    for _ in range(30):
+        point = sample_ring_point(37.6542, 127.0620, 1.5, 2.5, rng=rng)
+        assert 1.5 <= point["distance_km"] <= 2.5
+        assert 0 <= point["bearing_deg"] < 360
 
 
-def test_sample_points_deterministic_with_same_seed():
-    a = sample_points(37.6542, 127.0620, radii_km=[1, 2, 3, 4], rng=random.Random(7))
-    b = sample_points(37.6542, 127.0620, radii_km=[1, 2, 3, 4], rng=random.Random(7))
+def test_sample_ring_point_deterministic_with_same_seed():
+    a = sample_ring_point(37.6542, 127.0620, 2.5, 3.5, rng=random.Random(7))
+    b = sample_ring_point(37.6542, 127.0620, 2.5, 3.5, rng=random.Random(7))
     assert a == b
+
+
+def test_sample_ring_point_default_rng_still_within_range():
+    point = sample_ring_point(37.6542, 127.0620, 1.5, 2.5)
+    assert 1.5 <= point["distance_km"] <= 2.5
