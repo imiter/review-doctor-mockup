@@ -8,6 +8,63 @@ _CATEGORY_EXPAND_BUTTON_DESC = "메뉴 전체보기 버튼"  # 카테고리 탭 
 _FIND_TIMEOUT_SEC = 20  # 앱 재시작 직후에는 홈 화면 로딩이 3초보다 오래 걸리는 경우가 실측으로 확인됨
 _POLL_INTERVAL_SEC = 1
 
+# 배달 주소 변경 흐름 (실측으로 확인 — adb emu geo fix로 GPS만 바꾸는 것으로는
+# 부족하다). 배민은 배달 주소를 "마지막으로 확정한 주소"로 캐싱해두고, 앱
+# 재시작이나 GPS 변경만으로는 절대 자동으로 갱신하지 않는다. 반드시 아래
+# 순서로 화면을 직접 조작해야 한다:
+#   1. 홈 화면 상단 주소 선택 버튼 탭 → "주소 설정" 화면
+#   2. "현재 위치로 찾기" 탭 → 지도 화면으로 이동, GPS 기준 역지오코딩 진행
+#   3. 역지오코딩 완료 대기(=주소 등록 버튼이 활성화될 때까지)
+#   4. "이 위치로 주소 등록" 탭 → "주소 상세" 화면
+#   5. 상세주소 입력칸(첫 번째 EditText)에 아무 값이나 입력해야
+#      "주소 등록" 버튼이 활성화된다(빈 값이면 비활성 상태로 남는다)
+#   6. "주소 등록" 탭 → 홈 화면으로 복귀, 주소가 갱신돼 있다
+_ADDRESS_SELECTOR_CONTENT_DESC_MARKER = "현재 위치를 변경할 수 있습니다"
+_FIND_CURRENT_LOCATION_LABEL = "현재 위치로 찾기"
+_REGISTER_MAP_LOCATION_LABEL = "이 위치로 주소 등록"
+_REGISTER_ADDRESS_LABEL = "주소 등록"
+_ADDRESS_DETAIL_PLACEHOLDER = "1"  # 상세주소는 내용 자체가 중요하지 않다 — 등록 버튼 활성화 조건일 뿐
+_REVERSE_GEOCODE_WAIT_SEC = 7  # 지도 로딩 + 역지오코딩에 실측으로 5~7초 걸림
+
+
+def set_delivery_address_to_current_location(driver) -> None:
+    """set_mock_location으로 바꾼 GPS를 실제 배달 주소에 반영시킨다.
+
+    adb emu geo fix만으로는 배민 앱의 배달 주소가 바뀌지 않는다(실측으로
+    확인 — 캐싱된 마지막 확정 주소를 계속 쓴다). 이 함수가 그 간극을
+    메운다. 홈 화면 상태에서 호출해야 한다."""
+    address_button = _wait_for_xpath(
+        driver, f"//*[contains(@content-desc, '{_ADDRESS_SELECTOR_CONTENT_DESC_MARKER}')]"
+    )
+    if not address_button:
+        raise RuntimeError("홈 화면에서 주소 선택 버튼을 찾지 못했습니다")
+    address_button[0].click()
+    time.sleep(1.5)
+
+    find_current = _wait_for_text(driver, _FIND_CURRENT_LOCATION_LABEL, timeout=10)
+    if not find_current:
+        raise RuntimeError("'주소 설정' 화면에서 '현재 위치로 찾기' 버튼을 찾지 못했습니다")
+    find_current[0].click()
+
+    time.sleep(_REVERSE_GEOCODE_WAIT_SEC)
+    register_map = _wait_for_text(driver, _REGISTER_MAP_LOCATION_LABEL, timeout=10)
+    if not register_map:
+        raise RuntimeError("지도 화면에서 '이 위치로 주소 등록' 버튼을 찾지 못했습니다")
+    register_map[0].click()
+    time.sleep(2)
+
+    detail_inputs = driver.find_elements("class name", "android.widget.EditText")
+    if not detail_inputs:
+        raise RuntimeError("'주소 상세' 화면에서 상세주소 입력칸을 찾지 못했습니다")
+    detail_inputs[0].send_keys(_ADDRESS_DETAIL_PLACEHOLDER)
+    time.sleep(1)
+
+    register_address = _wait_for_text(driver, _REGISTER_ADDRESS_LABEL, timeout=10)
+    if not register_address:
+        raise RuntimeError("'주소 상세' 화면에서 '주소 등록' 버튼을 찾지 못했습니다")
+    register_address[0].click()
+    time.sleep(2)
+
 # "메뉴 전체보기" 펼침 패널은 accessibility tree에 텍스트 노드가 전혀 노출되지
 # 않는 통짜 커스텀 렌더링이다(실측으로 확인 — 스펙에서 우려했던 "리스트가
 # 커스텀 렌더링돼 있으면 텍스트가 트리에 노출되지 않는" 시나리오가 바로 이
@@ -53,20 +110,25 @@ def _find_by_text(driver, label: str):
     )
 
 
-def _wait_for_text(driver, label: str, timeout: float = _FIND_TIMEOUT_SEC):
-    """label이 화면에 나타날 때까지 짧은 간격으로 폴링한다.
+def _wait_for_xpath(driver, xpath: str, timeout: float = _FIND_TIMEOUT_SEC):
+    """xpath에 맞는 노드가 화면에 나타날 때까지 짧은 간격으로 폴링한다.
 
-    실측 결과 restart_app 직후에는 (특히 위치 변경 직후) 홈 화면이 완전히
-    로딩되기까지 고정 3초보다 오래 걸리는 경우가 있었다 — 단발성 sleep 대신
-    폴링으로 대기한다."""
+    실측 결과 restart_app 직후에는(특히 위치 변경 직후) 홈 화면이 완전히
+    로딩되기까지 고정 시간보다 오래 걸리는 경우가 있었다 — 단발성 sleep
+    대신 폴링으로 대기한다."""
     elapsed = 0.0
     while elapsed < timeout:
-        elements = _find_by_text(driver, label)
+        elements = driver.find_elements("xpath", xpath)
         if elements:
             return elements
         time.sleep(_POLL_INTERVAL_SEC)
         elapsed += _POLL_INTERVAL_SEC
     return []
+
+
+def _wait_for_text(driver, label: str, timeout: float = _FIND_TIMEOUT_SEC):
+    """label과 정확히 일치하는 노드가 나타날 때까지 폴링한다."""
+    return _wait_for_xpath(driver, f"//*[@text='{label}' or @content-desc='{label}']", timeout)
 
 
 def navigate_to_category(driver, category_label: str) -> None:

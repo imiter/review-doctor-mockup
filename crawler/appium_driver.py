@@ -1,10 +1,17 @@
 """Appium 세션 시작/종료 + adb 기반 mock GPS 설정."""
 
 import subprocess
+import time
 
 import requests
 from appium import webdriver
 from appium.options.android import UiAutomator2Options
+
+# adb emu geo fix로 GPS 값을 바꿔도 앱의 위치 공급자(FusedLocationProvider)가
+# 새 값을 실제로 반영하기까지 약간의 지연이 있다 — 실측 결과 이 대기 없이
+# 바로 위치 기반 동작(예: "현재 위치로 찾기")을 하면 이전 GPS 값을 그대로
+# 쓰는 경우가 있었다.
+_GPS_SETTLE_WAIT_SEC = 3
 
 
 def check_server_ready(url: str = "http://localhost:4723") -> None:
@@ -33,11 +40,16 @@ def start_session(package: str, device_name: str = "emulator-5554"):
 
 
 def set_mock_location(lat: float, lng: float, device_serial: str = "emulator-5554") -> None:
-    """adb emu geo fix는 경도, 위도 순서로 받는다."""
+    """adb emu geo fix는 경도, 위도 순서로 받는다.
+
+    호출 직후 짧게 대기한다 — 위치 공급자가 새 GPS 값을 반영하기 전에
+    바로 위치 기반 동작을 하면 이전 값을 읽어오는 경우가 실측으로
+    확인됐다."""
     subprocess.run(
         ["adb", "-s", device_serial, "emu", "geo", "fix", str(lng), str(lat)],
         check=True, capture_output=True,
     )
+    time.sleep(_GPS_SETTLE_WAIT_SEC)
 
 
 def restart_app(driver, package: str) -> None:

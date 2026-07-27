@@ -6,7 +6,7 @@ import os
 import sys
 
 from appium_driver import restart_app, set_mock_location, start_session
-from baemin_navigator import navigate_to_category, scroll_and_collect
+from baemin_navigator import navigate_to_category, scroll_and_collect, set_delivery_address_to_current_location
 from config import RADII_KM, load_settings
 from geo_sampling import sample_points
 from geocode import GeocodeError, address_to_coords
@@ -91,6 +91,11 @@ def run():
             try:
                 set_mock_location(point["lat"], point["lng"])
                 restart_app(driver, PACKAGE)
+                # adb emu geo fix로 GPS만 바꿔서는 배민의 배달 주소가 갱신되지
+                # 않는다(실측으로 확인 — 마지막으로 확정한 주소를 캐싱해서
+                # 계속 쓴다). 반드시 앱 내 주소 변경 화면을 직접 조작해야
+                # 반경별로 실제로 다른 위치의 카테고리 리스트를 보게 된다.
+                set_delivery_address_to_current_location(driver)
                 navigate_to_category(driver, settings.category_label)
                 sources = scroll_and_collect(driver, max_scrolls=30, target_name=settings.store_display_name)
                 items = parse_items(sources)
