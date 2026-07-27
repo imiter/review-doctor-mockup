@@ -32,6 +32,7 @@ _ADDRESS_LIMIT_DIALOG_SAVE_LABEL = "저장"  # "주소 10개 한도" 확인 팝�
 _ADDRESS_DETAIL_PLACEHOLDER = "1"  # 상세주소는 내용 자체가 중요하지 않다 — 등록 버튼 활성화 조건일 뿐
 _REVERSE_GEOCODE_WAIT_SEC = 7  # 지도 로딩 + 역지오코딩에 실측으로 5~7초 걸림
 _ADDRESS_LIMIT_DIALOG_WAIT_SEC = 2  # 팝업이 뜬다면 이 시간 안에 나타난다(실측)
+_SCROLL_SETTLE_WAIT_SEC = 1.0  # 스크롤 직후 리스트 렌더링 완료 대기(실측: 0.5초는 부족해서 항목 누락 발생)
 
 
 def set_delivery_address_to_current_location(driver) -> None:
@@ -208,7 +209,11 @@ def scroll_and_collect(driver, max_scrolls: int = 30, target_name: str | None = 
             "left": x - 10, "top": end_y, "width": 20, "height": start_y - end_y,
             "direction": "up", "percent": 0.75,
         })
-        time.sleep(0.5)
+        # 0.5초로는 부족했다 — 실측 결과 스크롤 직후 리스트가 아직 로딩/렌더링
+        # 중일 때 page_source를 캡처하면 화면에 실제로 지나간 가게가 accessibility
+        # tree에는 안 잡혀서 통째로 누락되는 경우가 있었다(사용자가 화면으로
+        # 직접 지나가는 걸 봤는데 파싱 결과에는 없었던 사례로 확인).
+        time.sleep(_SCROLL_SETTLE_WAIT_SEC)
         sources.append(driver.page_source)
         if _already_found(sources):
             break

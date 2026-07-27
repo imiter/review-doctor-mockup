@@ -91,6 +91,24 @@ def test_parse_items_ignores_address_bar_node():
     assert items == []
 
 
+def test_parse_items_keeps_store_name_when_suffix_matches_decoration_keyword():
+    # 실측 케이스(output/debug/search_giyoungee2.xml): "배달팁 무료" 배지가
+    # 콤마로 이어붙어 content-desc가 "기영이 숯불두마리치킨 노원상계점,
+    # 배달팁 무료"로 노출된다. 장식 필터의 "무료" 패턴을 콤마 이전(가게명)
+    # 부분까지 포함한 원문 전체에 검사하면 실제 가게명 노드가 통째로
+    # 걸러지는 버그가 있었다 — 콤마로 정리한 이름만 검사해야 한다.
+    xml = (
+        '<hierarchy>'
+        '<node index="0" text="" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]">'
+        '<node index="1" text="" resource-id="" class="android.view.View" '
+        'content-desc="기영이 숯불두마리치킨 노원상계점, 배달팁 무료" bounds="[39,1259][344,1548]" />'
+        '</node>'
+        '</hierarchy>'
+    )
+    items = parse_items([xml])
+    assert items == [{"name": "기영이 숯불두마리치킨 노원상계점", "is_ad": False}]
+
+
 def test_check_store_name_matchable_passes_for_normal_name():
     check_store_name_matchable("미친피자 노원직영점")  # 예외 없이 통과해야 함
 

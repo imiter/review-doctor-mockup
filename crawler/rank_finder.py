@@ -84,7 +84,12 @@ def _is_store_name_node(node) -> bool:
         content_desc
         and not text
         and cls == "android.view.View"
-        and not _is_decorated(content_desc)
+        # 장식 필터는 콤마로 정리한 "가게명만"을 검사해야 한다 — 원문 전체를
+        # 검사하면 "기영이 숯불두마리치킨 노원상계점, 배달팁 무료"처럼 콤마
+        # 뒤에 붙는 배지 문구(실측: output/debug/search_giyoungee2.xml)에
+        # "무료" 같은 장식 키워드가 우연히 섞여 있을 때 진짜 가게명 노드
+        # 전체가 통째로 걸러지는 버그가 있었다.
+        and not _is_decorated(_clean_store_name(content_desc))
         and _bounds_width(bounds) >= _MIN_STORE_NAME_NODE_WIDTH
     )
 
