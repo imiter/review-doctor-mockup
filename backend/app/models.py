@@ -210,10 +210,14 @@ class AdRankSnapshot(Base):
     campaign_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ad_campaigns.id"))
     snapshot_at: Mapped[datetime]
     current_rank: Mapped[int]
-    competitor_est_cpc: Mapped[int]
-    status: Mapped[str] = mapped_column(String(12))
+    competitor_est_cpc: Mapped[int | None]
+    status: Mapped[str | None] = mapped_column(String(12))
     recommended_action: Mapped[str] = mapped_column(String(10), default="keep")
     suggested_cpc: Mapped[int | None]
+    distance_km: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
+    point_label: Mapped[str | None] = mapped_column(String(20))
+    total_scanned: Mapped[int | None]
+    ads_above: Mapped[int | None]
 
 
 class Alert(Base):

@@ -3,6 +3,10 @@
 import re
 import time
 
+from selenium.webdriver.common.actions.action_builder import ActionBuilder
+from selenium.webdriver.common.actions.interaction import POINTER_TOUCH
+from selenium.webdriver.common.actions.pointer_input import PointerInput
+
 # "산56-21", "산150"처럼 임야(산 지번) 주소를 감지한다. "부산", "온산읍"처럼
 # 산 뒤에 숫자가 바로 오지 않는 지명은 걸리지 않는다 — 사용자 요청: 산 지번은
 # 실제 배달 가능 위치로 보기 어려워 반경 샘플링에서 제외한다.
@@ -48,7 +52,33 @@ _ADDRESS_LIMIT_DIALOG_SAVE_LABEL = "저장"  # "주소 10개 한도" 확인 팝�
 _ADDRESS_DETAIL_PLACEHOLDER = "1"  # 상세주소는 내용 자체가 중요하지 않다 — 등록 버튼 활성화 조건일 뿐
 _REVERSE_GEOCODE_WAIT_SEC = 7  # 지도 로딩 + 역지오코딩에 실측으로 5~7초 걸림
 _ADDRESS_LIMIT_DIALOG_WAIT_SEC = 2  # 팝업이 뜬다면 이 시간 안에 나타난다(실측)
-_SCROLL_SETTLE_WAIT_SEC = 1.0  # 스크롤 직후 리스트 렌더링 완료 대기(실측: 0.5초는 부족해서 항목 누락 발생)
+# slow_scroll_test.py로 사람이 눈으로 직접 누락 여부를 확인하며 튜닝한 값
+# (사용자 실측 검증 완료). ActionBuilder 기반 부드러운 터치 드래그
+# (_smooth_drag)로 바꾸면서 스와이프 자체에 걸리는 시간이 이전
+# mobile: swipeGesture 방식보다 커져, 스크롤 직후 별도 대기가 사실상
+# 필요 없어졌다.
+_SCROLL_SETTLE_WAIT_SEC = 0.0001  # 스크롤 직후 리스트 렌더링 완료 대기
+_DRAG_SUB_STEPS = 1  # 한 번의 스크롤을 몇 단계로 나눠 부드럽게 이동할지(정수만 가능, range()에 사용됨)
+_DRAG_SUB_STEP_PAUSE_SEC = 0.0004
+_INITIAL_LOAD_SETTLE_CAPTURES = 3  # 카테고리 진입 직후 스크롤 시작 전 재캡처 횟수(최상단 카드 렌더링 대기)
+_INITIAL_LOAD_SETTLE_INTERVAL_SEC = 1.0
+
+
+def _smooth_drag(driver, x: int, start_y: int, end_y: int) -> None:
+    """마우스로 천천히 드래그하듯, 중간 지점을 거쳐 부드럽게 스크롤한다.
+
+    slow_scroll_test.py에서 검증된 것과 동일한 방식 — mobile: swipeGesture
+    보다 accessibility tree 캡처 누락이 적다는 게 실측으로 확인됐다."""
+    actions = ActionBuilder(driver, mouse=PointerInput(POINTER_TOUCH, "touch"))
+    actions.pointer_action.move_to_location(x, start_y)
+    actions.pointer_action.pointer_down()
+    actions.pointer_action.pause(0.1)
+    for i in range(1, _DRAG_SUB_STEPS + 1):
+        y = start_y + (end_y - start_y) * i / _DRAG_SUB_STEPS
+        actions.pointer_action.move_to_location(x, int(y))
+        actions.pointer_action.pause(_DRAG_SUB_STEP_PAUSE_SEC)
+    actions.pointer_action.release()
+    actions.perform()
 
 
 def set_delivery_address_to_current_location(driver) -> None:
@@ -220,24 +250,33 @@ def scroll_and_collect(driver, max_scrolls: int = 30, target_name: str | None = 
     def _already_found(sources: list[str]) -> bool:
         return target_name is not None and find_rank(parse_items(sources), target_name)["rank"] is not None
 
+    # 카테고리 화면에 막 진입한 직후에는 리스트 최상단 카드들이 아직 다
+    # 렌더링되지 않은 상태일 수 있다 — 이 상태에서 바로 캡처하고 스크롤을
+    # 시작하면, 화면엔 분명 보이는 상위권 가게가 accessibility tree
+    # 캡처에는 안 잡히고, 이미 스크롤이 진행된 뒤라 다시는 캡처되지 않는
+    # 문제가 실측으로 확인됐다(사용자가 상위권에 있는 걸 직접 확인했는데
+    # 크롤러는 훨씬 아래에서 찾거나 아예 놓친 사례). 스크롤을 시작하기 전
+    # 짧은 간격으로 여러 번 다시 캡처해 최상단이 완전히 안정될 시간을 준다.
     sources = [driver.page_source]
+    for _ in range(_INITIAL_LOAD_SETTLE_CAPTURES - 1):
+        if _already_found(sources):
+            return sources
+        time.sleep(_INITIAL_LOAD_SETTLE_INTERVAL_SEC)
+        sources.append(driver.page_source)
     if _already_found(sources):
         return sources
 
     size = driver.get_window_size()
-    start_y = int(size["height"] * 0.8)
-    end_y = int(size["height"] * 0.2)
+    # 카드 1개가 화면 높이의 대략 1/3(한 화면에 3장 정도 보임)이다. 카드
+    # 높이보다 확실히 작은 폭으로 촘촘하게 스크롤해야 매 캡처가 겹쳐서
+    # 누락이 안 생긴다(실측으로 확인됨) — slow_scroll_test.py로 카드 높이에
+    # 근접한 32%까지 폭을 넓혀도 누락 없이 동작하는 걸 검증했다.
+    start_y = int(size["height"] * 0.87)
+    end_y = int(size["height"] * 0.55)
     x = int(size["width"] * 0.5)
 
     for _ in range(max_scrolls):
-        driver.execute_script("mobile: swipeGesture", {
-            "left": x - 10, "top": end_y, "width": 20, "height": start_y - end_y,
-            "direction": "up", "percent": 0.75,
-        })
-        # 0.5초로는 부족했다 — 실측 결과 스크롤 직후 리스트가 아직 로딩/렌더링
-        # 중일 때 page_source를 캡처하면 화면에 실제로 지나간 가게가 accessibility
-        # tree에는 안 잡혀서 통째로 누락되는 경우가 있었다(사용자가 화면으로
-        # 직접 지나가는 걸 봤는데 파싱 결과에는 없었던 사례로 확인).
+        _smooth_drag(driver, x, start_y, end_y)
         time.sleep(_SCROLL_SETTLE_WAIT_SEC)
         sources.append(driver.page_source)
         if _already_found(sources):

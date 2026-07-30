@@ -16,12 +16,16 @@
 - 실제 AI API 호출 금지 (답글 생성은 템플릿 기반 Mock)
 - 실제 자동 답글 등록 금지
 - 실제 CPC 자동 입찰 금지
-- 실제 광고 순위 크롤링 및 스크린샷 판독 금지
 - 실제 결제, 구독, 쿠팡이츠 출금 자동화 금지
 - 실제 문자/카카오톡 발송 금지
 - Flutter 앱 구현 금지, 복잡한 권한/다중 사업자 권한 관리 금지
 위 기능은 전부 Mock으로 흉내만 낸다.
-단, 광고비율(ACoS) 계산만 실제 공식으로 계산한다.
+단, 광고비율(ACoS) 계산은 실제 공식으로 계산하고, 광고 순위 모니터링의
+반경별(distance_km) 순위는 crawler/(Appium 실기기 자동화)로 실측 수집한다
+(추후 결정으로 예외 허용 — 아래 "창의 기능" 절 참고). crawler/는 사이트의
+요청 경로(FastAPI 프로세스) 밖에서 독립적으로 실행되는 별도 배치 도구이고,
+사이트는 그 결과를 DB에서 조회만 한다 — 사이트가 실시간으로 배민 앱을
+크롤링하지 않는다.
 
 ## 개인정보 원칙
 - 실제 개인정보는 저장하지 않는다.
@@ -52,7 +56,11 @@ ad_performance_metrics, ad_rank_snapshots, alerts.
 - repurchase_metrics: 날짜별 재주문율, 신규 주문 수, 재주문 수, 보정 전/후.
 - ad_campaigns: 광고 캠페인(카테고리, 현재 CPC, 목표 순위).
 - ad_performance_metrics: CPC, CVR, AOV, ACoS, 광고 성과 점수.
-- ad_rank_snapshots: 시간별 순위 스냅샷(현재 순위, 경쟁 가게 예상 CPC, 상태).
+- ad_rank_snapshots: 순위 스냅샷. 두 종류가 한 테이블에 공존한다 —
+  (1) 시간별 Mock 스냅샷(distance_km NULL): 현재 순위, 경쟁 가게 예상 CPC, 상태.
+  (2) 반경별 실측 스냅샷(distance_km NOT NULL): crawler/로 실제 배민 앱을
+  스크롤하며 수집한 point_label/거리/순위/스캔개수/위 광고개수. 경쟁 가게
+  CPC는 실측 불가능해 이 종류에는 저장하지 않는다(NULL).
 - alerts: 부정 리뷰, 미답변, 순위 하락 알림.
 
 ### 핵심 관계 (모든 관계에 외래키와 삭제 정책 명시)
@@ -87,8 +95,25 @@ ACoS(%) = CPC / (CVR × AOV) × 100
 ## 창의 기능: 광고 순위 모니터링
 경쟁 가게가 CPC를 조금만 올려도 순위가 밀리는 현장 고충을 위한 기능.
 ad_rank_snapshots에 카테고리, 현재 CPC, 목표 순위, 현재 순위, 경쟁 가게 예상
-CPC, 상태, 추천 액션을 담는다. 실제 순위 수집(크롤링/스크린샷 판독)은 하지
-않고, 수집됐다고 가정한 결과만 Mock으로 저장하고 보여준다.
+CPC, 상태, 추천 액션을 담는다. 시간별 스냅샷은 수집됐다고 가정한 결과를
+Mock으로 저장하고 보여준다.
+
+### 반경별 실측 순위 (crawler/, 예외적으로 실제 크롤링 허용)
+가게 기준 거리(0km / 1.5~2.5km / 2.5~3.5km)에 따라 카테고리 내 순위가 얼마나
+달라지는지 실측으로 보여주는 기능. 원래 "실제 광고 순위 크롤링 금지"
+원칙이었으나, crawler/ 하위의 Appium 실기기 자동화를 실측 검증(스크롤 폭·
+캡처 타이밍 튜닝 포함)한 뒤 이 기능에 한해 예외를 허용하기로 결정했다.
+
+- crawler/run_crawl.py: 실기기에서 배민 앱을 조작해 GPS를 반경별로 이동시키며
+  카테고리 리스트를 스크롤·캡처해 목표 가게의 순위를 찾는다. output/results.csv로
+  저장한다. 사이트(FastAPI/Next.js)와는 별개 프로세스로, 요청 시점에 실행되지
+  않고 사람이 필요할 때 수동 실행하는 배치 도구다.
+- backend/scripts/ingest_rank_snapshots.py: results.csv를 읽어 해당 캠페인의
+  ad_rank_snapshots에 distance_km/point_label/total_scanned/ads_above와 함께
+  적재한다. 경쟁 가게 CPC는 실측할 수 없으므로 이 종류의 행에는 저장하지 않는다.
+- GET /ads/rank-by-distance: 캠페인별로 point_label 최신 값을 거리순으로
+  반환한다. 사이트는 DB에 이미 적재된 값을 조회만 할 뿐, 요청을 받을 때마다
+  실시간으로 배민 앱을 크롤링하지 않는다.
 
 ## 포함 기능
 대시보드 요약, 매출/입금 기간 토글(1일/1주/1개월/이번달), 리뷰 관리,
@@ -106,6 +131,7 @@ CPC, 상태, 추천 액션을 담는다. 실제 순위 수집(크롤링/스크�
    GET /reply-styles
    GET /ads/performance
    GET /ads/rank-monitoring
+   GET /ads/rank-by-distance
    GET /sales/summary?period=day|week|month|this_month
    GET /deposits/summary?period=day|week|month|this_month
    광고비율 계산은 별도 파일(acos.py)에 실제 공식으로 구현한다.

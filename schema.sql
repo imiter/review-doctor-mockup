@@ -234,8 +234,13 @@ CREATE TABLE ad_performance_metrics (
 );
 
 -- ----------------------------------------------------------------------------
--- 15. ad_rank_snapshots — 시간별 순위 스냅샷 (창의 기능: 광고 순위 모니터링)
---     실제 순위 수집은 하지 않는다. 수집됐다고 가정한 결과만 Mock으로 저장.
+-- 15. ad_rank_snapshots — 순위 스냅샷 (창의 기능: 광고 순위 모니터링)
+--     두 종류가 한 테이블에 공존한다:
+--     (1) 시간별 Mock 스냅샷 (distance_km NULL) — 실제 순위 수집은 하지 않는다.
+--         수집됐다고 가정한 결과만 Mock으로 저장.
+--     (2) 반경별 실측 스냅샷 (distance_km NOT NULL) — crawler/(Appium 실기기
+--         자동화)로 실제 배민 앱을 스크롤해 수집한 결과. 경쟁 가게 CPC는
+--         실측할 수 없어 이 종류에는 저장하지 않는다(NULL로 둔다).
 --     suggested_cpc: 추천 액션이 raise/lower일 때 제안 CPC ("CPC 700원으로 인상" 표시용)
 -- ----------------------------------------------------------------------------
 CREATE TABLE ad_rank_snapshots (
@@ -243,11 +248,15 @@ CREATE TABLE ad_rank_snapshots (
     campaign_id        BIGINT      NOT NULL REFERENCES ad_campaigns(id) ON DELETE CASCADE,
     snapshot_at        TIMESTAMPTZ NOT NULL,
     current_rank       SMALLINT    NOT NULL CHECK (current_rank >= 1),
-    competitor_est_cpc INT         NOT NULL CHECK (competitor_est_cpc >= 0),  -- 경쟁 가게 예상 CPC (Mock)
-    status             VARCHAR(12) NOT NULL CHECK (status IN ('normal', 'rank_dropped')),
+    competitor_est_cpc INT         CHECK (competitor_est_cpc >= 0),  -- 경쟁 가게 예상 CPC (Mock, 시간별 스냅샷 전용)
+    status             VARCHAR(12) CHECK (status IN ('normal', 'rank_dropped')),
     recommended_action VARCHAR(10) NOT NULL DEFAULT 'keep'
                        CHECK (recommended_action IN ('keep', 'raise_cpc', 'lower_cpc')),
     suggested_cpc      INT         CHECK (suggested_cpc >= 0),
+    distance_km        NUMERIC(4,2) CHECK (distance_km >= 0),  -- NULL=시간별 Mock, 값 있으면 반경 실측(crawler/)
+    point_label        VARCHAR(20),                            -- '0km', '1.5~2.5km' 등 화면 표시용 (실측 전용)
+    total_scanned      SMALLINT    CHECK (total_scanned >= 0), -- 실측 시 스캔된 리스트 항목 수
+    ads_above          SMALLINT    CHECK (ads_above >= 0),     -- 실측 시 내 가게보다 위에 있던 광고 개수
     UNIQUE (campaign_id, snapshot_at)
 );
 

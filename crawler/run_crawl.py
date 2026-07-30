@@ -99,7 +99,10 @@ def _crawl_point(driver, settings, point_label: str, distance_km, bearing_deg, l
 
     try:
         navigate_to_category(driver, settings.category_label)
-        sources = scroll_and_collect(driver, max_scrolls=30, target_name=settings.store_display_name)
+        # scroll_and_collect의 스크롤 폭이 화면의 32%로 넓어지면서(누락 없이
+        # 검증된 최대치) 한 번에 이동하는 거리가 늘었다 — 같은 스캔 깊이를
+        # 유지하도록 스크롤 횟수를 그만큼 줄인다(70 * 20/32 ≈ 44).
+        sources = scroll_and_collect(driver, max_scrolls=44, target_name=settings.store_display_name)
         items = parse_items(sources)
         result = find_rank(items, settings.store_display_name)
         rank_value = _classify_rank(result)

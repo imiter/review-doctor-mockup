@@ -289,6 +289,14 @@ SELECT 2,
        'normal', 'keep', NULL
 FROM generate_series(0, 29) AS i;
 
+-- 캠페인1: 반경별 실측 스냅샷 (crawler/로 실제 배민 앱에서 수집한 값 — 데모용)
+INSERT INTO ad_rank_snapshots
+    (campaign_id, snapshot_at, current_rank, status, distance_km, point_label, total_scanned, ads_above)
+VALUES
+(1, now() - interval '3 minutes', 17, 'rank_dropped', 0.00, '0km',       17, 4),
+(1, now() - interval '2 minutes',  9, 'rank_dropped', 2.37, '1.5~2.5km', 10, 3),
+(1, now() - interval '1 minutes', 17, 'rank_dropped', 2.61, '2.5~3.5km', 17, 5);
+
 -- ----------------------------------------------------------------------------
 -- 16. alerts — 데이터에서 파생되는 알림 (발송 없음, 화면 표시용)
 -- ----------------------------------------------------------------------------
