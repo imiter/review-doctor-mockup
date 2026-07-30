@@ -49,6 +49,10 @@ type PerformanceRow = {
   score: number | null;
 };
 
+// 배포본(Railway)에는 로컬 에뮬레이터/Appium이 없어 실제 크롤링이 불가능하다 —
+// 이 플래그가 "true"일 때만(로컬 개발) 버튼을 활성화한다. frontend/.env.local 참고.
+const LIVE_CRAWL_ENABLED = process.env.NEXT_PUBLIC_LIVE_CRAWL_ENABLED === "true";
+
 const ACTION_LABEL: Record<string, string> = {
   keep: "유지",
   raise_cpc: "CPC 인상 권장",
@@ -167,10 +171,15 @@ export default function AdsPage() {
                 <p className="text-sm font-medium">{c.category}</p>
                 <button
                   onClick={() => handleRunCheck(c.campaign_id)}
-                  disabled={runningCampaignId !== null}
-                  className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+                  disabled={!LIVE_CRAWL_ENABLED || runningCampaignId !== null}
+                  title={LIVE_CRAWL_ENABLED ? undefined : "로컬 데모 전용 — 실기기 에뮬레이터가 필요한 기능입니다"}
+                  className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {runningCampaignId === c.campaign_id ? "순위 확인 중… (수 분 소요)" : "우리가게 순위 확인"}
+                  {!LIVE_CRAWL_ENABLED
+                    ? "우리가게 순위 확인 (로컬 데모 전용)"
+                    : runningCampaignId === c.campaign_id
+                      ? "순위 확인 중… (수 분 소요)"
+                      : "우리가게 순위 확인"}
                 </button>
               </div>
               {c.points.length === 0 ? (
