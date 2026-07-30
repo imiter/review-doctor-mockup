@@ -11,10 +11,14 @@
 ## 절대 지키는 원칙
 
 - 실제 배민/쿠팡이츠/요기요 API 연동, 실제 리뷰 크롤링, 실제 AI 호출, 실제 자동 답글 등록 **없음**
-- 실제 CPC 자동 입찰, 실제 광고 순위 크롤링·스크린샷 판독 **없음**
-- 실제 결제·구독 결제·자동 출금, 실제 문자/카카오톡 발송 **없음**
+- 실제 CPC 자동 입찰, 실제 결제·구독 결제·자동 출금, 실제 문자/카카오톡 발송 **없음**
 - 위 기능은 전부 Mock (seed 데이터 + 템플릿 응답)으로 흉내만 낸다
 - **광고비율(ACoS) 계산만 실제 공식으로 계산한다** — `backend/app/acos.py`
+- **예외**: 광고 순위 모니터링의 반경별(0km/1.5~2.5km/2.5~3.5km) 순위만 `crawler/`
+  (Appium 실기기 자동화)로 실측한다. 사이트(FastAPI)는 요청마다 실시간으로 크롤링하지
+  않고, `crawler/`가 만든 결과를 DB에서 조회하거나(`GET /ads/rank-by-distance`) 사용자가
+  "우리가게 순위 확인" 버튼을 누른 시점에만 백엔드가 `crawler/`를 실행한다
+  (`POST /ads/rank-by-distance/run`, 자세한 내용은 `crawler/README.md`).
 - 개인정보 미저장: 전화번호는 `phone_hash`(SHA-256)로만 저장, 사업자번호·스토어
   아이디·주문번호는 전부 Mock 값, 주민번호·실명은 받지 않음
 
@@ -61,12 +65,13 @@ npm run dev                                 # http://localhost:3000 (포트 사�
 - **리뷰 관리** — 답글 대기/검토중/완료 필터, 스타일 선택 → 템플릿 Mock 답글 생성 →
   수정 → 등록
 - **광고 순위 모니터링** — 카테고리별 현재 순위·경쟁 예상 CPC·상태·추천 액션 (Mock
-  스냅샷, 실제 크롤링 없음)
+  스냅샷) + 가게 기준 반경별(0km/1.5~2.5km/2.5~3.5km) 실측 순위, "우리가게 순위 확인"
+  버튼으로 실기기 크롤링을 직접 실행 가능
 
 ## 테스트
 
 ```bash
-cd backend && .venv/bin/python -m pytest -v   # 31 passed (SQLite 인메모리)
+cd backend && .venv/bin/python -m pytest -v   # 55 passed (SQLite 인메모리)
 cd frontend && npx tsc --noEmit
 ```
 
@@ -74,3 +79,6 @@ cd frontend && npx tsc --noEmit
 
 - `CLAUDE.md` — 프로젝트 브리프 (범위, 절대 금지 목록, DB 설계 원칙, ACoS 공식, 작업 순서)
 - `schema.sql` / `seed.sql` — DB 정본
+- `docs/schema.dbml` — ERD용 DBML. [dbdiagram.io](https://dbdiagram.io/d)에 통째로
+  붙여넣으면 다이어그램이 그려진다
+- `crawler/README.md` — 반경별 실측 순위 크롤러(Appium) 설정/실행 방법
