@@ -148,3 +148,41 @@ cd crawler
 `PARSE_ERROR`가 발생하면 원인 분석용 원본 화면 데이터가 `output/debug/`에
 함께 저장된다. 한 지점에서 앱 조작이 실패해도(`NAV_ERROR`) 전체 실행은
 중단되지 않고 나머지 지점을 계속 진행한다.
+
+## 배포 사이트용 "워커" (사이트의 "우리가게 순위 확인" 버튼)
+
+배포된 사이트(Railway)는 에뮬레이터를 못 돌린다. 대신 이 맥북을 크롤
+워커로 써서, 배포 백엔드가 요청을 위임하면 이 컴퓨터가 실제로 크롤링하고
+Railway의 프로덕션 DB에 직접 결과를 적재한다. 자세한 아키텍처는
+`docs/superpowers/specs/`의 관련 설계 문서를 참고.
+
+필요한 4가지 프로세스: 안드로이드 에뮬레이터, Appium 서버, 워커
+백엔드(`backend/`를 `DATABASE_URL`만 Railway 프로덕션 Postgres로 바꿔서
+실행), ngrok 고정 터널(`https://rearview-clash-nuttiness.ngrok-free.dev`
+→ 워커 백엔드 8001 포트).
+
+```bash
+cd crawler
+./start_worker_services.sh   # 4가지를 순서대로 확인/기동 (이미 떠 있으면 건너뜀)
+```
+
+비밀값(DB 접속 문자열, `CRAWL_WORKER_SECRET`, ngrok 고정 URL)은
+`crawler/.env.worker`에 있다 — `.env`처럼 gitignore 대상이라 저장소에는
+없다. 새 컴퓨터로 옮기거나 값을 잃어버리면 Railway 대시보드(Postgres
+`DATABASE_PUBLIC_URL`)와 `railway variable list --service backend`로
+다시 확인할 수 있다.
+
+macOS 로그인 시 자동 실행되도록 LaunchAgent로 등록돼 있다
+(`~/Library/LaunchAgents/com.reviewdocter.crawler-worker.plist`, 저장소
+밖에 있어 git에는 없음). 재부팅 후 로그인하면 자동으로 4가지가 다시
+켜진다 — 단, 로그인 자체가 있어야 실행되는 방식이라 자동 로그인을 켜두지
+않았다면 재부팅 후 한 번은 직접 로그인해야 한다.
+
+```bash
+# 상태 확인
+launchctl print gui/$(id -u)/com.reviewdocter.crawler-worker
+tail -f logs/launchd.log logs/emulator.log logs/appium.log logs/worker-backend.log logs/ngrok.log
+
+# 등록 해제하고 싶으면
+launchctl bootout gui/$(id -u)/com.reviewdocter.crawler-worker
+```
