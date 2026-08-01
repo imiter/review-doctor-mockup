@@ -1,4 +1,6 @@
 .env
+.env.worker
 output/
+logs/
 .venv/
 __pycache__/
