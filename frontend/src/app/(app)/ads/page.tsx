@@ -76,16 +76,39 @@ export default function AdsPage() {
     apiGet<PerformanceRow[]>(`/ads/performance?store_id=${storeId}&days=14`).then(setPerformance);
   }, [storeId]);
 
+  // 크롤은 3~5분 걸리는데, 배포 환경(Railway) 앞단 프록시가 오래 걸리는 요청을
+  // 강제로 끊어버려서(524 Timeout, 실측으로 확인) 응답 하나로 끝까지 기다릴 수
+  // 없다 — 대신 시작만 요청하고(POST), 5초 간격으로 상태를 조회(GET)한다.
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
   async function handleRunCheck(campaignId: number) {
     setRunningCampaignId(campaignId);
     setRunError(null);
     try {
-      const res = await apiPost<{ inserted: number; skipped: number; points: DistancePoint[] }>(
-        `/ads/rank-by-distance/run?campaign_id=${campaignId}`
-      );
-      setDistanceRanks((prev) =>
-        prev.map((c) => (c.campaign_id === campaignId ? { ...c, points: res.points } : c))
-      );
+      await apiPost<{ status: string }>(`/ads/rank-by-distance/run?campaign_id=${campaignId}`);
+
+      while (true) {
+        await sleep(5000);
+        const status = await apiGet<{
+          status: "idle" | "running" | "done" | "error";
+          inserted?: number;
+          skipped?: number;
+          points?: DistancePoint[];
+          error?: string;
+        }>(`/ads/rank-by-distance/run/status?campaign_id=${campaignId}`);
+
+        if (status.status === "done") {
+          setDistanceRanks((prev) =>
+            prev.map((c) => (c.campaign_id === campaignId ? { ...c, points: status.points ?? c.points } : c))
+          );
+          break;
+        }
+        if (status.status === "error") {
+          setRunError(status.error ?? "순위 확인 중 오류가 발생했습니다.");
+          break;
+        }
+        // "running" 또는 "idle"(막 시작해서 아직 상태가 안 잡힌 순간)이면 계속 폴링
+      }
     } catch (e) {
       setRunError(e instanceof ApiError ? e.message : "순위 확인 중 오류가 발생했습니다.");
     } finally {

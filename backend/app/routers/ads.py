@@ -15,7 +15,7 @@ import threading
 from datetime import date, timedelta
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -34,6 +34,13 @@ _crawl_lock = threading.Lock()  # 에뮬레이터는 한 번에 하나만 조작
 
 _CRAWL_WORKER_URL = os.getenv("CRAWL_WORKER_URL")  # 배포 환경에서만 설정 (예: 터널 URL)
 _CRAWL_WORKER_SECRET = os.getenv("CRAWL_WORKER_SECRET", "")  # 워커 호출 시/검증 시 공용
+
+# 크롤은 3~5분 걸리는데, Railway 등 배포 환경 앞단의 프록시(엣지)는 보통
+# 100초 안팎에서 오래 걸리는 요청을 강제로 끊는다(실측: 524 Timeout 확인).
+# 그래서 "요청 하나로 끝까지 기다리는" 구조 대신 "시작만 시키고(POST) 상태를
+# 짧은 간격으로 조회(GET)하는" 구조로 만든다 — 모든 개별 요청은 즉시 끝난다.
+_job_state_lock = threading.Lock()
+_job_state: dict = {"campaign_id": None, "status": None, "inserted": None, "skipped": None, "error": None}
 
 
 def _crawler_subprocess_env() -> dict:
@@ -144,11 +151,9 @@ def ads_rank_by_distance(
 
 def _run_local_crawl(campaign_id: int) -> tuple[int, int]:
     """이 프로세스와 같은 컴퓨터의 crawler venv/에뮬레이터로 실제 크롤링을 실행하고
-    결과를 DB에 적재한다. (inserted, skipped) 개수를 반환한다.
-
-    호출부가 이미 _crawl_lock을 잡고 있다고 가정한다 — 이 함수 자체는 락을
-    걸지 않는다(로컬 직접 실행 경로와 /internal/run-crawl 양쪽에서 재사용하기
-    위해 락 범위를 호출부 책임으로 뺐다)."""
+    결과를 DB에 적재한다. (inserted, skipped) 개수를 반환한다. 3~5분 걸리는
+    블로킹 호출이므로 반드시 백그라운드 스레드에서만 부른다(요청 핸들러에서
+    직접 부르면 배포 환경 프록시 타임아웃에 걸린다 — 아래 _start_crawl_job 참고)."""
     if not _CRAWLER_PYTHON.exists():
         raise HTTPException(500, f"crawler venv를 찾을 수 없습니다: {_CRAWLER_PYTHON}")
     try:
@@ -171,9 +176,55 @@ def _run_local_crawl(campaign_id: int) -> tuple[int, int]:
     return ingest_csv(csv_path, campaign_id)
 
 
+def _execute_crawl_job(campaign_id: int) -> None:
+    """백그라운드 스레드에서 실행된다. _crawl_lock은 호출부(_start_crawl_job)가
+    이미 잡아뒀고, 끝나면 이 함수가 반드시 놓아준다."""
+    try:
+        inserted, skipped = _run_local_crawl(campaign_id)
+        with _job_state_lock:
+            _job_state.update(campaign_id=campaign_id, status="done", inserted=inserted, skipped=skipped, error=None)
+    except HTTPException as e:
+        with _job_state_lock:
+            _job_state.update(campaign_id=campaign_id, status="error", inserted=None, skipped=None, error=e.detail)
+    except Exception as e:  # noqa: BLE001 — 백그라운드 스레드라 여기서 못 잡으면 조용히 사라진다
+        with _job_state_lock:
+            _job_state.update(campaign_id=campaign_id, status="error", inserted=None, skipped=None, error=str(e))
+    finally:
+        _crawl_lock.release()
+
+
+def _start_crawl_job(campaign_id: int, background_tasks: BackgroundTasks) -> None:
+    """크롤을 백그라운드로 시작만 하고 즉시 반환한다(응답 자체는 몇 ms 안에 끝남).
+    진행 상황은 _job_state를 폴링(/internal/run-crawl/status,
+    /ads/rank-by-distance/run/status)해서 확인한다."""
+    if not _crawl_lock.acquire(blocking=False):
+        raise HTTPException(409, "이미 다른 순위 확인이 진행 중입니다. 잠시 후 다시 시도하세요.")
+    with _job_state_lock:
+        _job_state.update(campaign_id=campaign_id, status="running", inserted=None, skipped=None, error=None)
+    background_tasks.add_task(_execute_crawl_job, campaign_id)
+
+
+def _job_status_response(campaign_id: int, db: Session, campaign: AdCampaign) -> dict:
+    with _job_state_lock:
+        state = dict(_job_state)
+    if state["campaign_id"] != campaign_id:
+        return {"status": "idle"}
+    if state["status"] == "done":
+        return {"status": "done", "inserted": state["inserted"], "skipped": state["skipped"], "points": _latest_distance_points(db, campaign)}
+    if state["status"] == "error":
+        return {"status": "error", "error": state["error"]}
+    return {"status": "running"}
+
+
+def _require_worker_secret(x_worker_secret: str) -> None:
+    if not _CRAWL_WORKER_SECRET or not hmac.compare_digest(x_worker_secret, _CRAWL_WORKER_SECRET):
+        raise HTTPException(403, "워커 비밀키가 일치하지 않습니다")
+
+
 @router.post("/internal/run-crawl")
 def internal_run_crawl(
     campaign_id: int,
+    background_tasks: BackgroundTasks,
     x_worker_secret: str = Header(default=""),
     db: Session = Depends(get_db),
 ):
@@ -183,56 +234,59 @@ def internal_run_crawl(
     실행 주체이므로 "누가 로그인했는지"는 이 단계에서 의미가 없다(사용자
     권한 검사는 이미 호출부인 /ads/rank-by-distance/run에서 끝났다).
 
-    이 엔드포인트는 CRAWL_WORKER_SECRET이 설정된 컴퓨터(=워커로 쓰려는
-    컴퓨터)에서만 의미가 있다 — 비어 있으면 그 자체로 거절한다(빈 문자열끼리
-    비교해서 통과하는 사고를 막는다)."""
-    if not _CRAWL_WORKER_SECRET or not hmac.compare_digest(x_worker_secret, _CRAWL_WORKER_SECRET):
-        raise HTTPException(403, "워커 비밀키가 일치하지 않습니다")
-
+    시작만 시키고 바로 반환한다 — 실제 진행 상황은 /internal/run-crawl/status로
+    확인한다(배포 환경 프록시가 오래 걸리는 요청을 끊어버리는 문제 때문에
+    "요청 하나로 끝까지 기다리는" 구조를 쓸 수 없다)."""
+    _require_worker_secret(x_worker_secret)
     campaign = db.get(AdCampaign, campaign_id)
     if campaign is None:
         raise HTTPException(404, "캠페인을 찾을 수 없습니다")
+    _start_crawl_job(campaign.id, background_tasks)
+    return {"status": "started"}
 
-    if not _crawl_lock.acquire(blocking=False):
-        raise HTTPException(409, "이미 다른 순위 확인이 진행 중입니다. 잠시 후 다시 시도하세요.")
-    try:
-        inserted, skipped = _run_local_crawl(campaign.id)
-    finally:
-        _crawl_lock.release()
 
-    return {"inserted": inserted, "skipped": skipped, "points": _latest_distance_points(db, campaign)}
+@router.get("/internal/run-crawl/status")
+def internal_run_crawl_status(
+    campaign_id: int,
+    x_worker_secret: str = Header(default=""),
+    db: Session = Depends(get_db),
+):
+    _require_worker_secret(x_worker_secret)
+    campaign = db.get(AdCampaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(404, "캠페인을 찾을 수 없습니다")
+    return _job_status_response(campaign_id, db, campaign)
+
+
+def _campaign_for_user(campaign_id: int, user: User, db: Session) -> AdCampaign:
+    campaign = db.get(AdCampaign, campaign_id)
+    store = db.get(Store, campaign.store_id) if campaign else None
+    if campaign is None or store is None or store.user_id != user.id:
+        raise HTTPException(404, "캠페인을 찾을 수 없습니다")
+    return campaign
 
 
 @router.post("/ads/rank-by-distance/run")
 def ads_rank_by_distance_run(
     campaign_id: int,
+    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """반경별 순위를 실제로 실측하고 ad_rank_snapshots에 적재한 뒤 최신 값을
-    반환한다. 사용자 로그인(JWT)로 인증하고, 실행 주체는 두 갈래로 나뉜다:
+    """반경별 순위 실측을 시작만 시키고 즉시 반환한다({"status": "started"}).
+    실제 진행 상황·완료 결과는 GET /ads/rank-by-distance/run/status를
+    몇 초 간격으로 폴링해서 확인한다(프론트엔드가 이미 그렇게 구현돼 있다).
 
-    1. 이 프로세스와 같은 컴퓨터에 crawler venv가 있으면(로컬 개발) 직접 실행.
+    실행 주체는 두 갈래:
+    1. 이 프로세스와 같은 컴퓨터에 crawler venv가 있으면(로컬 개발) 직접 시작.
     2. 없고 CRAWL_WORKER_URL이 설정돼 있으면(배포 환경) 그 URL의
-       /internal/run-crawl로 실행을 위임하고 응답을 그대로 전달한다. 워커가
-       이 백엔드와 같은 DB(Postgres)에 결과를 적재하므로, 위임이 끝난 뒤 이
-       프로세스의 DB 세션으로 다시 조회하면 최신 값이 바로 보인다.
-
-    지점 3개 * 지점당 1분 안팎으로 완료까지 수 분 걸리는 동기 호출이다 —
-    응답이 오기 전까지 호출부(프론트엔드)가 버튼을 비활성화해야 한다."""
-    campaign = db.get(AdCampaign, campaign_id)
-    store = db.get(Store, campaign.store_id) if campaign else None
-    if campaign is None or store is None or store.user_id != user.id:
-        raise HTTPException(404, "캠페인을 찾을 수 없습니다")
+       /internal/run-crawl을 호출해 실행을 위임한다. 이 호출도 "시작만
+       시키는" 즉시 반환 요청이라 배포 환경 프록시 타임아웃과 무관하다."""
+    campaign = _campaign_for_user(campaign_id, user, db)
 
     if _CRAWLER_PYTHON.exists():
-        if not _crawl_lock.acquire(blocking=False):
-            raise HTTPException(409, "이미 다른 순위 확인이 진행 중입니다. 잠시 후 다시 시도하세요.")
-        try:
-            inserted, skipped = _run_local_crawl(campaign.id)
-        finally:
-            _crawl_lock.release()
-        return {"inserted": inserted, "skipped": skipped, "points": _latest_distance_points(db, campaign)}
+        _start_crawl_job(campaign.id, background_tasks)
+        return {"status": "started"}
 
     if _CRAWL_WORKER_URL:
         try:
@@ -240,15 +294,50 @@ def ads_rank_by_distance_run(
                 f"{_CRAWL_WORKER_URL}/internal/run-crawl",
                 params={"campaign_id": campaign.id},
                 headers={"X-Worker-Secret": _CRAWL_WORKER_SECRET},
-                timeout=_CRAWL_TIMEOUT_SEC + 30,
+                timeout=15,
             )
         except httpx.RequestError as e:
             raise HTTPException(502, f"크롤 워커에 연결할 수 없습니다: {e}")
         if resp.status_code != 200:
             raise HTTPException(resp.status_code, f"크롤 워커 실행 실패: {resp.text[:500]}")
-        return {**resp.json(), "points": _latest_distance_points(db, campaign)}
+        return resp.json()
 
     raise HTTPException(500, "이 환경에서는 실측 크롤링을 실행할 수 없습니다 (로컬 crawler venv도 CRAWL_WORKER_URL도 없음)")
+
+
+@router.get("/ads/rank-by-distance/run/status")
+def ads_rank_by_distance_run_status(
+    campaign_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """/ads/rank-by-distance/run이 시작시킨 크롤의 진행 상황을 조회한다.
+    {"status": "idle" | "running" | "done" | "error", ...}"""
+    campaign = _campaign_for_user(campaign_id, user, db)
+
+    if _CRAWLER_PYTHON.exists():
+        return _job_status_response(campaign_id, db, campaign)
+
+    if _CRAWL_WORKER_URL:
+        try:
+            resp = httpx.get(
+                f"{_CRAWL_WORKER_URL}/internal/run-crawl/status",
+                params={"campaign_id": campaign.id},
+                headers={"X-Worker-Secret": _CRAWL_WORKER_SECRET},
+                timeout=15,
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(502, f"크롤 워커에 연결할 수 없습니다: {e}")
+        if resp.status_code != 200:
+            raise HTTPException(resp.status_code, f"크롤 워커 상태 확인 실패: {resp.text[:500]}")
+        data = resp.json()
+        if data.get("status") == "done":
+            # 워커가 이미 같은 DB(Postgres)에 커밋했으므로 이 프로세스에서
+            # 다시 조회해도 최신 값이 바로 보인다.
+            return {**data, "points": _latest_distance_points(db, campaign)}
+        return data
+
+    return {"status": "idle"}
 
 
 @router.get("/ads/rank-monitoring")
