@@ -49,8 +49,10 @@ type PerformanceRow = {
   score: number | null;
 };
 
-// 배포본(Railway)에는 로컬 에뮬레이터/Appium이 없어 실제 크롤링이 불가능하다 —
-// 이 플래그가 "true"일 때만(로컬 개발) 버튼을 활성화한다. frontend/.env.local 참고.
+// 백엔드가 로컬 crawler venv 또는 CRAWL_WORKER_URL(터널로 노출한 워커) 중
+// 하나로 실제 크롤링을 실행할 수 있을 때만 이 플래그를 켠다(로컬은
+// frontend/.env.local, 배포본은 Railway 환경변수). 워커 컴퓨터가 꺼져있으면
+// 버튼은 눌리지만 요청이 실패할 수 있다 — 그 경우 에러 메시지로 안내한다.
 const LIVE_CRAWL_ENABLED = process.env.NEXT_PUBLIC_LIVE_CRAWL_ENABLED === "true";
 
 const ACTION_LABEL: Record<string, string> = {
@@ -172,11 +174,11 @@ export default function AdsPage() {
                 <button
                   onClick={() => handleRunCheck(c.campaign_id)}
                   disabled={!LIVE_CRAWL_ENABLED || runningCampaignId !== null}
-                  title={LIVE_CRAWL_ENABLED ? undefined : "로컬 데모 전용 — 실기기 에뮬레이터가 필요한 기능입니다"}
+                  title={LIVE_CRAWL_ENABLED ? undefined : "이 환경에서는 실측 크롤링을 실행할 수 없습니다"}
                   className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {!LIVE_CRAWL_ENABLED
-                    ? "우리가게 순위 확인 (로컬 데모 전용)"
+                    ? "우리가게 순위 확인 (사용 불가)"
                     : runningCampaignId === c.campaign_id
                       ? "순위 확인 중… (수 분 소요)"
                       : "우리가게 순위 확인"}
