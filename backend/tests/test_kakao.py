@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from app import kakao
@@ -40,6 +41,7 @@ def test_fetch_kakao_user_parses_nickname_and_email(monkeypatch):
         "id": 123456789,
         "kakao_account": {
             "is_email_valid": True,
+            "is_email_verified": True,
             "email": "user@kakao.com",
             "profile": {"nickname": "김사장"},
         },
@@ -67,3 +69,54 @@ def test_fetch_kakao_user_raises_on_failure(monkeypatch):
 
     with pytest.raises(kakao.KakaoAuthError):
         kakao.fetch_kakao_user("expired-token")
+
+
+def test_fetch_kakao_user_unverified_email_returns_none(monkeypatch):
+    payload = {
+        "id": 555,
+        "kakao_account": {
+            "is_email_valid": True,
+            "is_email_verified": False,
+            "email": "victim@example.com",
+            "profile": {"nickname": "미검증"},
+        },
+    }
+    monkeypatch.setattr(kakao.httpx, "get", lambda url, headers, timeout: _FakeResponse(200, payload))
+
+    user = kakao.fetch_kakao_user("kakao-access-token")
+    assert user.email is None
+
+
+def test_exchange_code_for_token_wraps_network_error(monkeypatch):
+    def _raise(url, data, timeout):
+        raise httpx.ConnectTimeout("timeout")
+
+    monkeypatch.setattr(kakao.httpx, "post", _raise)
+
+    with pytest.raises(kakao.KakaoAuthError):
+        kakao.exchange_code_for_token("auth-code-123", "http://localhost:3000/auth/kakao/callback")
+
+
+def test_exchange_code_for_token_raises_on_missing_access_token(monkeypatch):
+    monkeypatch.setattr(kakao.httpx, "post", lambda url, data, timeout: _FakeResponse(200, {}))
+
+    with pytest.raises(kakao.KakaoAuthError):
+        kakao.exchange_code_for_token("auth-code-123", "http://localhost:3000/auth/kakao/callback")
+
+
+def test_fetch_kakao_user_wraps_network_error(monkeypatch):
+    def _raise(url, headers, timeout):
+        raise httpx.ConnectTimeout("timeout")
+
+    monkeypatch.setattr(kakao.httpx, "get", _raise)
+
+    with pytest.raises(kakao.KakaoAuthError):
+        kakao.fetch_kakao_user("kakao-access-token")
+
+
+def test_fetch_kakao_user_raises_on_missing_id(monkeypatch):
+    payload = {"kakao_account": {"profile": {"nickname": "아이디없음"}}}
+    monkeypatch.setattr(kakao.httpx, "get", lambda url, headers, timeout: _FakeResponse(200, payload))
+
+    with pytest.raises(kakao.KakaoAuthError):
+        kakao.fetch_kakao_user("kakao-access-token")

@@ -1,4 +1,4 @@
-"""이메일 로그인. bcrypt 비밀번호 해시 + JWT 세션. 소셜 로그인은 범위 외."""
+"""JWT 세션 + bcrypt 비밀번호 해시 — 이메일 로그인과 카카오 로그인이 공유하는 인증 유틸리티."""
 
 import os
 from datetime import datetime, timedelta, timezone

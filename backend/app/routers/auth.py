@@ -115,6 +115,8 @@ def kakao_callback(body: KakaoCallbackRequest, db: Session = Depends(get_db)):
     )
     if social:
         user = db.get(User, social.user_id)
+        if user is None:
+            raise HTTPException(401, "사용자를 찾을 수 없습니다")
     else:
         user = None
         if kakao_user.email:
