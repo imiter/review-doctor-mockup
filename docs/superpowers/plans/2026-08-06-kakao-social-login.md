@@ -866,8 +866,11 @@ Run (각각 별도 터미널):
 cd backend
 DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/delivery_insight" \
 KAKAO_CLIENT_ID="013b6d77c13fe0a1eb20e41d1bc012d4" \
+KAKAO_CLIENT_SECRET="<카카오 콘솔 > 카카오 로그인 > 보안의 Client Secret 값>" \
   .venv/bin/uvicorn app.main:app --reload
 ```
+
+(로컬 검증 중 실제로 확인된 사항: 이 카카오 앱은 Client Secret이 활성화돼 있어서, `KAKAO_CLIENT_SECRET` 없이 토큰 교환을 시도하면 카카오가 `invalid_client`/`KOE010`으로 거부한다. 브리프 작성 시점엔 "콘솔에서 활성화한 경우에만 선택 사용"으로 옵션 취급했지만, 이 프로젝트의 카카오 앱은 필수다.)
 ```bash
 cd frontend
 npm run dev
@@ -886,7 +889,9 @@ npm run dev
 - [ ] **Step 6: 배포 안내 (실행은 사용자 확인 후)**
 
 로컬 검증이 끝나면 Railway 배포가 남는다. 이 단계는 프로덕션 환경(공유 상태)을 바꾸는 작업이라 실행 전 사용자에게 반드시 확인받는다:
-1. Railway `backend` 서비스 변수에 `KAKAO_CLIENT_ID=013b6d77c13fe0a1eb20e41d1bc012d4` 추가.
+1. Railway `backend` 서비스 변수에 `KAKAO_CLIENT_ID=013b6d77c13fe0a1eb20e41d1bc012d4`와
+   `KAKAO_CLIENT_SECRET=<카카오 콘솔의 Client Secret 값>`을 둘 다 추가한다 — 로컬 검증 중
+   이 카카오 앱은 Client Secret이 필수임을 확인했다(없으면 `invalid_client`로 거부됨).
 2. Railway `frontend` 서비스 변수에 `NEXT_PUBLIC_KAKAO_CLIENT_ID=013b6d77c13fe0a1eb20e41d1bc012d4` 추가 (Next.js는 이 값을 빌드 시점에 굳히므로 반드시 재배포가 필요하다).
 3. 카카오 디벨로퍼스 콘솔의 Redirect URI에 `https://frontend-production-5aa7.up.railway.app/auth/kakao/callback`이 등록돼 있는지 재확인(이미 앞서 등록 요청함).
 4. 프로덕션 Postgres에 새 스키마 적용 — 기존 데이터(데모 계정 등)가 날아가는 작업이라 실행 전 반드시 별도로 확인받는다. `railway up`/`psql` 등 정확한 방법은 실행 직전에 다시 상의한다.
