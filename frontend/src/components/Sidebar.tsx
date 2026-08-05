@@ -155,7 +155,7 @@ export function Sidebar() {
 
       <div className="border-t border-border-subtle px-4 py-4">
         <p className="truncate text-xs font-medium text-foreground">{user?.nickname}</p>
-        <p className="truncate text-[11px] text-muted">{user?.email}</p>
+        <p className="truncate text-[11px] text-muted">{user?.email ?? "카카오 계정"}</p>
         <button
           onClick={logout}
           className="mt-3 w-full rounded-lg border border-border-subtle py-2 text-xs text-muted transition hover:border-danger hover:text-danger"

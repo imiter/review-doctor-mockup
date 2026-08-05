@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from "rea
 import { useRouter } from "next/navigation";
 import { apiGet, clearToken, getToken } from "@/lib/api";
 
-type MeResponse = { id: number; email: string; nickname: string; has_phone: boolean; marketing_agreed: boolean };
+type MeResponse = { id: number; email: string | null; nickname: string; has_phone: boolean; marketing_agreed: boolean };
 type StoreOption = { id: number; name: string; category: string };
 
 type StoreContextValue = {

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { ApiError, apiPost, getToken, setToken } from "@/lib/api";
+import { kakaoAuthorizeUrl } from "@/lib/kakao";
 
 type TokenResponse = { access_token: string };
 
@@ -90,6 +91,16 @@ export default function LoginPage() {
           className="mt-3 w-full rounded-lg border border-border-subtle py-2.5 text-sm text-muted transition hover:border-accent hover:text-foreground disabled:opacity-50"
         >
           데모 계정으로 로그인
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            window.location.href = kakaoAuthorizeUrl();
+          }}
+          className="mt-3 w-full rounded-lg bg-[#FEE500] py-2.5 text-sm font-medium text-black transition hover:opacity-90"
+        >
+          카카오로 로그인
         </button>
 
         <p className="mt-6 text-center text-xs text-muted">
