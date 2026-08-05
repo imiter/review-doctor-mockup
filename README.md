@@ -58,6 +58,12 @@ npm run dev                                 # http://localhost:3000 (포트 사�
 있다 (`demo@dris.kr` / `demo1234!`, seed된 매장 2곳 포함). 이메일 회원가입도 가능하며
 가입 직후 빈 대시보드를 보여주지 않도록 기본 매장 1개가 자동 생성된다.
 
+카카오 로그인까지 로컬에서 동작시키려면 `backend/.env.example`의 `KAKAO_CLIENT_ID`,
+`KAKAO_CLIENT_SECRET`와 `frontend/.env.example`의 `NEXT_PUBLIC_KAKAO_CLIENT_ID`를 채운
+`.env`(백엔드) / `.env.local`(프론트)이 각각 필요하다 — 값이 없어도 이메일 로그인과
+데모 계정 로그인은 정상 동작한다. 나머지 환경변수의 의미는 두 `.env.example` 파일의
+주석을 참고한다.
+
 ## 화면 (3개)
 
 - **대시보드** — 매출/입금 기간 토글(오늘·1주·1개월·이번달), 답글 대기 리뷰, 재주문율,
