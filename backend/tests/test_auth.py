@@ -110,3 +110,100 @@ def test_social_account_links_user_and_enforces_unique_provider_pair(db_session)
     ))
     with pytest.raises(IntegrityError):
         db_session.commit()
+
+
+def test_kakao_login_creates_new_user_with_store_and_subscription(client, platforms, monkeypatch):
+    from app.kakao import KakaoUser
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "exchange_code_for_token", lambda code, redirect_uri: "kakao-token")
+    monkeypatch.setattr(
+        auth_router, "fetch_kakao_user",
+        lambda access_token: KakaoUser(id="1001", nickname="카카오사장", email=None),
+    )
+
+    res = client.post(
+        "/auth/kakao/callback",
+        json={"code": "auth-code", "redirect_uri": "http://localhost:3000/auth/kakao/callback"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["user"]["nickname"] == "카카오사장"
+    assert body["user"]["email"] is None
+
+    stores = client.get("/stores", headers={"Authorization": f"Bearer {body['access_token']}"}).json()
+    assert len(stores) == 1
+
+
+def test_kakao_login_reuses_existing_social_account(client, platforms, monkeypatch):
+    from app.kakao import KakaoUser
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "exchange_code_for_token", lambda code, redirect_uri: "kakao-token")
+    monkeypatch.setattr(
+        auth_router, "fetch_kakao_user",
+        lambda access_token: KakaoUser(id="2002", nickname="재로그인사장", email=None),
+    )
+    body = {"code": "auth-code", "redirect_uri": "http://localhost:3000/auth/kakao/callback"}
+
+    first = client.post("/auth/kakao/callback", json=body).json()
+    second = client.post("/auth/kakao/callback", json=body).json()
+
+    assert first["user"]["id"] == second["user"]["id"]
+    stores = client.get("/stores", headers={"Authorization": f"Bearer {second['access_token']}"}).json()
+    assert len(stores) == 1  # 두 번째 로그인에서 매장이 또 생기면 안 됨
+
+
+def test_kakao_login_links_to_existing_email_account(client, platforms, seeded_user, monkeypatch):
+    from app.kakao import KakaoUser
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "exchange_code_for_token", lambda code, redirect_uri: "kakao-token")
+    monkeypatch.setattr(
+        auth_router, "fetch_kakao_user",
+        lambda access_token: KakaoUser(id="3003", nickname="김사장", email="demo@dris.kr"),
+    )
+
+    res = client.post(
+        "/auth/kakao/callback",
+        json={"code": "auth-code", "redirect_uri": "http://localhost:3000/auth/kakao/callback"},
+    )
+    assert res.status_code == 200
+    assert res.json()["user"]["id"] == seeded_user["user"].id
+
+    stores = client.get("/stores", headers={"Authorization": f"Bearer {res.json()['access_token']}"}).json()
+    assert len(stores) == 1  # 기존 계정에 연결됐을 뿐, 새 매장이 추가로 생기면 안 됨
+
+
+def test_kakao_login_failure_returns_502(client, platforms, monkeypatch):
+    from app.kakao import KakaoAuthError
+    from app.routers import auth as auth_router
+
+    def _raise(*args, **kwargs):
+        raise KakaoAuthError("boom")
+
+    monkeypatch.setattr(auth_router, "exchange_code_for_token", _raise)
+
+    res = client.post(
+        "/auth/kakao/callback",
+        json={"code": "bad-code", "redirect_uri": "http://localhost:3000/auth/kakao/callback"},
+    )
+    assert res.status_code == 502
+
+
+def test_kakao_only_user_cannot_login_with_password(client, platforms, monkeypatch):
+    from app.kakao import KakaoUser
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "exchange_code_for_token", lambda code, redirect_uri: "kakao-token")
+    monkeypatch.setattr(
+        auth_router, "fetch_kakao_user",
+        lambda access_token: KakaoUser(id="4004", nickname="카카오전용", email="kakaoonly@test.com"),
+    )
+    client.post(
+        "/auth/kakao/callback",
+        json={"code": "auth-code", "redirect_uri": "http://localhost:3000/auth/kakao/callback"},
+    )
+
+    res = client.post("/auth/login", json={"email": "kakaoonly@test.com", "password": "anything"})
+    assert res.status_code == 401
