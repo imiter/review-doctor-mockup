@@ -1,4 +1,4 @@
-"""SQLAlchemy 모델 — schema.sql의 16개 테이블과 1:1 대응.
+"""SQLAlchemy 모델 — schema.sql의 17개 테이블과 1:1 대응.
 
 스키마 정본은 저장소 루트 schema.sql이다. 여기서는 컬럼과 관계만 미러링하며,
 제약(CHECK, ON DELETE 정책)은 DB 레벨에 이미 존재한다.
@@ -7,7 +7,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import BigInteger, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -17,8 +17,8 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True)
-    password_hash: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(255), unique=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255))
     nickname: Mapped[str] = mapped_column(String(50))
     phone_hash: Mapped[str | None] = mapped_column(String(64))
     marketing_agreed: Mapped[bool] = mapped_column(default=False)
@@ -26,6 +26,20 @@ class User(Base):
 
     stores: Mapped[list["Store"]] = relationship(back_populates="user")
     subscription: Mapped["Subscription | None"] = relationship(back_populates="user")
+    social_accounts: Mapped[list["SocialAccount"]] = relationship(back_populates="user")
+
+
+class SocialAccount(Base):
+    __tablename__ = "social_accounts"
+    __table_args__ = (UniqueConstraint("provider", "provider_user_id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"))
+    provider: Mapped[str] = mapped_column(String(20))
+    provider_user_id: Mapped[str] = mapped_column(String(100))
+    connected_at: Mapped[datetime]
+
+    user: Mapped[User] = relationship(back_populates="social_accounts")
 
 
 class Store(Base):

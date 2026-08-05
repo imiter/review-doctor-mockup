@@ -67,11 +67,11 @@ SaaS 전환의 첫 단계로 카카오 로그인을 실제로 붙이기로 결�
 - users 테이블 컬럼은 최소화: id, email, nickname, phone_hash,
   marketing_agreed, created_at.
 
-## DB 설계 (16개 테이블)
+## DB 설계 (17개 테이블)
 users, stores, platforms, store_platform_connections, subscriptions,
 orders, reviews, review_replies, reply_styles, reply_settings,
 daily_settlements, repurchase_metrics, ad_campaigns,
-ad_performance_metrics, ad_rank_snapshots, alerts.
+ad_performance_metrics, ad_rank_snapshots, alerts, social_accounts.
 
 ### 테이블 용도
 - users: 사장 계정. 전화번호는 phone_hash로 비식별화.
@@ -94,6 +94,7 @@ ad_performance_metrics, ad_rank_snapshots, alerts.
   스크롤하며 수집한 point_label/거리/순위/스캔개수/위 광고개수. 경쟁 가게
   CPC는 실측 불가능해 이 종류에는 저장하지 않는다(NULL).
 - alerts: 부정 리뷰, 미답변, 순위 하락 알림.
+- social_accounts: 소셜 로그인(카카오 등) 연결. provider 문자열 기반이라 확장 대비.
 
 ### 핵심 관계 (모든 관계에 외래키와 삭제 정책 명시)
 - users 1:N stores
@@ -106,6 +107,7 @@ ad_performance_metrics, ad_rank_snapshots, alerts.
 - ad_campaigns는 store 참조
 - ad_performance_metrics와 ad_rank_snapshots는 ad_campaigns 참조
 - alerts는 store 참조
+- users 1:N social_accounts
 
 ### 정규화 원칙
 - 매출 요약은 별도 테이블로 저장하지 않는다. daily_settlements를 기간별로

@@ -22,11 +22,11 @@
 - 개인정보 미저장: 전화번호는 `phone_hash`(SHA-256)로만 저장, 사업자번호·스토어
   아이디·주문번호는 전부 Mock 값, 주민번호·실명은 받지 않음
 
-## DB 설계 (16개 테이블)
+## DB 설계 (17개 테이블)
 
 `users, stores, platforms, store_platform_connections, subscriptions, orders,
 reviews, review_replies, reply_styles, reply_settings, daily_settlements,
-repurchase_metrics, ad_campaigns, ad_performance_metrics, ad_rank_snapshots, alerts`
+repurchase_metrics, ad_campaigns, ad_performance_metrics, ad_rank_snapshots, alerts, social_accounts`
 
 스키마 정본은 **`schema.sql`**(저장소 루트)이며 모든 FK에 `ON DELETE` 정책이 명시돼
 있다. Mock 데이터는 **`seed.sql`**이 생성한다 (정합성 불변식 보장 — 매출·정산·재주문율은

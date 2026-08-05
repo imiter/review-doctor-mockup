@@ -1,7 +1,7 @@
 -- ============================================================================
 -- Delivery Review & Store Insight MVP — PostgreSQL Schema
 -- ============================================================================
--- 16개 테이블. 모든 FK에 ON DELETE 정책 명시.
+-- 17개 테이블. 모든 FK에 ON DELETE 정책 명시.
 --
 -- 삭제 정책 원칙:
 --   ON DELETE CASCADE  — 부모에 종속된 소유 데이터 (사장 탈퇴 → 매장/주문/리뷰 연쇄 삭제)
@@ -19,7 +19,7 @@
 BEGIN;
 
 DROP TABLE IF EXISTS
-    alerts, ad_rank_snapshots, ad_performance_metrics, ad_campaigns,
+    social_accounts, alerts, ad_rank_snapshots, ad_performance_metrics, ad_campaigns,
     repurchase_metrics, daily_settlements, review_replies, reviews, orders,
     reply_settings, reply_styles, subscriptions, store_platform_connections,
     platforms, stores, users
@@ -30,8 +30,8 @@ CASCADE;
 -- ----------------------------------------------------------------------------
 CREATE TABLE users (
     id               BIGSERIAL PRIMARY KEY,
-    email            VARCHAR(255) NOT NULL UNIQUE,
-    password_hash    VARCHAR(255) NOT NULL,        -- bcrypt. 이메일 로그인용 (합의 사항)
+    email            VARCHAR(255) UNIQUE,           -- 카카오 전용 계정은 이메일 없을 수 있음 (비즈니스 미인증)
+    password_hash    VARCHAR(255),                  -- bcrypt. 카카오 전용 계정은 NULL (이메일 로그인용, 합의 사항)
     nickname         VARCHAR(50)  NOT NULL,
     phone_hash       CHAR(64),                     -- SHA-256 hex. 전화번호 원문 저장 금지
     marketing_agreed BOOLEAN      NOT NULL DEFAULT FALSE,
@@ -274,5 +274,21 @@ CREATE TABLE alerts (
 );
 
 CREATE INDEX idx_alerts_store_unread ON alerts(store_id, is_read);
+
+-- ----------------------------------------------------------------------------
+-- 17. social_accounts — 소셜 로그인 연결(카카오 등). users 1:N social_accounts
+--     provider 문자열 기반이라 이후 provider(네이버/구글 등)가 늘어도 스키마
+--     재변경 없이 행만 추가하면 된다.
+-- ----------------------------------------------------------------------------
+CREATE TABLE social_accounts (
+    id                BIGSERIAL PRIMARY KEY,
+    user_id           BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider          VARCHAR(20) NOT NULL,          -- kakao (향후 naver, google 등)
+    provider_user_id  VARCHAR(100) NOT NULL,         -- 카카오 고유 회원번호
+    connected_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (provider, provider_user_id)
+);
+
+CREATE INDEX idx_social_accounts_user ON social_accounts(user_id);
 
 COMMIT;

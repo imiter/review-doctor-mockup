@@ -78,3 +78,35 @@ def test_update_profile_partial_does_not_clear_other_fields(client, auth_headers
     client.patch("/auth/me", json={"marketing_agreed": True}, headers=auth_headers)
     res = client.patch("/auth/me", json={"nickname": "그대로"}, headers=auth_headers)
     assert res.json()["marketing_agreed"] is True  # 앞서 켠 값 유지
+
+
+def test_social_account_links_user_and_enforces_unique_provider_pair(db_session):
+    from datetime import datetime, timezone
+
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import SocialAccount, User
+
+    user = User(
+        email=None, password_hash=None, nickname="카카오전용",
+        marketing_agreed=False, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(user)
+    db_session.flush()
+
+    db_session.add(SocialAccount(
+        user_id=user.id, provider="kakao", provider_user_id="9999",
+        connected_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    found = db_session.query(SocialAccount).filter_by(provider="kakao", provider_user_id="9999").one()
+    assert found.user_id == user.id
+
+    db_session.add(SocialAccount(
+        user_id=user.id, provider="kakao", provider_user_id="9999",
+        connected_at=datetime.now(timezone.utc),
+    ))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
