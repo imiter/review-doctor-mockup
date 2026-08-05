@@ -894,7 +894,24 @@ npm run dev
    이 카카오 앱은 Client Secret이 필수임을 확인했다(없으면 `invalid_client`로 거부됨).
 2. Railway `frontend` 서비스 변수에 `NEXT_PUBLIC_KAKAO_CLIENT_ID=013b6d77c13fe0a1eb20e41d1bc012d4` 추가 (Next.js는 이 값을 빌드 시점에 굳히므로 반드시 재배포가 필요하다).
 3. 카카오 디벨로퍼스 콘솔의 Redirect URI에 `https://frontend-production-5aa7.up.railway.app/auth/kakao/callback`이 등록돼 있는지 재확인(이미 앞서 등록 요청함).
-4. 프로덕션 Postgres에 새 스키마 적용 — 기존 데이터(데모 계정 등)가 날아가는 작업이라 실행 전 반드시 별도로 확인받는다. `railway up`/`psql` 등 정확한 방법은 실행 직전에 다시 상의한다.
+4. 프로덕션 Postgres 스키마 적용 — **`schema.sql` 전체를 재실행하지 않는다.** 그러면 `DROP TABLE ... CASCADE`로
+   기존 데이터(데모 계정 등)가 전부 날아간다. 대신 이번 변경분만 반영하는 아래 3개 문장만 프로덕션에 직접 실행한다
+   (최종 리뷰에서 지적됨 — 파괴적 작업이 불필요했음):
+   ```sql
+   ALTER TABLE users ALTER COLUMN email DROP NOT NULL;
+   ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
+   CREATE TABLE social_accounts (
+       id                BIGSERIAL PRIMARY KEY,
+       user_id           BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+       provider          VARCHAR(20) NOT NULL,
+       provider_user_id  VARCHAR(100) NOT NULL,
+       connected_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+       UNIQUE (provider, provider_user_id)
+   );
+   CREATE INDEX idx_social_accounts_user ON social_accounts(user_id);
+   ```
+   `schema.sql`은 여전히 로컬 재구축용 전체 정본으로 유지하되, 프로덕션은 이 증분 문장으로만 갱신한다.
+   실행 전 반드시 사용자에게 다시 확인받는다.
 5. `railway up backend`, `railway up frontend`로 재배포.
 
 ## 다음 단계 (이번 계획 범위 밖)
