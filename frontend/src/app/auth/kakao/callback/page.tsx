@@ -17,6 +17,12 @@ function KakaoCallbackInner() {
     if (submitted.current) return;
     submitted.current = true;
 
+    const errorParam = searchParams.get("error");
+    if (errorParam) {
+      setError(errorParam === "access_denied" ? "카카오 로그인을 취소했습니다" : "카카오 로그인에 실패했습니다");
+      return;
+    }
+
     const code = searchParams.get("code");
     if (!code) {
       setError("카카오 로그인 코드가 없습니다");

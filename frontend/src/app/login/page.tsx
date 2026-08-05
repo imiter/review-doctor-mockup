@@ -96,7 +96,11 @@ export default function LoginPage() {
         <button
           type="button"
           onClick={() => {
-            window.location.href = kakaoAuthorizeUrl();
+            try {
+              window.location.href = kakaoAuthorizeUrl();
+            } catch (err) {
+              setError(err instanceof Error ? err.message : "카카오 로그인을 시작할 수 없습니다");
+            }
           }}
           className="mt-3 w-full rounded-lg bg-[#FEE500] py-2.5 text-sm font-medium text-black transition hover:opacity-90"
         >
