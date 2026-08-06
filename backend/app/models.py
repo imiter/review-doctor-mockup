@@ -1,4 +1,4 @@
-"""SQLAlchemy 모델 — schema.sql의 17개 테이블과 1:1 대응.
+"""SQLAlchemy 모델 — schema.sql의 18개 테이블과 1:1 대응.
 
 스키마 정본은 저장소 루트 schema.sql이다. 여기서는 컬럼과 관계만 미러링하며,
 제약(CHECK, ON DELETE 정책)은 DB 레벨에 이미 존재한다.
@@ -242,4 +242,17 @@ class Alert(Base):
     alert_type: Mapped[str] = mapped_column(String(20))
     message: Mapped[str] = mapped_column(String(300))
     is_read: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime]
+
+
+class SignupVerification(Base):
+    __tablename__ = "signup_verifications"
+    __table_args__ = (UniqueConstraint("target", "purpose"),)
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    target: Mapped[str] = mapped_column(String(255))
+    purpose: Mapped[str] = mapped_column(String(10))
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime]
+    attempts: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[datetime]

@@ -1,7 +1,7 @@
 -- ============================================================================
 -- Delivery Review & Store Insight MVP — PostgreSQL Schema
 -- ============================================================================
--- 17개 테이블. 모든 FK에 ON DELETE 정책 명시.
+-- 18개 테이블. 모든 FK에 ON DELETE 정책 명시.
 --
 -- 삭제 정책 원칙:
 --   ON DELETE CASCADE  — 부모에 종속된 소유 데이터 (사장 탈퇴 → 매장/주문/리뷰 연쇄 삭제)
@@ -19,8 +19,8 @@
 BEGIN;
 
 DROP TABLE IF EXISTS
-    social_accounts, alerts, ad_rank_snapshots, ad_performance_metrics, ad_campaigns,
-    repurchase_metrics, daily_settlements, review_replies, reviews, orders,
+    signup_verifications, social_accounts, alerts, ad_rank_snapshots, ad_performance_metrics,
+    ad_campaigns, repurchase_metrics, daily_settlements, review_replies, reviews, orders,
     reply_settings, reply_styles, subscriptions, store_platform_connections,
     platforms, stores, users
 CASCADE;
@@ -290,5 +290,22 @@ CREATE TABLE social_accounts (
 );
 
 CREATE INDEX idx_social_accounts_user ON social_accounts(user_id);
+
+-- ----------------------------------------------------------------------------
+-- 18. signup_verifications — 이메일 회원가입 인증 코드(이메일 실발송/휴대폰 Mock).
+--     users를 참조하지 않는다 — 계정은 인증이 모두 끝난 뒤에만 생성되므로
+--     "미인증 계정" 상태 자체가 없다. target은 이메일이면 평문, 휴대폰이면
+--     phone_hash와 동일한 SHA-256 해시(전화번호 원문 저장 금지 원칙 유지).
+-- ----------------------------------------------------------------------------
+CREATE TABLE signup_verifications (
+    id         BIGSERIAL PRIMARY KEY,
+    target     VARCHAR(255) NOT NULL,
+    purpose    VARCHAR(10)  NOT NULL CHECK (purpose IN ('email', 'phone')),
+    code_hash  CHAR(64)     NOT NULL,
+    expires_at TIMESTAMPTZ  NOT NULL,
+    attempts   INT          NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    UNIQUE (target, purpose)
+);
 
 COMMIT;

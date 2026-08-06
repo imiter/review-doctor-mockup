@@ -207,3 +207,45 @@ def test_kakao_only_user_cannot_login_with_password(client, platforms, monkeypat
 
     res = client.post("/auth/login", json={"email": "kakaoonly@test.com", "password": "anything"})
     assert res.status_code == 401
+
+
+def test_signup_verification_round_trips(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import SignupVerification
+
+    now = datetime.now(timezone.utc)
+    db_session.add(SignupVerification(
+        target="model-test@example.com", purpose="email", code_hash="a" * 64,
+        expires_at=now + timedelta(minutes=10), attempts=0, created_at=now,
+    ))
+    db_session.commit()
+
+    found = db_session.query(SignupVerification).filter_by(
+        target="model-test@example.com", purpose="email"
+    ).one()
+    assert found.attempts == 0
+    assert len(found.code_hash) == 64
+
+
+def test_signup_verification_unique_target_purpose(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import SignupVerification
+
+    now = datetime.now(timezone.utc)
+    db_session.add(SignupVerification(
+        target="dupe@example.com", purpose="email", code_hash="a" * 64,
+        expires_at=now + timedelta(minutes=10), attempts=0, created_at=now,
+    ))
+    db_session.commit()
+
+    db_session.add(SignupVerification(
+        target="dupe@example.com", purpose="email", code_hash="b" * 64,
+        expires_at=now + timedelta(minutes=10), attempts=0, created_at=now,
+    ))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
