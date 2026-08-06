@@ -118,7 +118,20 @@ export default function SignupPage() {
       setToken(res.access_token);
       router.push("/dashboard");
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "회원가입에 실패했습니다");
+      // 오래 붙잡고 있다가 제출하면 이메일/휴대폰 코드가 만료됐을 수 있다. 백엔드가
+      // 어느 쪽이 실패했는지 메시지에 "이메일 인증번호"/"휴대폰 인증번호"로 구분해
+      // 주므로, 해당 단계로 되돌리고 코드를 다시 받게 한다.
+      if (e instanceof ApiError && e.message.includes("이메일 인증번호")) {
+        setEmailCode("");
+        setStep("email-code");
+        setError(`${e.message} 이메일 인증을 다시 진행해주세요.`);
+      } else if (e instanceof ApiError && e.message.includes("휴대폰 인증번호")) {
+        setPhoneCode("");
+        setStep("phone-code");
+        setError(`${e.message} 휴대폰 인증을 다시 진행해주세요.`);
+      } else {
+        setError(e instanceof ApiError ? e.message : "회원가입에 실패했습니다");
+      }
     } finally {
       setLoading(false);
     }

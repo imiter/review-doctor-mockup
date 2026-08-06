@@ -97,8 +97,10 @@ def signup_flow(client, monkeypatch):
     monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code: None)
 
     def _run(email: str, phone: str = "010-1234-5678", **overrides):
-        client.post("/auth/signup/email-code", json={"email": email})
-        client.post("/auth/signup/phone-code", json={"phone": phone})
+        email_res = client.post("/auth/signup/email-code", json={"email": email})
+        assert email_res.status_code == 200, email_res.text
+        phone_res = client.post("/auth/signup/phone-code", json={"phone": phone})
+        assert phone_res.status_code == 200, phone_res.text
         payload = {
             "email": email, "email_code": "123456", "phone": phone, "phone_code": "123456",
             "password": "pw12345!", "nickname": "테스트", "marketing_agreed": False,

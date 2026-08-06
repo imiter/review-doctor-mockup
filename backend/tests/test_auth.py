@@ -25,7 +25,15 @@ def test_phone_never_stored_raw(client, platforms, db_session, signup_flow):
 
 def test_duplicate_signup_rejected(client, platforms, signup_flow):
     signup_flow("dup@test.com")
-    res = signup_flow("dup@test.com")
+    # signup_flow의 사전 확인 호출(email-code/phone-code)은 이제 200을 요구하므로,
+    # "이미 가입된 이메일" 케이스는 email-code 단계에서부터 409가 나 fixture를 통과하지
+    # 못한다. 여기서 실제로 검증하려는 건 signup() 자신의 재확인(동시 가입 레이스 대비)
+    # 이므로, 사전 확인 단계를 건너뛰고 최종 엔드포인트를 직접 두드린다.
+    res = client.post("/auth/signup", json={
+        "email": "dup@test.com", "email_code": "000000",
+        "phone": "010-0000-0000", "phone_code": "000000",
+        "password": "pw12345!", "nickname": "중복", "marketing_agreed": False,
+    })
     assert res.status_code == 409
 
 
@@ -286,6 +294,9 @@ def test_verify_email_code_wrong_code_rejected(client, platforms, monkeypatch):
 
     res = client.post("/auth/signup/verify-email-code", json={"email": "wrongcode@test.com", "code": "000000"})
     assert res.status_code == 400
+    # 가벼운 사전 확인 엔드포인트는 어느 단계인지 프론트가 이미 알고 있으므로
+    # label 없는 일반 메시지 그대로 (signup() 최종 제출과 구분).
+    assert res.json()["detail"] == "인증번호가 올바르지 않습니다"
 
 
 def test_verify_email_code_exceeds_max_attempts(client, platforms, monkeypatch):
@@ -332,6 +343,10 @@ def test_signup_rejects_wrong_email_code(client, platforms, monkeypatch):
         "password": "pw12345!", "nickname": "실패", "marketing_agreed": False,
     })
     assert res.status_code == 400
+    # 최종 제출에서는 프론트가 이메일 단계로 되돌릴 수 있도록 "이메일 인증번호"로
+    # 시작하는 구분 가능한 메시지를 받아야 한다 (frontend/src/app/signup/page.tsx의
+    # submit() catch가 이 문자열을 substring-match한다).
+    assert res.json()["detail"].startswith("이메일 인증번호")
 
 
 def test_signup_rejects_wrong_phone_code(client, platforms, monkeypatch):
@@ -348,6 +363,69 @@ def test_signup_rejects_wrong_phone_code(client, platforms, monkeypatch):
         "password": "pw12345!", "nickname": "실패", "marketing_agreed": False,
     })
     assert res.status_code == 400
+    assert res.json()["detail"].startswith("휴대폰 인증번호")
+
+
+def test_signup_final_submit_expired_email_code_identifies_email_step(client, platforms, db_session, monkeypatch):
+    """설계 문서 "최종 제출 시점에 코드 만료" 요구사항: 오래 붙잡고 있다가 제출하면
+    어느 코드가 만료됐는지 메시지로 구분할 수 있어야 프론트가 해당 단계로 되돌릴 수 있다."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import SignupVerification
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "123456")
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code: None)
+    client.post("/auth/signup/email-code", json={"email": "expiredemail@test.com"})
+    client.post("/auth/signup/phone-code", json={"phone": "010-6666-7777"})
+
+    # 이메일 코드만 만료시킨다 (휴대폰 코드는 아직 유효).
+    row = db_session.query(SignupVerification).filter_by(
+        target="expiredemail@test.com", purpose="email"
+    ).one()
+    row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db_session.commit()
+
+    res = client.post("/auth/signup", json={
+        "email": "expiredemail@test.com", "email_code": "123456",
+        "phone": "010-6666-7777", "phone_code": "123456",
+        "password": "pw12345!", "nickname": "만료테스트", "marketing_agreed": False,
+    })
+    assert res.status_code == 400
+    assert res.json()["detail"].startswith("이메일 인증번호")
+    assert "만료" in res.json()["detail"]
+
+
+def test_phone_code_rejects_invalid_format(client, platforms):
+    res = client.post("/auth/signup/phone-code", json={"phone": "not-a-phone"})
+    assert res.status_code == 422
+
+
+def test_issue_code_sweeps_expired_rows_for_same_purpose(client, platforms, db_session, monkeypatch):
+    """형식 검증 없이도 phone-code는 서로 다른 target으로 스팸성 요청을 반복하면 만료된
+    행이 무한정 쌓일 수 있다 — 코드 발급마다 같은 purpose의 만료 행을 쓸어내는지 확인."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import SignupVerification
+
+    now = datetime.now(timezone.utc)
+    db_session.add(SignupVerification(
+        target="stale-hash-1", purpose="phone", code_hash="a" * 64,
+        expires_at=now - timedelta(minutes=1), attempts=0, created_at=now - timedelta(minutes=20),
+    ))
+    db_session.add(SignupVerification(
+        target="stale-hash-2", purpose="phone", code_hash="b" * 64,
+        expires_at=now - timedelta(minutes=1), attempts=0, created_at=now - timedelta(minutes=20),
+    ))
+    db_session.commit()
+
+    res = client.post("/auth/signup/phone-code", json={"phone": "010-8888-9999"})
+    assert res.status_code == 200
+
+    remaining_stale = db_session.query(SignupVerification).filter(
+        SignupVerification.target.in_(["stale-hash-1", "stale-hash-2"])
+    ).count()
+    assert remaining_stale == 0
 
 
 def test_signup_consumes_verification_rows_on_success(client, platforms, db_session, signup_flow):

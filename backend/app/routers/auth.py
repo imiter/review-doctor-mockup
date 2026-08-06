@@ -2,10 +2,11 @@
 
 import hashlib
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# 010/011/016~019로 시작하는 국내 휴대폰 번호. 하이픈은 있어도 없어도 허용.
+_PHONE_PATTERN = re.compile(r"^01[0-9]-?\d{3,4}-?\d{4}$")
+
 
 class EmailCodeRequest(BaseModel):
     email: EmailStr
@@ -40,6 +44,13 @@ class VerifyEmailCodeRequest(BaseModel):
 
 class PhoneCodeRequest(BaseModel):
     phone: str
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_phone(cls, v: str) -> str:
+        if not _PHONE_PATTERN.match(v):
+            raise ValueError("휴대폰 번호 형식이 올바르지 않습니다")
+        return v
 
 
 class VerifyPhoneCodeRequest(BaseModel):
@@ -85,7 +96,13 @@ def _user_dict(user: User) -> dict:
 
 def _create_default_store_and_subscription(user: User, db: Session) -> None:
     """가입 직후 기본 매장 1개 + Basic 구독을 만든다. 플랫폼 연결은 "가게 연결" 화면에서
-    사용자가 직접 해야 한다 — 데모에서 그 과정을 보여줘야 하므로 자동 연결하지 않는다."""
+    사용자가 직접 해야 한다 — 데모에서 그 과정을 보여줘야 하므로 자동 연결하지 않는다.
+
+    signup()과 kakao_callback() 양쪽에서 공유하는 함수라 이 동작(배민 자동 연결 제거)은
+    이메일 가입과 카카오 가입 모두에 적용된다. 이 세션 중 이미 승인된 결정이고,
+    docs/superpowers/specs/2026-08-07-email-signup-verification-design.md가 이 호출을
+    "기존과 동일"이라고 적어둔 것은 설계 당시 기준이라 지금은 부정확하다 — 실제 최신
+    동작 기준은 이 주석이다(스펙 문서 자체는 승인 당시 기록이므로 소급 수정하지 않음)."""
     store = Store(
         user_id=user.id, name="내 매장", category="기타", created_at=datetime.now(timezone.utc)
     )
@@ -115,6 +132,16 @@ def _get_verification(db: Session, target: str, purpose: str) -> SignupVerificat
 
 def _issue_code(db: Session, target: str, purpose: str, ttl: timedelta) -> str:
     now = datetime.now(timezone.utc)
+
+    # 형식 검증 없는 phone-code 같은 엔드포인트는 서로 다른 target으로 스팸성 요청을
+    # 반복하면 행이 무한정 쌓일 수 있다. 별도 정리 배치를 두는 대신, 코드를 발급할
+    # 때마다 이미 만료된 같은 purpose의 행을 쓸어내는 것만으로 최소 비용으로 방지한다.
+    db.execute(
+        delete(SignupVerification).where(
+            SignupVerification.purpose == purpose, SignupVerification.expires_at < now
+        )
+    )
+
     existing = _get_verification(db, target, purpose)
     if existing and _as_aware(existing.created_at) > now - RESEND_COOLDOWN:
         raise HTTPException(429, "잠시 후 다시 시도해주세요")
@@ -134,16 +161,22 @@ def _issue_code(db: Session, target: str, purpose: str, ttl: timedelta) -> str:
     return code
 
 
-def _check_code(db: Session, target: str, purpose: str, code: str) -> None:
+def _check_code(db: Session, target: str, purpose: str, code: str, *, label: str | None = None) -> None:
+    """label을 주면 에러 메시지 앞에 "이메일"/"휴대폰" 같은 구분자를 붙인다.
+    /auth/signup/verify-*-code 두 개의 가벼운 사전 확인 엔드포인트는 이미 어느 단계인지
+    프론트가 알고 있어 label 없이 기존 일반 메시지를 그대로 쓰고, signup() 최종 제출은
+    이메일 코드와 휴대폰 코드 중 무엇이 실패했는지 프론트가 구분해 해당 단계로 되돌릴 수
+    있도록 label을 넘긴다."""
+    prefix = f"{label} " if label else ""
     row = _get_verification(db, target, purpose)
     if row is None or _as_aware(row.expires_at) < datetime.now(timezone.utc):
-        raise HTTPException(400, "인증번호가 만료되었습니다. 다시 받아주세요")
+        raise HTTPException(400, f"{prefix}인증번호가 만료되었습니다. 다시 받아주세요")
     if row.attempts >= MAX_ATTEMPTS:
-        raise HTTPException(400, "시도 횟수를 초과했습니다. 인증번호를 다시 받아주세요")
+        raise HTTPException(400, f"{prefix}인증번호 시도 횟수를 초과했습니다. 인증번호를 다시 받아주세요")
     if row.code_hash != hash_code(code):
         row.attempts += 1
         db.commit()
-        raise HTTPException(400, "인증번호가 올바르지 않습니다")
+        raise HTTPException(400, f"{prefix}인증번호가 올바르지 않습니다")
 
 
 @router.post("/signup/email-code")
@@ -184,8 +217,8 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
         raise HTTPException(409, "이미 가입된 이메일입니다")
 
     phone_hash = _hash_phone(body.phone)
-    _check_code(db, body.email, "email", body.email_code)
-    _check_code(db, phone_hash, "phone", body.phone_code)
+    _check_code(db, body.email, "email", body.email_code, label="이메일")
+    _check_code(db, phone_hash, "phone", body.phone_code, label="휴대폰")
 
     user = User(
         email=body.email,

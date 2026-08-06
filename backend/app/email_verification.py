@@ -18,7 +18,7 @@ EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "onboarding@resend.dev")
 _RESEND_URL = "https://api.resend.com/emails"
 
 EMAIL_CODE_TTL = timedelta(minutes=10)
-PHONE_CODE_TTL = timedelta(minutes=5)
+PHONE_CODE_TTL = timedelta(minutes=10)
 RESEND_COOLDOWN = timedelta(seconds=60)
 MAX_ATTEMPTS = 5
 
