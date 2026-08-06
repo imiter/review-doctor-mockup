@@ -1,3 +1,7 @@
 __pycache__/
 .venv/
 .pytest_cache/
+
+# env files (can opt-in for committing if needed)
+.env*
+!.env.example
