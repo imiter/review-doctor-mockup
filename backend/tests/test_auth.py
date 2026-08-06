@@ -1,8 +1,5 @@
-def test_signup_creates_user_store_and_subscription(client, platforms):
-    res = client.post("/auth/signup", json={
-        "email": "new@test.com", "password": "pw12345!", "nickname": "새사장",
-        "phone": "010-1234-5678", "marketing_agreed": True,
-    })
+def test_signup_creates_user_store_and_subscription(client, platforms, signup_flow):
+    res = signup_flow("new@test.com", phone="010-1234-5678", nickname="새사장", marketing_agreed=True)
     assert res.status_code == 201
     body = res.json()
     assert body["user"]["email"] == "new@test.com"
@@ -16,23 +13,20 @@ def test_signup_creates_user_store_and_subscription(client, platforms):
     assert len(stores) == 1  # 가입 직후 빈 대시보드 방지용 기본 매장
 
 
-def test_phone_never_stored_raw(client, platforms, db_session):
+def test_phone_never_stored_raw(client, platforms, db_session, signup_flow):
     from app.models import User
 
-    client.post("/auth/signup", json={
-        "email": "phonecheck@test.com", "password": "pw12345!", "nickname": "테스트",
-        "phone": "010-9999-0000",
-    })
+    signup_flow("phonecheck@test.com", phone="010-9999-0000")
     user = db_session.query(User).filter_by(email="phonecheck@test.com").one()
     assert user.phone_hash is not None
     assert user.phone_hash != "010-9999-0000"
     assert len(user.phone_hash) == 64  # SHA-256 hex
 
 
-def test_duplicate_signup_rejected(client, platforms):
-    payload = {"email": "dup@test.com", "password": "pw12345!", "nickname": "중복"}
-    assert client.post("/auth/signup", json=payload).status_code == 201
-    assert client.post("/auth/signup", json=payload).status_code == 409
+def test_duplicate_signup_rejected(client, platforms, signup_flow):
+    signup_flow("dup@test.com")
+    res = signup_flow("dup@test.com")
+    assert res.status_code == 409
 
 
 def test_login_wrong_password_rejected(client, seeded_user):
@@ -249,3 +243,118 @@ def test_signup_verification_unique_target_purpose(db_session):
     ))
     with pytest.raises(IntegrityError):
         db_session.commit()
+
+
+def test_email_code_rejects_already_registered_email(client, seeded_user):
+    res = client.post("/auth/signup/email-code", json={"email": "demo@dris.kr"})
+    assert res.status_code == 409
+
+
+def test_email_code_resend_cooldown(client, platforms, monkeypatch):
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "123456")
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code: None)
+
+    first = client.post("/auth/signup/email-code", json={"email": "cooldown@test.com"})
+    assert first.status_code == 200
+    second = client.post("/auth/signup/email-code", json={"email": "cooldown@test.com"})
+    assert second.status_code == 429
+
+
+def test_email_code_send_failure_returns_502(client, platforms, monkeypatch):
+    from app.email_verification import EmailSendError
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "123456")
+
+    def _raise(to, code):
+        raise EmailSendError("boom")
+
+    monkeypatch.setattr(auth_router, "send_verification_email", _raise)
+
+    res = client.post("/auth/signup/email-code", json={"email": "fail@test.com"})
+    assert res.status_code == 502
+
+
+def test_verify_email_code_wrong_code_rejected(client, platforms, monkeypatch):
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "123456")
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code: None)
+    client.post("/auth/signup/email-code", json={"email": "wrongcode@test.com"})
+
+    res = client.post("/auth/signup/verify-email-code", json={"email": "wrongcode@test.com", "code": "000000"})
+    assert res.status_code == 400
+
+
+def test_verify_email_code_exceeds_max_attempts(client, platforms, monkeypatch):
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "123456")
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code: None)
+    client.post("/auth/signup/email-code", json={"email": "toomany@test.com"})
+
+    for _ in range(5):
+        res = client.post("/auth/signup/verify-email-code", json={"email": "toomany@test.com", "code": "000000"})
+        assert res.status_code == 400
+
+    res = client.post("/auth/signup/verify-email-code", json={"email": "toomany@test.com", "code": "123456"})
+    assert res.status_code == 400
+    assert "초과" in res.json()["detail"]
+
+
+def test_phone_code_returns_mock_code_directly(client, platforms):
+    res = client.post("/auth/signup/phone-code", json={"phone": "010-1111-2222"})
+    assert res.status_code == 200
+    body = res.json()
+    assert "mock_code" in body
+    assert len(body["mock_code"]) == 6
+
+
+def test_verify_phone_code_success(client, platforms):
+    sent = client.post("/auth/signup/phone-code", json={"phone": "010-3333-4444"}).json()
+    res = client.post("/auth/signup/verify-phone-code", json={"phone": "010-3333-4444", "code": sent["mock_code"]})
+    assert res.status_code == 200
+
+
+def test_signup_rejects_wrong_email_code(client, platforms, monkeypatch):
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "123456")
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code: None)
+    client.post("/auth/signup/email-code", json={"email": "badflow@test.com"})
+    client.post("/auth/signup/phone-code", json={"phone": "010-5555-1111"})
+
+    res = client.post("/auth/signup", json={
+        "email": "badflow@test.com", "email_code": "000000",
+        "phone": "010-5555-1111", "phone_code": "123456",
+        "password": "pw12345!", "nickname": "실패", "marketing_agreed": False,
+    })
+    assert res.status_code == 400
+
+
+def test_signup_rejects_wrong_phone_code(client, platforms, monkeypatch):
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "123456")
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code: None)
+    client.post("/auth/signup/email-code", json={"email": "badflow2@test.com"})
+    client.post("/auth/signup/phone-code", json={"phone": "010-5555-2222"})
+
+    res = client.post("/auth/signup", json={
+        "email": "badflow2@test.com", "email_code": "123456",
+        "phone": "010-5555-2222", "phone_code": "000000",
+        "password": "pw12345!", "nickname": "실패", "marketing_agreed": False,
+    })
+    assert res.status_code == 400
+
+
+def test_signup_consumes_verification_rows_on_success(client, platforms, db_session, signup_flow):
+    from app.models import SignupVerification
+
+    signup_flow("consumed@test.com", phone="010-7777-8888")
+    remaining = db_session.query(SignupVerification).filter(
+        SignupVerification.target.in_(["consumed@test.com"])
+    ).count()
+    assert remaining == 0

@@ -85,3 +85,25 @@ def auth_headers(client, seeded_user):
     res = client.post("/auth/login", json={"email": "demo@dris.kr", "password": "demo1234!"})
     token = res.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture()
+def signup_flow(client, monkeypatch):
+    """이메일/휴대폰 인증 코드를 고정값("123456")으로 monkeypatch해서 /auth/signup까지
+    한 번에 통과시켜주는 헬퍼. 실제 이메일 발송은 no-op으로 막는다."""
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "123456")
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code: None)
+
+    def _run(email: str, phone: str = "010-1234-5678", **overrides):
+        client.post("/auth/signup/email-code", json={"email": email})
+        client.post("/auth/signup/phone-code", json={"phone": phone})
+        payload = {
+            "email": email, "email_code": "123456", "phone": phone, "phone_code": "123456",
+            "password": "pw12345!", "nickname": "테스트", "marketing_agreed": False,
+        }
+        payload.update(overrides)
+        return client.post("/auth/signup", json=payload)
+
+    return _run
