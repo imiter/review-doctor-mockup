@@ -29,7 +29,14 @@ def hash_code(code: str) -> str:
     return hashlib.sha256(code.encode()).hexdigest()
 
 
-def send_verification_email(to: str, code: str) -> None:
+_SUBJECTS = {
+    "signup": "[Delivery Review] 이메일 인증번호",
+    "password_reset": "[Delivery Review] 비밀번호 재설정 인증번호",
+}
+
+
+def send_verification_email(to: str, code: str, purpose: str = "signup") -> None:
+    subject = _SUBJECTS.get(purpose, _SUBJECTS["signup"])
     try:
         resp = httpx.post(
             _RESEND_URL,
@@ -37,7 +44,7 @@ def send_verification_email(to: str, code: str) -> None:
             json={
                 "from": EMAIL_FROM_ADDRESS,
                 "to": to,
-                "subject": "[Delivery Review] 이메일 인증번호",
+                "subject": subject,
                 "html": f"<p>인증번호: <b>{code}</b> (10분 이내 입력해주세요)</p>",
             },
             timeout=10.0,

@@ -391,3 +391,21 @@ def test_signup_consumes_verification_row_on_success(client, platforms, db_sessi
         SignupVerification.target == "consumed@test.com"
     ).count()
     assert remaining == 0
+
+
+def test_signup_verification_accepts_password_reset_purpose(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import SignupVerification
+
+    now = datetime.now(timezone.utc)
+    db_session.add(SignupVerification(
+        target="reset-target@example.com", purpose="password_reset", code_hash="a" * 64,
+        expires_at=now + timedelta(minutes=10), attempts=0, created_at=now,
+    ))
+    db_session.commit()
+
+    found = db_session.query(SignupVerification).filter_by(
+        target="reset-target@example.com", purpose="password_reset"
+    ).one()
+    assert found.purpose == "password_reset"

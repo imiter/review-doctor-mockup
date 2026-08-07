@@ -50,3 +50,31 @@ def test_send_verification_email_wraps_network_error(monkeypatch):
 
     with pytest.raises(ev.EmailSendError):
         ev.send_verification_email("user@example.com", "482913")
+
+
+def test_send_verification_email_password_reset_uses_different_subject(monkeypatch):
+    monkeypatch.setattr(ev, "RESEND_API_KEY", "test-key")
+
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["subject"] = json["subject"]
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(ev.httpx, "post", fake_post)
+    ev.send_verification_email("user@example.com", "482913", purpose="password_reset")
+    assert captured["subject"] == "[Delivery Review] 비밀번호 재설정 인증번호"
+
+
+def test_send_verification_email_defaults_to_signup_subject(monkeypatch):
+    monkeypatch.setattr(ev, "RESEND_API_KEY", "test-key")
+
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["subject"] = json["subject"]
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(ev.httpx, "post", fake_post)
+    ev.send_verification_email("user@example.com", "482913")
+    assert captured["subject"] == "[Delivery Review] 이메일 인증번호"
