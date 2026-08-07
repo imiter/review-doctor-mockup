@@ -1,9 +1,4 @@
-"""이메일 회원가입 인증 — 6자리 코드 생성·해시 + Resend 실발송.
-
-휴대폰 인증은 이 모듈에서 발송 함수를 제공하지 않는다 — CLAUDE.md 원칙상 실제
-SMS 발송이 금지돼 있어 Mock이다. 라우터가 generate_code()로 코드를 만들어 API
-응답에 그대로 돌려주고, 실제로는 아무 곳에도 전송하지 않는다.
-"""
+"""이메일 회원가입 인증 — 6자리 코드 생성·해시 + Resend 실발송."""
 
 import hashlib
 import os
@@ -18,7 +13,6 @@ EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "onboarding@resend.dev")
 _RESEND_URL = "https://api.resend.com/emails"
 
 EMAIL_CODE_TTL = timedelta(minutes=10)
-PHONE_CODE_TTL = timedelta(minutes=10)
 RESEND_COOLDOWN = timedelta(seconds=60)
 MAX_ATTEMPTS = 5
 

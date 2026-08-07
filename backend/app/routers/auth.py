@@ -1,12 +1,11 @@
-"""이메일 로그인/회원가입(다단계 인증) + 카카오 소셜 로그인. 전화번호는 phone_hash로만 저장."""
+"""이메일 로그인/회원가입(이메일 인증) + 카카오 소셜 로그인. 전화번호는 phone_hash로만 저장."""
 
 import hashlib
 import logging
-import re
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -15,7 +14,6 @@ from app.db import get_db
 from app.email_verification import (
     EMAIL_CODE_TTL,
     MAX_ATTEMPTS,
-    PHONE_CODE_TTL,
     RESEND_COOLDOWN,
     EmailSendError,
     generate_code,
@@ -29,9 +27,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# 010/011/016~019로 시작하는 국내 휴대폰 번호. 하이픈은 있어도 없어도 허용.
-_PHONE_PATTERN = re.compile(r"^01[0-9]-?\d{3,4}-?\d{4}$")
-
 
 class EmailCodeRequest(BaseModel):
     email: EmailStr
@@ -42,27 +37,9 @@ class VerifyEmailCodeRequest(BaseModel):
     code: str
 
 
-class PhoneCodeRequest(BaseModel):
-    phone: str
-
-    @field_validator("phone")
-    @classmethod
-    def _validate_phone(cls, v: str) -> str:
-        if not _PHONE_PATTERN.match(v):
-            raise ValueError("휴대폰 번호 형식이 올바르지 않습니다")
-        return v
-
-
-class VerifyPhoneCodeRequest(BaseModel):
-    phone: str
-    code: str
-
-
 class SignupRequest(BaseModel):
     email: EmailStr
     email_code: str
-    phone: str
-    phone_code: str
     password: str
     nickname: str
     marketing_agreed: bool = False
@@ -133,9 +110,9 @@ def _get_verification(db: Session, target: str, purpose: str) -> SignupVerificat
 def _issue_code(db: Session, target: str, purpose: str, ttl: timedelta) -> str:
     now = datetime.now(timezone.utc)
 
-    # 형식 검증 없는 phone-code 같은 엔드포인트는 서로 다른 target으로 스팸성 요청을
-    # 반복하면 행이 무한정 쌓일 수 있다. 별도 정리 배치를 두는 대신, 코드를 발급할
-    # 때마다 이미 만료된 같은 purpose의 행을 쓸어내는 것만으로 최소 비용으로 방지한다.
+    # 서로 다른 target으로 스팸성 요청을 반복하면 행이 무한정 쌓일 수 있다. 별도 정리
+    # 배치를 두는 대신, 코드를 발급할 때마다 이미 만료된 같은 purpose의 행을 쓸어내는
+    # 것만으로 최소 비용으로 방지한다.
     db.execute(
         delete(SignupVerification).where(
             SignupVerification.purpose == purpose, SignupVerification.expires_at < now
@@ -161,22 +138,16 @@ def _issue_code(db: Session, target: str, purpose: str, ttl: timedelta) -> str:
     return code
 
 
-def _check_code(db: Session, target: str, purpose: str, code: str, *, label: str | None = None) -> None:
-    """label을 주면 에러 메시지 앞에 "이메일"/"휴대폰" 같은 구분자를 붙인다.
-    /auth/signup/verify-*-code 두 개의 가벼운 사전 확인 엔드포인트는 이미 어느 단계인지
-    프론트가 알고 있어 label 없이 기존 일반 메시지를 그대로 쓰고, signup() 최종 제출은
-    이메일 코드와 휴대폰 코드 중 무엇이 실패했는지 프론트가 구분해 해당 단계로 되돌릴 수
-    있도록 label을 넘긴다."""
-    prefix = f"{label} " if label else ""
+def _check_code(db: Session, target: str, purpose: str, code: str) -> None:
     row = _get_verification(db, target, purpose)
     if row is None or _as_aware(row.expires_at) < datetime.now(timezone.utc):
-        raise HTTPException(400, f"{prefix}인증번호가 만료되었습니다. 다시 받아주세요")
+        raise HTTPException(400, "인증번호가 만료되었습니다. 다시 받아주세요")
     if row.attempts >= MAX_ATTEMPTS:
-        raise HTTPException(400, f"{prefix}인증번호 시도 횟수를 초과했습니다. 인증번호를 다시 받아주세요")
+        raise HTTPException(400, "인증번호 시도 횟수를 초과했습니다. 인증번호를 다시 받아주세요")
     if row.code_hash != hash_code(code):
         row.attempts += 1
         db.commit()
-        raise HTTPException(400, f"{prefix}인증번호가 올바르지 않습니다")
+        raise HTTPException(400, "인증번호가 올바르지 않습니다")
 
 
 @router.post("/signup/email-code")
@@ -199,39 +170,25 @@ def verify_email_code(body: VerifyEmailCodeRequest, db: Session = Depends(get_db
     return {"verified": True}
 
 
-@router.post("/signup/phone-code")
-def request_phone_code(body: PhoneCodeRequest, db: Session = Depends(get_db)):
-    code = _issue_code(db, _hash_phone(body.phone), "phone", PHONE_CODE_TTL)
-    return {"mock_code": code}
-
-
-@router.post("/signup/verify-phone-code")
-def verify_phone_code(body: VerifyPhoneCodeRequest, db: Session = Depends(get_db)):
-    _check_code(db, _hash_phone(body.phone), "phone", body.code)
-    return {"verified": True}
-
-
 @router.post("/signup", status_code=201)
 def signup(body: SignupRequest, db: Session = Depends(get_db)):
     if db.scalar(select(User).where(User.email == body.email)):
         raise HTTPException(409, "이미 가입된 이메일입니다")
 
-    phone_hash = _hash_phone(body.phone)
-    _check_code(db, body.email, "email", body.email_code, label="이메일")
-    _check_code(db, phone_hash, "phone", body.phone_code, label="휴대폰")
+    _check_code(db, body.email, "email", body.email_code)
 
     user = User(
         email=body.email,
         password_hash=hash_password(body.password),
         nickname=body.nickname,
-        phone_hash=phone_hash,
+        phone_hash=None,  # 가입 시점엔 휴대폰을 받지 않는다 — 나중에 PATCH /auth/me로 추가
         marketing_agreed=body.marketing_agreed,
         created_at=datetime.now(timezone.utc),
     )
     db.add(user)
     db.flush()
 
-    db.execute(delete(SignupVerification).where(SignupVerification.target.in_([body.email, phone_hash])))
+    db.execute(delete(SignupVerification).where(SignupVerification.target == body.email, SignupVerification.purpose == "email"))
     _create_default_store_and_subscription(user, db)
     db.commit()
 

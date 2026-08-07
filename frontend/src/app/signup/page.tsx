@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ApiError, apiPost, setToken } from "@/lib/api";
 
-type Step = "email" | "email-code" | "phone" | "phone-code" | "password";
-const STEPS: Step[] = ["email", "email-code", "phone", "phone-code", "password"];
+type Step = "email" | "email-code" | "password";
+const STEPS: Step[] = ["email", "email-code", "password"];
 
 type TokenResponse = { access_token: string };
 
@@ -16,9 +16,6 @@ export default function SignupPage() {
   const [nickname, setNickname] = useState("");
   const [email, setEmail] = useState("");
   const [emailCode, setEmailCode] = useState("");
-  const [phone, setPhone] = useState("");
-  const [phoneCode, setPhoneCode] = useState("");
-  const [mockPhoneCode, setMockPhoneCode] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [marketingAgreed, setMarketingAgreed] = useState(false);
@@ -58,36 +55,6 @@ export default function SignupPage() {
     setLoading(true);
     try {
       await apiPost("/auth/signup/verify-email-code", { email, code: emailCode });
-      setStep("phone");
-      setCooldown(0);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : "인증번호가 올바르지 않습니다");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const sendPhoneCode = async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      const res = await apiPost<{ mock_code: string }>("/auth/signup/phone-code", { phone });
-      setMockPhoneCode(res.mock_code);
-      setPhoneCode("");
-      setStep("phone-code");
-      setCooldown(60);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : "인증번호 발급에 실패했습니다");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const confirmPhoneCode = async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      await apiPost("/auth/signup/verify-phone-code", { phone, code: phoneCode });
       setStep("password");
       setCooldown(0);
     } catch (e) {
@@ -109,8 +76,6 @@ export default function SignupPage() {
       const res = await apiPost<TokenResponse>("/auth/signup", {
         email,
         email_code: emailCode,
-        phone,
-        phone_code: phoneCode,
         password,
         nickname,
         marketing_agreed: marketingAgreed,
@@ -118,17 +83,12 @@ export default function SignupPage() {
       setToken(res.access_token);
       router.push("/dashboard");
     } catch (e) {
-      // 오래 붙잡고 있다가 제출하면 이메일/휴대폰 코드가 만료됐을 수 있다. 백엔드가
-      // 어느 쪽이 실패했는지 메시지에 "이메일 인증번호"/"휴대폰 인증번호"로 구분해
-      // 주므로, 해당 단계로 되돌리고 코드를 다시 받게 한다.
-      if (e instanceof ApiError && e.message.includes("이메일 인증번호")) {
+      // 오래 붙잡고 있다가 제출하면 이메일 코드가 만료됐을 수 있다. 그 경우 인증
+      // 단계로 되돌리고 코드를 다시 받게 한다.
+      if (e instanceof ApiError && e.message.includes("인증번호")) {
         setEmailCode("");
         setStep("email-code");
         setError(`${e.message} 이메일 인증을 다시 진행해주세요.`);
-      } else if (e instanceof ApiError && e.message.includes("휴대폰 인증번호")) {
-        setPhoneCode("");
-        setStep("phone-code");
-        setError(`${e.message} 휴대폰 인증을 다시 진행해주세요.`);
       } else {
         setError(e instanceof ApiError ? e.message : "회원가입에 실패했습니다");
       }
@@ -208,66 +168,6 @@ export default function SignupPage() {
             </div>
             <button
               type="button" disabled={cooldown > 0 || loading} onClick={sendEmailCode}
-              className="w-full text-center text-xs text-accent hover:underline disabled:text-muted disabled:no-underline"
-            >
-              {cooldown > 0 ? `재전송 (${cooldown}초 후 가능)` : "인증번호 재전송"}
-            </button>
-          </div>
-        )}
-
-        {step === "phone" && (
-          <div className="space-y-4">
-            <div>
-              <label className="mb-1 block text-xs text-muted">휴대폰 번호</label>
-              <input
-                required autoFocus value={phone} onChange={(e) => setPhone(e.target.value)}
-                className="w-full rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-                placeholder="010-0000-0000"
-              />
-            </div>
-            <div className="flex gap-2">
-              <button type="button" onClick={goBack} className="rounded-lg px-4 py-2 text-sm text-muted hover:bg-surface-2">
-                뒤로
-              </button>
-              <button
-                type="button" disabled={loading || !phone}
-                onClick={sendPhoneCode}
-                className="flex-1 rounded-lg bg-accent py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
-              >
-                {loading ? "발급 중..." : "인증번호 받기"}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {step === "phone-code" && (
-          <div className="space-y-4">
-            <p className="rounded-lg border border-accent/40 bg-accent-soft px-3 py-2 text-xs text-accent">
-              데모용 인증번호: <b>{mockPhoneCode}</b> (Mock — 실제 문자는 발송되지 않습니다)
-            </p>
-            <div>
-              <label className="mb-1 block text-xs text-muted">휴대폰 인증번호</label>
-              <input
-                required autoFocus inputMode="numeric" maxLength={6}
-                value={phoneCode} onChange={(e) => setPhoneCode(e.target.value)}
-                className="w-full rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-                placeholder="6자리 숫자"
-              />
-            </div>
-            <div className="flex gap-2">
-              <button type="button" onClick={goBack} className="rounded-lg px-4 py-2 text-sm text-muted hover:bg-surface-2">
-                뒤로
-              </button>
-              <button
-                type="button" disabled={loading || phoneCode.length !== 6}
-                onClick={confirmPhoneCode}
-                className="flex-1 rounded-lg bg-accent py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
-              >
-                {loading ? "확인 중..." : "확인"}
-              </button>
-            </div>
-            <button
-              type="button" disabled={cooldown > 0 || loading} onClick={sendPhoneCode}
               className="w-full text-center text-xs text-accent hover:underline disabled:text-muted disabled:no-underline"
             >
               {cooldown > 0 ? `재전송 (${cooldown}초 후 가능)` : "인증번호 재전송"}
