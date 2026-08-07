@@ -121,6 +121,7 @@
 실행:
 
 ```sql
+ALTER TABLE signup_verifications ALTER COLUMN purpose TYPE VARCHAR(20);
 ALTER TABLE signup_verifications DROP CONSTRAINT signup_verifications_purpose_check;
 ALTER TABLE signup_verifications ADD CONSTRAINT signup_verifications_purpose_check
     CHECK (purpose IN ('email', 'phone', 'password_reset'));
