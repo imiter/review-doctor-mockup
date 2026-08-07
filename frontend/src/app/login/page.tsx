@@ -1,15 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useState } from "react";
 import { ApiError, apiPost, getToken, setToken } from "@/lib/api";
 import { kakaoAuthorizeUrl } from "@/lib/kakao";
 
 type TokenResponse = { access_token: string };
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -18,6 +19,8 @@ export default function LoginPage() {
   if (typeof window !== "undefined" && getToken()) {
     router.replace("/dashboard");
   }
+
+  const resetSuccess = searchParams.get("reset") === "success";
 
   const submit = async (e: React.FormEvent, overrideEmail?: string, overridePassword?: string) => {
     e.preventDefault();
@@ -49,6 +52,12 @@ export default function LoginPage() {
             <p className="text-xs text-muted">& Store Insight</p>
           </div>
         </div>
+
+        {resetSuccess && (
+          <p className="mb-4 rounded-lg border border-accent/40 bg-accent-soft px-3 py-2 text-xs text-accent">
+            비밀번호가 재설정되었습니다. 새 비밀번호로 로그인해주세요.
+          </p>
+        )}
 
         <form onSubmit={submit} className="space-y-4">
           <div>
@@ -85,6 +94,12 @@ export default function LoginPage() {
           </button>
         </form>
 
+        <p className="mt-3 text-center text-xs">
+          <Link href="/password-reset" className="text-muted hover:text-foreground hover:underline">
+            비밀번호를 잊으셨나요?
+          </Link>
+        </p>
+
         <button
           onClick={(e) => submit(e, "demo@dris.kr", "demo1234!")}
           disabled={loading}
@@ -115,5 +130,13 @@ export default function LoginPage() {
         </p>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
   );
 }
