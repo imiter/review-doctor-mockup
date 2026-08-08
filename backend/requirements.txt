@@ -8,3 +8,4 @@ bcrypt
 PyJWT
 pytest
 httpx
+cryptography
