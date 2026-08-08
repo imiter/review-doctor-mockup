@@ -10,7 +10,10 @@ def test_dashboard_counts_unanswered_reviews(client, db_session, seeded_user, pl
     )
     db_session.add(order)
     db_session.flush()
-    db_session.add(Review(order_id=order.id, rating=1, content="별로", customer_nickname="익명", created_at=datetime.now(timezone.utc)))
+    db_session.add(Review(
+        order_id=order.id, store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=1, content="별로", customer_nickname="익명", created_at=datetime.now(timezone.utc),
+    ))
     db_session.commit()
 
     body = client.get("/dashboard", headers=auth_headers).json()

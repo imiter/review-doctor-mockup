@@ -1,4 +1,4 @@
-"""SQLAlchemy 모델 — schema.sql의 18개 테이블과 1:1 대응.
+"""SQLAlchemy 모델 — schema.sql의 19개 테이블과 1:1 대응.
 
 스키마 정본은 저장소 루트 schema.sql이다. 여기서는 컬럼과 관계만 미러링하며,
 제약(CHECK, ON DELETE 정책)은 DB 레벨에 이미 존재한다.
@@ -73,6 +73,7 @@ class StorePlatformConnection(Base):
     platform_id: Mapped[int] = mapped_column(ForeignKey("platforms.id"))
     platform_store_id: Mapped[str] = mapped_column(String(30))
     business_number: Mapped[str | None] = mapped_column(String(20))
+    credential_ciphertext: Mapped[str | None] = mapped_column(Text)
     connected_at: Mapped[datetime]
 
     store: Mapped[Store] = relationship()
@@ -141,7 +142,13 @@ class Review(Base):
     __tablename__ = "reviews"
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
-    order_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("orders.id"), unique=True)
+    order_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("orders.id"), unique=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("stores.id"))
+    platform_id: Mapped[int] = mapped_column(ForeignKey("platforms.id"))
+    menu_summary: Mapped[str] = mapped_column(String(200))
+    external_review_id: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), unique=True
+    )
     rating: Mapped[int]
     content: Mapped[str] = mapped_column(Text)
     customer_nickname: Mapped[str] = mapped_column(String(50))
@@ -149,8 +156,27 @@ class Review(Base):
     status: Mapped[str] = mapped_column(String(12), default="unanswered")
     created_at: Mapped[datetime]
 
-    order: Mapped[Order] = relationship(back_populates="review")
+    order: Mapped[Order | None] = relationship(back_populates="review")
+    store: Mapped[Store] = relationship()
+    platform: Mapped[Platform] = relationship()
     replies: Mapped[list["ReviewReply"]] = relationship(back_populates="review")
+
+
+class ReviewSyncJob(Base):
+    __tablename__ = "review_sync_jobs"
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("stores.id"))
+    platform_id: Mapped[int] = mapped_column(ForeignKey("platforms.id"))
+    status: Mapped[str] = mapped_column(String(10), default="pending")
+    reviews_fetched: Mapped[int | None]
+    reviews_inserted: Mapped[int | None]
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime]
+    finished_at: Mapped[datetime | None]
+
+    store: Mapped[Store] = relationship()
+    platform: Mapped[Platform] = relationship()
 
 
 class ReviewReply(Base):

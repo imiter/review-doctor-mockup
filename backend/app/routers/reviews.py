@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
-from app.models import Order, ReplyStyle, Review, ReviewReply, Store, User
+from app.models import ReplyStyle, Review, ReviewReply, Store, User
 
 router = APIRouter(tags=["reviews"])
 
@@ -28,10 +28,10 @@ def _band(rating: int) -> str:
     return "high"
 
 
-def _fill_template(template: str, review: Review, order: Order, store: Store) -> str:
+def _fill_template(template: str, review: Review, store: Store) -> str:
     return (
         template.replace("{nickname}", review.customer_nickname)
-        .replace("{menu}", order.menu_summary)
+        .replace("{menu}", review.menu_summary)
         .replace("{store}", store.name)
     )
 
@@ -46,9 +46,8 @@ def list_reviews(
     sid = store_id or get_user_default_store_id(user, db)
     stmt = (
         select(Review)
-        .join(Order, Review.order_id == Order.id)
-        .where(Order.store_id == sid)
-        .options(joinedload(Review.order).joinedload(Order.platform), joinedload(Review.replies))
+        .where(Review.store_id == sid)
+        .options(joinedload(Review.platform), joinedload(Review.replies))
         .order_by(Review.created_at.desc())
     )
     if status:
@@ -63,8 +62,8 @@ def list_reviews(
         result.append({
             "id": r.id,
             "order_id": r.order_id,
-            "platform_name": r.order.platform.name,
-            "menu_summary": r.order.menu_summary,
+            "platform_name": r.platform.name,
+            "menu_summary": r.menu_summary,
             "rating": r.rating,
             "content": r.content,
             "customer_nickname": r.customer_nickname,
@@ -90,8 +89,8 @@ def generate_reply(
     review_id: int, body: GenerateReplyRequest,
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    review = db.get(Review, review_id, options=[joinedload(Review.order).joinedload(Order.store)])
-    if review is None or review.order.store.user_id != user.id:
+    review = db.get(Review, review_id, options=[joinedload(Review.store)])
+    if review is None or review.store.user_id != user.id:
         raise HTTPException(404, "리뷰 없음")
 
     style = db.get(ReplyStyle, body.style_id)
@@ -99,7 +98,7 @@ def generate_reply(
         raise HTTPException(404, "답글 스타일 없음")
 
     template = {"low": style.template_low, "mid": style.template_mid, "high": style.template_high}[_band(review.rating)]
-    content = _fill_template(template, review, review.order, review.order.store)
+    content = _fill_template(template, review, review.store)
 
     draft = ReviewReply(
         review_id=review.id, reply_type="ai_draft", style_id=style.id,
@@ -122,8 +121,8 @@ def save_final_reply(
     review_id: int, body: SaveReplyRequest,
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    review = db.get(Review, review_id, options=[joinedload(Review.order).joinedload(Order.store)])
-    if review is None or review.order.store.user_id != user.id:
+    review = db.get(Review, review_id, options=[joinedload(Review.store)])
+    if review is None or review.store.user_id != user.id:
         raise HTTPException(404, "리뷰 없음")
     if review.status == "answered":
         raise HTTPException(409, "이미 답글이 등록된 리뷰입니다")
@@ -148,8 +147,8 @@ def add_secondary_reply(
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """답글 완료 리뷰에 덧붙이는 2차(추가) 답글. 고객이 리뷰를 수정했거나 추가 안내가 필요할 때 사용."""
-    review = db.get(Review, review_id, options=[joinedload(Review.order).joinedload(Order.store)])
-    if review is None or review.order.store.user_id != user.id:
+    review = db.get(Review, review_id, options=[joinedload(Review.store)])
+    if review is None or review.store.user_id != user.id:
         raise HTTPException(404, "리뷰 없음")
     if review.status != "answered":
         raise HTTPException(409, "1차 답글이 등록된 리뷰에만 2차 답글을 추가할 수 있습니다")

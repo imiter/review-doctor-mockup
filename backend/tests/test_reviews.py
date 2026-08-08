@@ -1,17 +1,12 @@
 from datetime import datetime, timezone
 
-from app.models import Order, Review
+from app.models import Review
 
 
 def make_review(db_session, store, platforms, rating, content="테스트 리뷰"):
-    order = Order(
-        store_id=store.id, platform_id=platforms["baemin"].id, order_no=f"T-{rating}-{content[:3]}",
-        ordered_at=datetime.now(timezone.utc), menu_summary="양념치킨", order_type="delivery", amount=20000,
-    )
-    db_session.add(order)
-    db_session.flush()
     review = Review(
-        order_id=order.id, rating=rating, content=content, customer_nickname="먹보",
+        store_id=store.id, platform_id=platforms["baemin"].id, menu_summary="양념치킨",
+        rating=rating, content=content, customer_nickname="먹보",
         customer_order_count=2, created_at=datetime.now(timezone.utc),
     )
     db_session.add(review)
@@ -72,3 +67,23 @@ def test_reviews_scoped_to_own_store_not_other_users(client, db_session, seeded_
 
 def review_created_at():
     return datetime.now(timezone.utc)
+
+
+def test_review_without_order_is_listed_and_repliable(client, db_session, seeded_user, platforms, reply_styles, auth_headers):
+    """order_id 없이(배민 스크래핑처럼) 만든 리뷰도 정상 조회/답글 생성이 되는지 확인."""
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, menu_summary="양념치킨",
+        rating=5, content="주문 연결 없는 리뷰", customer_nickname="먹보",
+        customer_order_count=1, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    listed = client.get("/reviews", headers=auth_headers).json()
+    matched = next(r for r in listed if r["id"] == review.id)
+    assert matched["order_id"] is None
+    assert matched["menu_summary"] == "양념치킨"
+
+    res = client.post(f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers)
+    assert res.status_code == 200
+    assert "양념치킨" in res.json()["content"]

@@ -11,7 +11,8 @@ def make_answered_review(db_session, store, platform):
     db_session.add(order)
     db_session.flush()
     review = Review(
-        order_id=order.id, rating=5, content="좋아요", customer_nickname="단골",
+        order_id=order.id, store_id=store.id, platform_id=platform.id, menu_summary="치킨",
+        rating=5, content="좋아요", customer_nickname="단골",
         customer_order_count=3, status="answered", created_at=datetime.now(timezone.utc),
     )
     db_session.add(review)
@@ -32,7 +33,8 @@ def make_unanswered_review(db_session, store, platform):
     db_session.add(order)
     db_session.flush()
     review = Review(
-        order_id=order.id, rating=5, content="좋아요", customer_nickname="단골2",
+        order_id=order.id, store_id=store.id, platform_id=platform.id, menu_summary="치킨",
+        rating=5, content="좋아요", customer_nickname="단골2",
         customer_order_count=1, created_at=datetime.now(timezone.utc),
     )
     db_session.add(review)

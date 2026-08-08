@@ -123,9 +123,12 @@ CROSS JOIN LATERAL generate_series(
 --    별점 분포: 5점 55% / 4점 20% / 3점 10% / 2점 8% / 1점 7%
 --    상태: 20건 answered, 2건 pending(초안만 생성됨), 나머지 unanswered
 -- ----------------------------------------------------------------------------
-INSERT INTO reviews (order_id, rating, content, customer_nickname, customer_order_count, status, created_at)
+INSERT INTO reviews (order_id, store_id, platform_id, menu_summary, rating, content, customer_nickname, customer_order_count, status, created_at)
 SELECT
     o.id,
+    o.store_id,
+    o.platform_id,
+    o.menu_summary,
     r.rating,
     CASE
       WHEN r.rating >= 4 THEN (ARRAY['진짜 맛있어요. 재주문 의사 100%입니다','바삭하고 양도 푸짐해요. 최고!','배달도 빠르고 포장도 꼼꼼했어요','잘 먹겠습니다^^ 사진 보세요 비주얼 대박','단골 확정입니다. 늘 한결같아요'])[1 + floor(random()*5)::int]

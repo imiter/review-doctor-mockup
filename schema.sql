@@ -1,7 +1,7 @@
 -- ============================================================================
 -- Delivery Review & Store Insight MVP — PostgreSQL Schema
 -- ============================================================================
--- 18개 테이블. 모든 FK에 ON DELETE 정책 명시.
+-- 19개 테이블. 모든 FK에 ON DELETE 정책 명시.
 --
 -- 삭제 정책 원칙:
 --   ON DELETE CASCADE  — 부모에 종속된 소유 데이터 (사장 탈퇴 → 매장/주문/리뷰 연쇄 삭제)
@@ -19,9 +19,9 @@
 BEGIN;
 
 DROP TABLE IF EXISTS
-    signup_verifications, social_accounts, alerts, ad_rank_snapshots, ad_performance_metrics,
-    ad_campaigns, repurchase_metrics, daily_settlements, review_replies, reviews, orders,
-    reply_settings, reply_styles, subscriptions, store_platform_connections,
+    review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
+    ad_performance_metrics, ad_campaigns, repurchase_metrics, daily_settlements, review_replies,
+    reviews, orders, reply_settings, reply_styles, subscriptions, store_platform_connections,
     platforms, stores, users
 CASCADE;
 
@@ -65,14 +65,17 @@ CREATE TABLE platforms (
 
 -- ----------------------------------------------------------------------------
 -- 4. store_platform_connections — 매장:플랫폼 N:M 중간 테이블 (가게 연결 화면)
+--    credential_ciphertext: 배민 등 실계정 로그인을 위한 암호화된 자격증명
+--    (Fernet, JSON {"login_id", "password"}). 다른 플랫폼(Mock)은 NULL.
 -- ----------------------------------------------------------------------------
 CREATE TABLE store_platform_connections (
-    id                BIGSERIAL PRIMARY KEY,
-    store_id          BIGINT      NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
-    platform_id       INT         NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
-    platform_store_id VARCHAR(30) NOT NULL,       -- Mock 스토어 아이디
-    business_number   VARCHAR(20),                -- Mock 사업자번호
-    connected_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    id                    BIGSERIAL PRIMARY KEY,
+    store_id              BIGINT      NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
+    platform_id           INT         NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
+    platform_store_id     VARCHAR(30) NOT NULL,       -- Mock 스토어 아이디(배민은 실제 shopNo)
+    business_number       VARCHAR(20),                -- Mock 사업자번호
+    credential_ciphertext TEXT,                       -- 신규. 배민 실계정 암호화 자격증명
+    connected_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (store_id, platform_id)
 );
 
@@ -137,12 +140,19 @@ CREATE INDEX idx_orders_store_time    ON orders(store_id, ordered_at);
 CREATE INDEX idx_orders_platform_time ON orders(platform_id, ordered_at);
 
 -- ----------------------------------------------------------------------------
--- 9. reviews — 리뷰. orders 1:1 reviews (핵심 외래키: reviews.order_id)
+-- 9. reviews — 리뷰. store_id/platform_id/menu_summary를 직접 갖는다(주문과
+--    독립적으로 적재 가능 — 배민 리뷰 API에는 주문과 연결할 공통 키가 없다).
+--    order_id는 있으면 연결하는 선택적 FK로 남겨둔다(현재는 채워지는 경우 없음).
+--    external_review_id: 배민 리뷰 API의 id. 재동기화 시 중복 판별 키. Mock은 NULL.
 --    상태: unanswered(미등록) → pending(등록 대기: AI 초안 생성됨) → answered(등록 완료)
 -- ----------------------------------------------------------------------------
 CREATE TABLE reviews (
     id                   BIGSERIAL PRIMARY KEY,
-    order_id             BIGINT      NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+    order_id             BIGINT      UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+    store_id             BIGINT      NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
+    platform_id          INT         NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
+    menu_summary         VARCHAR(200) NOT NULL,
+    external_review_id   BIGINT      UNIQUE,
     rating               SMALLINT    NOT NULL CHECK (rating BETWEEN 1 AND 5),
     content              TEXT        NOT NULL,
     customer_nickname    VARCHAR(50) NOT NULL,    -- 닉네임만 저장, 실명 아님
@@ -153,6 +163,7 @@ CREATE TABLE reviews (
 );
 
 CREATE INDEX idx_reviews_status ON reviews(status);
+CREATE INDEX idx_reviews_store  ON reviews(store_id);
 
 -- ----------------------------------------------------------------------------
 -- 10. review_replies — 답글. reviews 1:N
@@ -308,6 +319,23 @@ CREATE TABLE signup_verifications (
     attempts   INT          NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
     UNIQUE (target, purpose)
+);
+
+-- ----------------------------------------------------------------------------
+-- 19. review_sync_jobs — 배민 리뷰 동기화 작업 상태 추적 (가게 연결 화면의
+--     "리뷰 동기화" 버튼 → 백그라운드 작업 → 폴링)
+-- ----------------------------------------------------------------------------
+CREATE TABLE review_sync_jobs (
+    id               BIGSERIAL PRIMARY KEY,
+    store_id         BIGINT      NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
+    platform_id      INT         NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
+    status           VARCHAR(10) NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending', 'running', 'success', 'failed')),
+    reviews_fetched  INT,
+    reviews_inserted INT,
+    error_message    TEXT,
+    started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at      TIMESTAMPTZ
 );
 
 COMMIT;
