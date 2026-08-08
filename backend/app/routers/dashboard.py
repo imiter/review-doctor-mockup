@@ -14,7 +14,6 @@ from app.models import (
     AdPerformanceMetric,
     Alert,
     DailySettlement,
-    Order,
     RepurchaseMetric,
     Review,
     Store,
@@ -40,8 +39,7 @@ def dashboard(store_id: int | None = None, user=Depends(get_current_user), db: S
 
     unanswered = db.scalar(
         select(func.count(Review.id))
-        .join(Order, Review.order_id == Order.id)
-        .where(Order.store_id == sid, Review.status == "unanswered")
+        .where(Review.store_id == sid, Review.status == "unanswered")
     )
 
     latest_repurchase = db.scalar(
