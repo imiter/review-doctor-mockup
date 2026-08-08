@@ -9,3 +9,4 @@ PyJWT
 pytest
 httpx
 cryptography
+playwright
