@@ -66,6 +66,14 @@ def _extract_login_error(page) -> str | None:
 def _discover_first_shop(page) -> tuple[int, str]:
     page.get_by_role("button", name="리뷰관리 리뷰관리").click()
     shop_select = page.get_by_role("combobox").nth(1)
+    # click()은 버튼 자체의 등장만 기다린다 — 그 뒤에 렌더링되는 select의
+    # <option>들은 별도로 기다려야 한다. Locator.all()은 auto-wait를 하지 않고
+    # 호출 시점에 DOM에 있는 것만 즉시 읽으므로, 기다리지 않으면 아직 옵션이
+    # 그려지기 전에 빈 리스트를 읽어 "매장 목록을 확인하지 못했습니다"라는
+    # 잘못된 에러(실제로는 타이밍 문제일 뿐)를 내게 된다. state="attached"만
+    # 확인하는 이유는 네이티브 select의 option은 Playwright의 "visible" 판정이
+    # 불안정하기 때문 — DOM에 붙었는지만 확인하면 충분하다.
+    shop_select.locator("option").first.wait_for(state="attached")
     options = shop_select.locator("option").all()
     for option in options:
         value = option.get_attribute("value")
@@ -94,6 +102,15 @@ def login(login_id: str, password: str, headless: bool = True) -> BaeminSession:
     )
     page = context.new_page()
 
+    # 아래 try 블록에서 나는 실패는 BaeminLoginError만이 아니다 — page.goto의
+    # 네트워크/타임아웃 오류, get_by_test_id("id")/("password")/로그인 버튼의
+    # 기본 30초 타임아웃, _discover_first_shop의 리뷰관리 클릭·option 대기
+    # 타임아웃 등도 전부 여기서 날 수 있다. 예전에는 `except BaeminLoginError`만
+    # 정리를 했어서 그 외 예외는 브라우저/Playwright 드라이버 프로세스를 그대로
+    # 흘려보냈다(실제로 봉 탐지 차단으로 인한 fill() 타임아웃에서 재현됨).
+    # success 플래그 + finally로 성공 여부와 무관하게 항상 정리하고, 호출자가
+    # BaeminLoginError 하나만 잡으면 되도록 다른 예외는 여기서 감싸 다시 던진다.
+    success = False
     try:
         page.goto(_LOGIN_URL)
 
@@ -117,14 +134,20 @@ def login(login_id: str, password: str, headless: bool = True) -> BaeminSession:
 
         shop_no, shop_name = _discover_first_shop(page)
 
-        return BaeminSession(
+        session = BaeminSession(
             request_context=context.request,
             shop_no=shop_no,
             shop_name=shop_name,
             _playwright=playwright,
             _browser=browser,
         )
+        success = True
+        return session
     except BaeminLoginError:
-        browser.close()
-        playwright.stop()
         raise
+    except Exception as e:
+        raise BaeminLoginError(f"로그인 처리 중 예기치 못한 오류가 발생했습니다: {e}") from e
+    finally:
+        if not success:
+            browser.close()
+            playwright.stop()
