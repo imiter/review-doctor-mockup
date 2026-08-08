@@ -26,8 +26,8 @@
 
 
 ## 절대 금지 (의도적으로 제외한 범위, 교육 과제물 시절 원칙 — 위 "방향 전환" 참고)
-- 실제 배민/쿠팡이츠/요기요 등 플랫폼 API 연동 금지
-- 실제 리뷰 크롤링 금지
+- 실제 쿠팡이츠/요기요 API 연동 금지 (배민은 예외 허용 — 아래 "배민 리뷰 연동" 절 참고)
+- 실제 리뷰 크롤링 금지 (배민 리뷰는 예외 허용 — 아래 "배민 리뷰 연동" 절 참고)
 - 실제 AI API 호출 금지 (답글 생성은 템플릿 기반 Mock)
 - 실제 자동 답글 등록 금지
 - 실제 CPC 자동 입찰 금지
@@ -67,6 +67,26 @@ SaaS 전환의 첫 단계로 카카오 로그인을 실제로 붙이기로 결�
 참고(휴대폰 Mock 인증 단계를 포함한 원안 — 승인 당시 기록이라 소급 수정하지
 않음, 최신 동작 기준은 이 문단).
 
+### 배민 리뷰 연동 (예외 허용)
+원래 "실제 배민/쿠팡이츠/요기요 등 플랫폼 API 연동 금지", "실제 리뷰 크롤링
+금지"였으나, 실 SaaS 전환 로드맵 3번(실제 배달 플랫폼 데이터 연동)의 첫
+단계로 배민 리뷰만 실제로 연동하기로 결정했다(2026-08-09). 실제 계정으로
+크롬 개발자도구 Network 탭을 직접 확인해, 사장님광장(self.baemin.com)의
+리뷰 API(`self-api.baemin.com/v1/review/shops/{shopNo}/reviews`)와 주문내역
+API 사이에 서로를 연결하는 공통 키가 없다는 걸 확인했다 — 그래서 리뷰를
+주문/정산과 억지로 연결하지 않고, `reviews` 테이블이 `store_id`/
+`platform_id`/`menu_summary`를 직접 갖도록 데이터 모델을 바꿨다(`order_id`는
+있으면 연결하는 선택적 FK로 강등, 실제로 채워지는 경우는 없음).
+
+"가게 연결" 화면에서 배민 카드만 실제 ID/PW를 받아 Playwright로 사장님광장에
+로그인하고(`backend/scrapers/baemin_auth.py`), 로그인 세션의 request context로
+리뷰 API를 직접 호출해(`backend/scrapers/baemin_reviews.py`) 실제 DB에
+적재한다. 자격증명은 Fernet으로 암호화해 저장한다
+(`backend/app/credential_crypto.py`, `CREDENTIAL_ENCRYPTION_KEY` 환경변수).
+쿠팡이츠/요기요는 아직 미승인이라 "절대 금지" 그대로 유지, 배민의 주문/정산
+실데이터 연동과 리뷰 답글 실제 자동 등록도 여전히 범위 밖이다. 설계 상세는
+`docs/superpowers/specs/2026-08-09-baemin-review-scraping-design.md` 참고.
+
 ### 모바일 앱 (예외 허용)
 원래 "Flutter 앱 구현 금지"로 모바일 앱 자체를 범위 밖으로 뒀으나, 웹과 같은
 백엔드를 쓰는 React Native 앱을 추가하기로 결정했다(추후 결정으로 예외 허용 —
@@ -84,12 +104,12 @@ SaaS 전환의 첫 단계로 카카오 로그인을 실제로 붙이기로 결�
 - users 테이블 컬럼은 최소화: id, email, nickname, phone_hash,
   marketing_agreed, created_at.
 
-## DB 설계 (18개 테이블)
+## DB 설계 (19개 테이블)
 users, stores, platforms, store_platform_connections, subscriptions,
 orders, reviews, review_replies, reply_styles, reply_settings,
 daily_settlements, repurchase_metrics, ad_campaigns,
 ad_performance_metrics, ad_rank_snapshots, alerts, social_accounts,
-signup_verifications.
+signup_verifications, review_sync_jobs.
 
 ### 테이블 용도
 - users: 사장 계정. 전화번호는 phone_hash로 비식별화.
@@ -98,7 +118,9 @@ signup_verifications.
 - store_platform_connections: 매장과 플랫폼의 N:M 중간 테이블.
 - subscriptions: Basic/Pro 플랜, 하루 답글 생성 한도, Pro 기능 잠금.
 - orders: 주문내역(주문번호, 주문시각, 주문메뉴, 주문유형, 주문금액).
-- reviews: 리뷰(별점, 내용, 고객 닉네임, 주문 횟수, 상태).
+- reviews: 리뷰(별점, 내용, 고객 닉네임, 주문 횟수, 상태). store_id/platform_id/
+  menu_summary를 직접 가진다 — 주문과 독립적으로 적재 가능(배민 리뷰 API에는
+  주문과 연결할 공통 키가 없음). order_id는 있으면 연결하는 선택적 FK.
 - review_replies: AI 추천 답글 Mock과 사장 최종 답글.
 - reply_styles: 답글 말투 스타일 마스터(발랄 이모지 파티, 진중맨, 무난 요정, 진지한 하이개그).
 - reply_settings: 가게별 답글 설정(홍보문구, 닉네임/메뉴/가게명 포함 여부, 부정 리뷰 홍보문구 포함 여부).
@@ -117,12 +139,15 @@ signup_verifications.
   참조하지 않는다 — 인증이 끝난 뒤에만 계정이 생성되기 때문. purpose 컬럼은
   'phone' 값도 허용하지만 현재 코드 경로에서는 만들지 않는다(휴대폰 인증 단계를
   가입 위자드에서 뺐기 때문 — 위 "이메일 인증" 절 참고).
+- review_sync_jobs: 배민 리뷰 동기화 작업 상태(pending/running/success/failed).
+  "가게 연결" 화면의 "리뷰 동기화" 버튼 → 백그라운드 작업 → 폴링에 쓰인다.
 
 ### 핵심 관계 (모든 관계에 외래키와 삭제 정책 명시)
 - users 1:N stores
 - stores N:M platforms (중간 테이블 store_platform_connections)
 - stores 1:N orders
-- orders 1:1 reviews (reviews.order_id가 orders.id 참조, 핵심 외래키)
+- orders 1:1 reviews (reviews.order_id, 선택적 FK — 현재 실제로 채워지는 경우 없음)
+- reviews N:1 stores, reviews N:1 platforms (직접 참조, 주문 조인 없이 조회)
 - reviews 1:N review_replies
 - stores 1:1 reply_settings, reply_settings는 reply_styles 참조
 - daily_settlements는 store와 platform 참조, 매출액과 입금액을 함께 가진다
@@ -130,6 +155,7 @@ signup_verifications.
 - ad_performance_metrics와 ad_rank_snapshots는 ad_campaigns 참조
 - alerts는 store 참조
 - users 1:N social_accounts
+- review_sync_jobs는 store, platform 참조
 
 ### 정규화 원칙
 - 매출 요약은 별도 테이블로 저장하지 않는다. daily_settlements를 기간별로
