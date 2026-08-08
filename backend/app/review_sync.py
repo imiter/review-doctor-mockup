@@ -33,7 +33,7 @@ def sync_reviews_for_job(job: ReviewSyncJob, conn: StorePlatformConnection, db: 
         return
 
     try:
-        raw_reviews = fetch_all_reviews(session.request_context, session.shop_no)
+        raw_reviews = fetch_all_reviews(session.page, session.shop_no)
         mapped = [
             map_review(raw, store_id=job.store_id, platform_id=job.platform_id)
             for raw in raw_reviews

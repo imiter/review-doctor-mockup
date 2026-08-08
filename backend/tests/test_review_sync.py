@@ -28,7 +28,7 @@ _RAW_HIDDEN = {
 
 class _FakeSession:
     shop_no = 99999001
-    request_context = object()
+    page = object()
     closed = False
 
     def close(self):
@@ -69,7 +69,7 @@ def test_sync_inserts_new_reviews_and_skips_duplicates_and_hidden(db_session, sy
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
     monkeypatch.setattr(
         review_sync_mod, "fetch_all_reviews",
-        lambda request_context, shop_no: [_RAW_1, _RAW_2, _RAW_HIDDEN],
+        lambda page, shop_no: [_RAW_1, _RAW_2, _RAW_HIDDEN],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -116,7 +116,7 @@ def test_sync_records_mapping_failure_on_missing_field_and_still_closes_session(
     }
     monkeypatch.setattr(
         review_sync_mod, "fetch_all_reviews",
-        lambda request_context, shop_no: [_raw_missing_nickname],
+        lambda page, shop_no: [_raw_missing_nickname],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -134,7 +134,7 @@ def test_sync_records_fetch_failure_and_still_closes_session(db_session, sync_se
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
 
-    def _raise(request_context, shop_no):
+    def _raise(page, shop_no):
         raise BaeminScrapeError("리뷰 조회 실패: HTTP 500")
 
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _raise)

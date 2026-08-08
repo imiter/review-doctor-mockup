@@ -21,6 +21,14 @@
   실행 인자와 `navigator.webdriver` 오버라이드, 일반적인 데스크톱 Chrome
   User-Agent/뷰포트만 추가하면(번들 Chromium 그대로, 별도 실브라우저 채널 불필요)
   차단 없이 정상적으로 로그인 폼까지 도달한다.
+- 리뷰 API(self-api.baemin.com)를 `context.request`(브라우저 밖 `APIRequestContext`)로
+  직접 호출하면 쿠키가 실려도 HTTP 403이 난다(실 계정으로 재현 확인). 실제
+  요청에는 매 요청마다 값이 바뀌는 `x-e-request` 서명 헤더가 실려 있는데, 이는
+  배민 프런트 JS가 동적으로 생성하는 값이라 정적으로 재현할 수 없다. 그래서
+  로그인 성공 후에도 `page`를 닫지 않고 세션에 그대로 담아 반환한다 —
+  `baemin_reviews.py`의 리뷰 조회가 이 살아있는 페이지 안에서
+  `page.evaluate()`로 `fetch()`를 실행해, 그 페이지의 JS 런타임이 알아서
+  `x-e-request`를 계산하도록 한다.
 """
 
 from dataclasses import dataclass
@@ -42,7 +50,7 @@ class BaeminLoginError(Exception):
 
 @dataclass
 class BaeminSession:
-    request_context: object
+    page: object
     shop_no: int
     shop_name: str
     _playwright: object
@@ -135,7 +143,7 @@ def login(login_id: str, password: str, headless: bool = True) -> BaeminSession:
         shop_no, shop_name = _discover_first_shop(page)
 
         session = BaeminSession(
-            request_context=context.request,
+            page=page,
             shop_no=shop_no,
             shop_name=shop_name,
             _playwright=playwright,
