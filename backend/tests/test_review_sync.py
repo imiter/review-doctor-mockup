@@ -101,6 +101,32 @@ def test_sync_records_login_failure(db_session, sync_setup, monkeypatch):
     assert job.finished_at is not None
 
 
+def test_sync_records_mapping_failure_on_missing_field_and_still_closes_session(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+
+    _raw_missing_nickname = {
+        "id": 2001, "rating": 5.0, "contents": "닉네임 필드 누락",
+        "orderCount": 1, "menus": [{"name": "메뉴"}], "createdAt": "2026-08-04T10:00:00+09:00",
+        "displayStatus": "DISPLAY",
+        # memberNickname 누락 — 배민 비공식 API 응답이 변경/축소된 상황을 흉내낸다
+    }
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_all_reviews",
+        lambda request_context, shop_no: [_raw_missing_nickname],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "failed"  # KeyError로 running에 멈추지 않고 failed로 기록돼야 함
+    assert job.error_message is not None
+    assert job.finished_at is not None
+    assert fake_session.closed is True
+
+
 def test_sync_records_fetch_failure_and_still_closes_session(db_session, sync_setup, monkeypatch):
     import app.review_sync as review_sync_mod
 

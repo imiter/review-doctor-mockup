@@ -34,20 +34,19 @@ def sync_reviews_for_job(job: ReviewSyncJob, conn: StorePlatformConnection, db: 
 
     try:
         raw_reviews = fetch_all_reviews(session.request_context, session.shop_no)
-    except BaeminScrapeError as e:
+        mapped = [
+            map_review(raw, store_id=job.store_id, platform_id=job.platform_id)
+            for raw in raw_reviews
+            if raw.get("displayStatus", "DISPLAY") == "DISPLAY"
+        ]
+    except (BaeminScrapeError, KeyError) as e:
         job.status = "failed"
-        job.error_message = str(e)
+        job.error_message = f"리뷰 조회/매핑 실패: {e}"
         job.finished_at = datetime.now(timezone.utc)
         db.commit()
         return
     finally:
         session.close()
-
-    mapped = [
-        map_review(raw, store_id=job.store_id, platform_id=job.platform_id)
-        for raw in raw_reviews
-        if raw.get("displayStatus", "DISPLAY") == "DISPLAY"
-    ]
 
     existing_ids = set(db.scalars(
         select(Review.external_review_id).where(Review.external_review_id.isnot(None))
