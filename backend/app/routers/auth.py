@@ -50,6 +50,16 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class PasswordResetRequestBody(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirmBody(BaseModel):
+    email: EmailStr
+    code: str
+    new_password: str
+
+
 class KakaoCallbackRequest(BaseModel):
     code: str
     redirect_uri: str
@@ -193,6 +203,39 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
     db.commit()
 
     return TokenResponse(access_token=create_token(user.id), user=_user_dict(user))
+
+
+@router.post("/password-reset/request")
+def request_password_reset(body: PasswordResetRequestBody, db: Session = Depends(get_db)):
+    user = db.scalar(select(User).where(User.email == body.email))
+    if user is None:
+        raise HTTPException(404, "가입된 계정이 없습니다")
+    if user.password_hash is None:
+        raise HTTPException(400, "카카오로 가입된 계정입니다. 카카오 로그인을 이용해주세요")
+
+    code = _issue_code(db, body.email, "password_reset", EMAIL_CODE_TTL)
+    try:
+        send_verification_email(body.email, code, purpose="password_reset")
+    except EmailSendError as e:
+        logger.warning("비밀번호 재설정 이메일 발송 실패 (%s): %s", body.email, e)
+        raise HTTPException(502, "이메일 발송에 실패했습니다. 잠시 후 다시 시도해주세요")
+    return {"sent": True}
+
+
+@router.post("/password-reset/confirm")
+def confirm_password_reset(body: PasswordResetConfirmBody, db: Session = Depends(get_db)):
+    user = db.scalar(select(User).where(User.email == body.email))
+    if user is None:
+        raise HTTPException(404, "가입된 계정이 없습니다")
+
+    _check_code(db, body.email, "password_reset", body.code)
+
+    user.password_hash = hash_password(body.new_password)
+    db.execute(delete(SignupVerification).where(
+        SignupVerification.target == body.email, SignupVerification.purpose == "password_reset"
+    ))
+    db.commit()
+    return {"reset": True}
 
 
 @router.post("/login")

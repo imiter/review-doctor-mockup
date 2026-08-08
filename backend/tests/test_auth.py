@@ -391,3 +391,117 @@ def test_signup_consumes_verification_row_on_success(client, platforms, db_sessi
         SignupVerification.target == "consumed@test.com"
     ).count()
     assert remaining == 0
+
+
+def test_signup_verification_accepts_password_reset_purpose(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import SignupVerification
+
+    now = datetime.now(timezone.utc)
+    db_session.add(SignupVerification(
+        target="reset-target@example.com", purpose="password_reset", code_hash="a" * 64,
+        expires_at=now + timedelta(minutes=10), attempts=0, created_at=now,
+    ))
+    db_session.commit()
+
+    found = db_session.query(SignupVerification).filter_by(
+        target="reset-target@example.com", purpose="password_reset"
+    ).one()
+    assert found.purpose == "password_reset"
+
+
+def test_password_reset_request_rejects_unknown_email(client, platforms):
+    res = client.post("/auth/password-reset/request", json={"email": "nosuchuser@test.com"})
+    assert res.status_code == 404
+
+
+def test_password_reset_request_rejects_kakao_only_account(client, platforms, monkeypatch):
+    from app.kakao import KakaoUser
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "exchange_code_for_token", lambda code, redirect_uri: "kakao-token")
+    monkeypatch.setattr(
+        auth_router, "fetch_kakao_user",
+        lambda access_token: KakaoUser(id="5005", nickname="카카오전용", email="kakaoonly2@test.com"),
+    )
+    client.post(
+        "/auth/kakao/callback",
+        json={"code": "auth-code", "redirect_uri": "http://localhost:3000/auth/kakao/callback"},
+    )
+
+    res = client.post("/auth/password-reset/request", json={"email": "kakaoonly2@test.com"})
+    assert res.status_code == 400
+    assert "카카오" in res.json()["detail"]
+
+
+def test_password_reset_request_sends_code_with_password_reset_purpose(client, seeded_user, monkeypatch):
+    from app.routers import auth as auth_router
+
+    sent = {}
+
+    def _fake_send(to, code, purpose="signup"):
+        sent["to"] = to
+        sent["code"] = code
+        sent["purpose"] = purpose
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "654321")
+    monkeypatch.setattr(auth_router, "send_verification_email", _fake_send)
+
+    res = client.post("/auth/password-reset/request", json={"email": "demo@dris.kr"})
+    assert res.status_code == 200
+    assert sent == {"to": "demo@dris.kr", "code": "654321", "purpose": "password_reset"}
+
+
+def test_password_reset_confirm_changes_password_and_allows_login(client, seeded_user, monkeypatch):
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "654321")
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code, purpose="signup": None)
+
+    client.post("/auth/password-reset/request", json={"email": "demo@dris.kr"})
+    res = client.post("/auth/password-reset/confirm", json={
+        "email": "demo@dris.kr", "code": "654321", "new_password": "newpass1234!",
+    })
+    assert res.status_code == 200
+    assert res.json() == {"reset": True}
+
+    old_login = client.post("/auth/login", json={"email": "demo@dris.kr", "password": "demo1234!"})
+    assert old_login.status_code == 401
+
+    new_login = client.post("/auth/login", json={"email": "demo@dris.kr", "password": "newpass1234!"})
+    assert new_login.status_code == 200
+
+
+def test_password_reset_confirm_rejects_wrong_code(client, seeded_user, monkeypatch):
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "654321")
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code, purpose="signup": None)
+
+    client.post("/auth/password-reset/request", json={"email": "demo@dris.kr"})
+    res = client.post("/auth/password-reset/confirm", json={
+        "email": "demo@dris.kr", "code": "000000", "new_password": "newpass1234!",
+    })
+    assert res.status_code == 400
+
+    still_old = client.post("/auth/login", json={"email": "demo@dris.kr", "password": "demo1234!"})
+    assert still_old.status_code == 200
+
+
+def test_password_reset_confirm_consumes_verification_row(client, seeded_user, db_session, monkeypatch):
+    from app.models import SignupVerification
+    from app.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "generate_code", lambda: "654321")
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda to, code, purpose="signup": None)
+
+    client.post("/auth/password-reset/request", json={"email": "demo@dris.kr"})
+    client.post("/auth/password-reset/confirm", json={
+        "email": "demo@dris.kr", "code": "654321", "new_password": "newpass1234!",
+    })
+
+    remaining = db_session.query(SignupVerification).filter_by(
+        target="demo@dris.kr", purpose="password_reset"
+    ).count()
+    assert remaining == 0

@@ -251,7 +251,7 @@ class SignupVerification(Base):
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
     target: Mapped[str] = mapped_column(String(255))
-    purpose: Mapped[str] = mapped_column(String(10))
+    purpose: Mapped[str] = mapped_column(String(20))
     code_hash: Mapped[str] = mapped_column(String(64))
     expires_at: Mapped[datetime]
     attempts: Mapped[int] = mapped_column(default=0)

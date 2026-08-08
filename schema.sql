@@ -292,15 +292,17 @@ CREATE TABLE social_accounts (
 CREATE INDEX idx_social_accounts_user ON social_accounts(user_id);
 
 -- ----------------------------------------------------------------------------
--- 18. signup_verifications — 이메일 회원가입 인증 코드(이메일 실발송/휴대폰 Mock).
---     users를 참조하지 않는다 — 계정은 인증이 모두 끝난 뒤에만 생성되므로
---     "미인증 계정" 상태 자체가 없다. target은 이메일이면 평문, 휴대폰이면
---     phone_hash와 동일한 SHA-256 해시(전화번호 원문 저장 금지 원칙 유지).
+-- 18. signup_verifications — 이메일 인증 코드. 회원가입 이메일 인증(Resend 실발송/
+--     휴대폰 Mock, 휴대폰 인증은 현재 가입 위자드에서 빠져 있어 미사용)과 비밀번호
+--     재설정 인증에 공용으로 쓰인다. users를 참조하지 않는다 — 회원가입은 인증이
+--     모두 끝난 뒤에만 계정이 생성되고, 비밀번호 재설정은 기존 계정을 이메일로
+--     조회할 뿐 이 테이블에 FK로 묶을 필요가 없다. target은 이메일이면 평문,
+--     휴대폰이면 phone_hash와 동일한 SHA-256 해시(전화번호 원문 저장 금지 원칙 유지).
 -- ----------------------------------------------------------------------------
 CREATE TABLE signup_verifications (
     id         BIGSERIAL PRIMARY KEY,
     target     VARCHAR(255) NOT NULL,
-    purpose    VARCHAR(10)  NOT NULL CHECK (purpose IN ('email', 'phone')),
+    purpose    VARCHAR(20)  NOT NULL CHECK (purpose IN ('email', 'phone', 'password_reset')),
     code_hash  CHAR(64)     NOT NULL,
     expires_at TIMESTAMPTZ  NOT NULL,
     attempts   INT          NOT NULL DEFAULT 0,
