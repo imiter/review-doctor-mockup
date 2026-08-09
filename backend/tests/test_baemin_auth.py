@@ -78,3 +78,6 @@ def test_login_does_not_close_session_resources_on_success():
     # 호출자가 session.close()로 닫는 게 계약이다.
     fake_browser.close.assert_not_called()
     fake_playwright.stop.assert_not_called()
+    # 로그인 성공 후 매장 탐색 전에 프로모션 모달을 방어적으로 닫는지 확인한다
+    # (실 모달 유무는 이 mock으로 검증 불가 — Escape가 항상 눌리는지만 확인).
+    fake_page.keyboard.press.assert_called_once_with("Escape")

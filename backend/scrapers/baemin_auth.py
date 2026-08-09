@@ -21,6 +21,11 @@
   실행 인자와 `navigator.webdriver` 오버라이드, 일반적인 데스크톱 Chrome
   User-Agent/뷰포트만 추가하면(번들 Chromium 그대로, 별도 실브라우저 채널 불필요)
   차단 없이 정상적으로 로그인 폼까지 도달한다.
+- 로그인 성공 직후 대시보드 홈에 "스마트 모드로 효과를 높여요!" 같은 프로모션
+  모달이 backdrop과 함께 뜰 때가 있다(매번 재현되지는 않아 세션/일자에 따라
+  달라지는 것으로 보인다). 이 backdrop이 클릭을 가로채 이후 "리뷰관리" 클릭이
+  타임아웃 나므로, `_discover_first_shop` 호출 전에 방어적으로 Escape 키를
+  눌러 닫는다(실 계정으로 재현·해결 확인).
 - 리뷰 API(self-api.baemin.com)를 `context.request`(브라우저 밖 `APIRequestContext`)로
   직접 호출하면 쿠키가 실려도 HTTP 403이 난다(실 계정으로 재현 확인). 실제
   요청에는 매 요청마다 값이 바뀌는 `x-e-request` 서명 헤더가 실려 있는데, 이는
@@ -139,6 +144,12 @@ def login(login_id: str, password: str, headless: bool = True) -> BaeminSession:
         except Exception as e:
             error_text = _extract_login_error(page)
             raise BaeminLoginError(error_text or "로그인에 실패했습니다. 잠시 후 다시 시도해주세요") from e
+
+        # 로그인 직후 대시보드 홈에 프로모션 모달(backdrop 포함)이 뜰 때가 있어
+        # 이후 "리뷰관리" 클릭이 막힌다. 모달이 없어도 Escape는 아무 영향이 없으므로
+        # 항상 방어적으로 눌러준다.
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
 
         shop_no, shop_name = _discover_first_shop(page)
 
