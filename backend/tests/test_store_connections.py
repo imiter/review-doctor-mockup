@@ -95,7 +95,7 @@ def test_baemin_login_upgrades_existing_mock_connection(client, seeded_user, pla
     assert len(listed) == 1  # 새로 만들지 않고 기존 연결을 업그레이드
 
 
-def test_baemin_login_failure_returns_401_with_baemin_message(client, seeded_user, platforms, auth_headers, monkeypatch):
+def test_baemin_login_failure_returns_400_with_baemin_message(client, seeded_user, platforms, auth_headers, monkeypatch):
     from app.routers import store_connections as sc
     from scrapers.baemin_auth import BaeminLoginError
 
@@ -109,7 +109,7 @@ def test_baemin_login_failure_returns_401_with_baemin_message(client, seeded_use
         json={"platform_login_id": "test_id", "platform_login_password": "wrong"},
         headers=auth_headers,
     )
-    assert res.status_code == 401
+    assert res.status_code == 400
     assert "일치하지 않습니다" in res.json()["detail"]
 
 

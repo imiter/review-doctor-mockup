@@ -120,7 +120,7 @@ def baemin_login_endpoint(
     try:
         session = baemin_login(body.platform_login_id, body.platform_login_password)
     except BaeminLoginError as e:
-        raise HTTPException(401, str(e))
+        raise HTTPException(400, str(e))
     shop_no, shop_name = session.shop_no, session.shop_name
     session.close()
 
