@@ -1,4 +1,4 @@
-"""SQLAlchemy 모델 — schema.sql의 19개 테이블과 1:1 대응.
+"""SQLAlchemy 모델 — schema.sql의 20개 테이블과 1:1 대응.
 
 스키마 정본은 저장소 루트 schema.sql이다. 여기서는 컬럼과 관계만 미러링하며,
 제약(CHECK, ON DELETE 정책)은 DB 레벨에 이미 존재한다.
@@ -80,6 +80,18 @@ class StorePlatformConnection(Base):
     platform: Mapped[Platform] = relationship()
 
 
+class BaeminShopBrand(Base):
+    __tablename__ = "baemin_shop_brands"
+    __table_args__ = (UniqueConstraint("connection_id", "shop_no"),)
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    connection_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("store_platform_connections.id"))
+    shop_no: Mapped[str] = mapped_column(String(20))
+    shop_name: Mapped[str] = mapped_column(String(200))
+
+    connection: Mapped["StorePlatformConnection"] = relationship()
+
+
 class Subscription(Base):
     __tablename__ = "subscriptions"
 
@@ -149,6 +161,7 @@ class Review(Base):
     external_review_id: Mapped[int | None] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"), unique=True
     )
+    platform_shop_no: Mapped[str | None] = mapped_column(String(20))
     rating: Mapped[int]
     content: Mapped[str] = mapped_column(Text)
     customer_nickname: Mapped[str] = mapped_column(String(50))

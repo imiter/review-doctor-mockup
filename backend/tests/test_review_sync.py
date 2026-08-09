@@ -4,7 +4,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.credential_crypto import CredentialCryptoError, encrypt_credential
-from app.models import Review, ReviewSyncJob, StorePlatformConnection
+from app.models import BaeminShopBrand, Review, ReviewSyncJob, StorePlatformConnection
 from app.review_sync import sync_reviews_for_job
 from scrapers.baemin_auth import BaeminLoginError
 from scrapers.baemin_reviews import BaeminScrapeError
@@ -28,6 +28,8 @@ _RAW_HIDDEN = {
 
 class _FakeSession:
     shop_no = 99999001
+    shop_name = "테스트매장"
+    shops = [(99999001, "테스트매장")]
     page = object()
     closed = False
 
@@ -232,3 +234,133 @@ def test_sync_records_unclassified_fetch_exception_and_still_closes_session(db_s
     assert job.error_message is not None
     assert job.finished_at is not None
     assert fake_session.closed is True
+
+
+_RAW_SHOP_A = {
+    "id": 3001, "rating": 5.0, "contents": "매장A 리뷰", "memberNickname": "고객A",
+    "orderCount": 1, "menus": [{"name": "메뉴A"}], "createdAt": "2026-08-05T10:00:00+09:00",
+    "displayStatus": "DISPLAY",
+}
+_RAW_SHOP_B = {
+    "id": 3002, "rating": 4.0, "contents": "매장B 리뷰", "memberNickname": "고객B",
+    "orderCount": 1, "menus": [{"name": "메뉴B"}], "createdAt": "2026-08-06T10:00:00+09:00",
+    "displayStatus": "DISPLAY",
+}
+
+
+class _FakeMultiShopSession:
+    shops = [(11111, "브랜드A"), (22222, "브랜드B")]
+    page = object()
+    closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_sync_syncs_all_shops_and_sums_counts_with_distinct_shop_tags(db_session, sync_setup, monkeypatch):
+    """계정에 브랜드가 2개면 두 매장 모두 동기화되고, 각 리뷰는 자신이 온
+    매장의 platform_shop_no로 태깅돼야 한다. baemin_shop_brands도 두 매장
+    모두 저장돼야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeMultiShopSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+
+    def _fetch(page, shop_no):
+        return [_RAW_SHOP_A] if shop_no == 11111 else [_RAW_SHOP_B]
+
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _fetch)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert job.reviews_fetched == 2
+    assert job.reviews_inserted == 2
+    assert fake_session.closed is True
+
+    review_a = db_session.query(Review).filter_by(external_review_id=3001).one()
+    review_b = db_session.query(Review).filter_by(external_review_id=3002).one()
+    assert review_a.platform_shop_no == "11111"
+    assert review_b.platform_shop_no == "22222"
+
+    brands = {
+        b.shop_no: b.shop_name
+        for b in db_session.query(BaeminShopBrand).filter_by(connection_id=conn.id).all()
+    }
+    assert brands == {"11111": "브랜드A", "22222": "브랜드B"}
+
+
+def test_sync_partial_shop_failure_still_succeeds_with_only_successful_shop_counted(db_session, sync_setup, monkeypatch):
+    """4개 브랜드 중 일부만 실패하는 현실적인 상황을 2개 매장으로 축소해 흉내낸다
+    — 한 매장이 BaeminScrapeError를 던져도 job은 실패가 아니라 성공으로
+    끝나야 하고, 카운트/삽입은 성공한 매장분만 반영돼야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeMultiShopSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+
+    def _fetch(page, shop_no):
+        if shop_no == 11111:
+            raise BaeminScrapeError("일시적 오류")
+        return [_RAW_SHOP_B]
+
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _fetch)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert job.reviews_fetched == 1
+    assert job.reviews_inserted == 1
+    assert fake_session.closed is True
+
+    assert db_session.query(Review).filter_by(external_review_id=3002).one()
+    assert db_session.query(Review).filter_by(external_review_id=3001).first() is None
+
+    # 실패한 매장도 로그인 단계에서 이름은 이미 확인됐으므로 브랜드 자체는 저장된다.
+    brands = {b.shop_no for b in db_session.query(BaeminShopBrand).filter_by(connection_id=conn.id).all()}
+    assert brands == {"11111", "22222"}
+
+
+def test_sync_all_shops_failing_marks_job_failed(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeMultiShopSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+
+    def _raise(page, shop_no):
+        raise BaeminScrapeError(f"매장 {shop_no} 조회 실패")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _raise)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "failed"
+    assert job.error_message is not None
+    assert "22222" in job.error_message  # 마지막으로 시도한 매장의 에러가 남는다
+    assert fake_session.closed is True
+    assert db_session.query(Review).count() == 0
+
+
+def test_sync_upserts_shop_brand_name_change_without_duplicate(db_session, sync_setup, monkeypatch):
+    """이전 동기화에서 저장된 브랜드명이 배민 쪽에서 바뀐 경우, 재동기화 시
+    기존 baemin_shop_brands 행을 갱신해야지 중복 행을 만들면 안 된다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+
+    db_session.add(BaeminShopBrand(connection_id=conn.id, shop_no="11111", shop_name="옛날이름"))
+    db_session.commit()
+
+    fake_session = _FakeMultiShopSession()  # shops = [(11111, "브랜드A"), (22222, "브랜드B")]
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    rows = db_session.query(BaeminShopBrand).filter_by(connection_id=conn.id, shop_no="11111").all()
+    assert len(rows) == 1
+    assert rows[0].shop_name == "브랜드A"  # 갱신됨, 중복 생성 안 됨

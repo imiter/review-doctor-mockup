@@ -40,6 +40,7 @@ def _fill_template(template: str, review: Review, store: Store) -> str:
 def list_reviews(
     status: str | None = None,
     store_id: int | None = None,
+    platform_shop_no: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -52,6 +53,8 @@ def list_reviews(
     )
     if status:
         stmt = stmt.where(Review.status == status)
+    if platform_shop_no:
+        stmt = stmt.where(Review.platform_shop_no == platform_shop_no)
 
     reviews = db.scalars(stmt).unique().all()
     result = []
@@ -63,6 +66,7 @@ def list_reviews(
             "id": r.id,
             "order_id": r.order_id,
             "platform_name": r.platform.name,
+            "platform_shop_no": r.platform_shop_no,
             "menu_summary": r.menu_summary,
             "rating": r.rating,
             "content": r.content,

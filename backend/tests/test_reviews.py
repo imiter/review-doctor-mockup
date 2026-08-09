@@ -87,3 +87,24 @@ def test_review_without_order_is_listed_and_repliable(client, db_session, seeded
     res = client.post(f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers)
     assert res.status_code == 200
     assert "양념치킨" in res.json()["content"]
+
+
+def test_reviews_filtered_by_platform_shop_no(client, db_session, seeded_user, platforms, reply_styles, auth_headers):
+    """한 연결(connection)에 여러 배민 브랜드가 딸린 경우, platform_shop_no
+    쿼리 파라미터로 특정 브랜드의 리뷰만 걸러낼 수 있어야 한다."""
+    review_a = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, menu_summary="메뉴A",
+        platform_shop_no="11111", rating=5, content="브랜드A 리뷰", customer_nickname="고객A",
+        customer_order_count=1, created_at=datetime.now(timezone.utc),
+    )
+    review_b = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, menu_summary="메뉴B",
+        platform_shop_no="22222", rating=4, content="브랜드B 리뷰", customer_nickname="고객B",
+        customer_order_count=1, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add_all([review_a, review_b])
+    db_session.commit()
+
+    listed = client.get("/reviews?platform_shop_no=11111", headers=auth_headers).json()
+    assert [r["id"] for r in listed] == [review_a.id]
+    assert listed[0]["platform_shop_no"] == "11111"

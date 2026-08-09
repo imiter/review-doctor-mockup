@@ -24,7 +24,7 @@ _REVIEWS_URL = (
 
 
 def test_map_review_translates_baemin_fields_to_our_schema():
-    mapped = map_review(_RAW_REVIEW, store_id=7, platform_id=1)
+    mapped = map_review(_RAW_REVIEW, store_id=7, platform_id=1, platform_shop_no="14804912")
     assert mapped == {
         "external_review_id": 2026080402827696,
         "rating": 5,
@@ -35,24 +35,25 @@ def test_map_review_translates_baemin_fields_to_our_schema():
         "created_at": datetime.fromisoformat("2026-08-04T21:12:33+09:00"),
         "store_id": 7,
         "platform_id": 1,
+        "platform_shop_no": "14804912",
         "status": "unanswered",
     }
 
 
 def test_map_review_summarizes_multiple_menus():
     raw = {**_RAW_REVIEW, "menus": [{"name": "양념치킨"}, {"name": "콜라 1.25L"}]}
-    mapped = map_review(raw, store_id=7, platform_id=1)
+    mapped = map_review(raw, store_id=7, platform_id=1, platform_shop_no="14804912")
     assert mapped["menu_summary"] == "양념치킨 외 1건"
 
 
 def test_map_review_rounds_fractional_rating():
     raw = {**_RAW_REVIEW, "rating": 4.0}
-    assert map_review(raw, store_id=7, platform_id=1)["rating"] == 4
+    assert map_review(raw, store_id=7, platform_id=1, platform_shop_no="14804912")["rating"] == 4
 
 
 def test_map_review_handles_empty_content():
     raw = {**_RAW_REVIEW, "contents": ""}
-    assert map_review(raw, store_id=7, platform_id=1)["content"] == ""
+    assert map_review(raw, store_id=7, platform_id=1, platform_shop_no="14804912")["content"] == ""
 
 
 class _FakeMoreButtonLocator:

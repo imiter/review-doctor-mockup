@@ -168,7 +168,7 @@ def fetch_all_reviews(page, shop_no: int) -> list[dict]:
     return list(collected.values())
 
 
-def map_review(raw: dict, store_id: int, platform_id: int) -> dict:
+def map_review(raw: dict, store_id: int, platform_id: int, platform_shop_no: str) -> dict:
     menus = raw.get("menus") or []
     if not menus:
         menu_summary = "메뉴 정보 없음"
@@ -187,5 +187,6 @@ def map_review(raw: dict, store_id: int, platform_id: int) -> dict:
         "created_at": datetime.fromisoformat(raw["createdAt"]),
         "store_id": store_id,
         "platform_id": platform_id,
+        "platform_shop_no": platform_shop_no,
         "status": "unanswered",
     }

@@ -199,6 +199,68 @@ def test_sync_reviews_allowed_after_previous_job_finished(client, db_session, se
     assert res.status_code == 202
 
 
+def test_list_baemin_shop_brands_returns_empty_when_no_connection(client, seeded_user, platforms, auth_headers):
+    # seeded_user는 baemin 연결은 있지만(Mock) baemin_shop_brands 행은 없다
+    res = client.get("/store-connections/baemin/shops", headers=auth_headers)
+    assert res.status_code == 200
+    assert res.json() == []
+
+
+def test_list_baemin_shop_brands_returns_rows_in_shop_no_order(client, db_session, seeded_user, platforms, auth_headers):
+    from app.models import BaeminShopBrand, StorePlatformConnection
+
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    db_session.add_all([
+        BaeminShopBrand(connection_id=conn.id, shop_no="22222", shop_name="브랜드B"),
+        BaeminShopBrand(connection_id=conn.id, shop_no="11111", shop_name="브랜드A"),
+    ])
+    db_session.commit()
+
+    res = client.get("/store-connections/baemin/shops", headers=auth_headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body == [
+        {"shop_no": "11111", "shop_name": "브랜드A"},
+        {"shop_no": "22222", "shop_name": "브랜드B"},
+    ]
+
+
+def test_list_baemin_shop_brands_scoped_to_own_connection(client, db_session, seeded_user, platforms, auth_headers):
+    """다른 사장의 연결에 딸린 브랜드가 내 브랜드 목록에 섞여 나오면 안 된다."""
+    from datetime import datetime, timezone
+
+    from app.auth import hash_password
+    from app.models import BaeminShopBrand, Store, StorePlatformConnection, User
+
+    other = User(email="brand-rival@test.com", password_hash=hash_password("x"), nickname="브랜드경쟁", created_at=datetime.now(timezone.utc))
+    db_session.add(other)
+    db_session.flush()
+    other_store = Store(user_id=other.id, name="라이벌가게3", category="분식", created_at=datetime.now(timezone.utc))
+    db_session.add(other_store)
+    db_session.flush()
+    other_conn = StorePlatformConnection(
+        store_id=other_store.id, platform_id=platforms["baemin"].id,
+        platform_store_id="MK-OTHER3", connected_at=datetime.now(timezone.utc),
+    )
+    db_session.add(other_conn)
+    db_session.flush()
+    db_session.add(BaeminShopBrand(connection_id=other_conn.id, shop_no="99999", shop_name="남의브랜드"))
+
+    my_conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    db_session.add(BaeminShopBrand(connection_id=my_conn.id, shop_no="11111", shop_name="내브랜드"))
+    db_session.commit()
+
+    res = client.get("/store-connections/baemin/shops", headers=auth_headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body == [{"shop_no": "11111", "shop_name": "내브랜드"}]
+    assert "남의브랜드" not in [b["shop_name"] for b in body]
+
+
 def test_sync_status_forbidden_for_other_users_job(client, db_session, seeded_user, platforms, auth_headers):
     from datetime import datetime, timezone
 

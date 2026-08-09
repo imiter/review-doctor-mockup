@@ -1,7 +1,7 @@
 -- ============================================================================
 -- Delivery Review & Store Insight MVP — PostgreSQL Schema
 -- ============================================================================
--- 19개 테이블. 모든 FK에 ON DELETE 정책 명시.
+-- 20개 테이블. 모든 FK에 ON DELETE 정책 명시.
 --
 -- 삭제 정책 원칙:
 --   ON DELETE CASCADE  — 부모에 종속된 소유 데이터 (사장 탈퇴 → 매장/주문/리뷰 연쇄 삭제)
@@ -19,7 +19,7 @@
 BEGIN;
 
 DROP TABLE IF EXISTS
-    review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
+    baemin_shop_brands, review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
     ad_performance_metrics, ad_campaigns, repurchase_metrics, daily_settlements, review_replies,
     reviews, orders, reply_settings, reply_styles, subscriptions, store_platform_connections,
     platforms, stores, users
@@ -144,6 +144,8 @@ CREATE INDEX idx_orders_platform_time ON orders(platform_id, ordered_at);
 --    독립적으로 적재 가능 — 배민 리뷰 API에는 주문과 연결할 공통 키가 없다).
 --    order_id는 있으면 연결하는 선택적 FK로 남겨둔다(현재는 채워지는 경우 없음).
 --    external_review_id: 배민 리뷰 API의 id. 재동기화 시 중복 판별 키. Mock은 NULL.
+--    platform_shop_no: 배민처럼 연결 하나가 여러 매장(브랜드)을 가질 때 어느
+--    매장에서 온 리뷰인지 식별. Mock 리뷰나 단일 매장 플랫폼은 NULL.
 --    상태: unanswered(미등록) → pending(등록 대기: AI 초안 생성됨) → answered(등록 완료)
 -- ----------------------------------------------------------------------------
 CREATE TABLE reviews (
@@ -153,6 +155,7 @@ CREATE TABLE reviews (
     platform_id          INT         NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
     menu_summary         VARCHAR(200) NOT NULL,
     external_review_id   BIGINT      UNIQUE,
+    platform_shop_no     VARCHAR(20),
     rating               SMALLINT    NOT NULL CHECK (rating BETWEEN 1 AND 5),
     content              TEXT        NOT NULL,
     customer_nickname    VARCHAR(50) NOT NULL,    -- 닉네임만 저장, 실명 아님
@@ -164,6 +167,7 @@ CREATE TABLE reviews (
 
 CREATE INDEX idx_reviews_status ON reviews(status);
 CREATE INDEX idx_reviews_store  ON reviews(store_id);
+CREATE INDEX idx_reviews_platform_shop ON reviews(platform_shop_no);
 
 -- ----------------------------------------------------------------------------
 -- 10. review_replies — 답글. reviews 1:N
@@ -336,6 +340,19 @@ CREATE TABLE review_sync_jobs (
     error_message    TEXT,
     started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     finished_at      TIMESTAMPTZ
+);
+
+-- ----------------------------------------------------------------------------
+-- 20. baemin_shop_brands — 배민 계정 하나에 딸린 여러 브랜드(매장) 목록. 로그인
+--     시 발견되는 shopNo/매장명을 저장해 리뷰 관리 화면의 브랜드 선택
+--     드롭다운에 쓴다.
+-- ----------------------------------------------------------------------------
+CREATE TABLE baemin_shop_brands (
+    id            BIGSERIAL PRIMARY KEY,
+    connection_id BIGINT       NOT NULL REFERENCES store_platform_connections(id) ON DELETE CASCADE,
+    shop_no       VARCHAR(20)  NOT NULL,
+    shop_name     VARCHAR(200) NOT NULL,
+    UNIQUE (connection_id, shop_no)
 );
 
 COMMIT;

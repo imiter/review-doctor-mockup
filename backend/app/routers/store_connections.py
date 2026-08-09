@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth import get_current_user, get_user_default_store_id
 from app.credential_crypto import encrypt_credential
 from app.db import get_db
-from app.models import Platform, ReviewSyncJob, Store, StorePlatformConnection, User
+from app.models import BaeminShopBrand, Platform, ReviewSyncJob, Store, StorePlatformConnection, User
 from app.review_sync import run_review_sync_job
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 
@@ -185,6 +185,32 @@ def start_review_sync(
 
     background_tasks.add_task(run_review_sync_job, job.id)
     return {"job_id": job.id}
+
+
+@router.get("/store-connections/baemin/shops")
+def list_baemin_shop_brands(
+    store_id: int | None = None,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    sid = store_id or get_user_default_store_id(user, db)
+    store = db.get(Store, sid)
+    if store is None or store.user_id != user.id:
+        raise HTTPException(404, "매장 없음")
+
+    platform = db.scalar(select(Platform).where(Platform.code == "baemin"))
+    if platform is None:
+        return []
+    conn = db.scalar(
+        select(StorePlatformConnection).where(
+            StorePlatformConnection.store_id == sid, StorePlatformConnection.platform_id == platform.id
+        )
+    )
+    if conn is None:
+        return []
+    brands = db.scalars(
+        select(BaeminShopBrand).where(BaeminShopBrand.connection_id == conn.id).order_by(BaeminShopBrand.shop_no)
+    ).all()
+    return [{"shop_no": b.shop_no, "shop_name": b.shop_name} for b in brands]
 
 
 @router.get("/store-connections/baemin/sync-status/{job_id}")

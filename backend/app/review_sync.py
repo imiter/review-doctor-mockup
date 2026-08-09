@@ -13,9 +13,26 @@ from sqlalchemy.orm import Session
 
 from app.credential_crypto import CredentialCryptoError, decrypt_credential
 from app.db import SessionLocal
-from app.models import Review, ReviewSyncJob, StorePlatformConnection
+from app.models import BaeminShopBrand, Review, ReviewSyncJob, StorePlatformConnection
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 from scrapers.baemin_reviews import BaeminScrapeError, fetch_all_reviews, map_review
+
+
+def _upsert_shop_brand(db: Session, connection_id: int, shop_no: int, shop_name: str) -> None:
+    """로그인 시 발견된 브랜드(shop_no/shop_name)를 upsert한다. 리뷰 동기화
+    성공 여부와 무관하게 매장 발견 자체는 로그인 단계에서 이미 성공했으므로,
+    리뷰 조회가 실패한 매장이라도 이름/번호는 저장해 프런트 브랜드 드롭다운에
+    쓸 수 있게 한다."""
+    existing = db.scalar(
+        select(BaeminShopBrand).where(
+            BaeminShopBrand.connection_id == connection_id,
+            BaeminShopBrand.shop_no == str(shop_no),
+        )
+    )
+    if existing is None:
+        db.add(BaeminShopBrand(connection_id=connection_id, shop_no=str(shop_no), shop_name=shop_name))
+    else:
+        existing.shop_name = shop_name
 
 
 def sync_reviews_for_job(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) -> None:
@@ -52,37 +69,66 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         db.commit()
         return
 
-    try:
-        raw_reviews = fetch_all_reviews(session.page, session.shop_no)
-        mapped = [
-            map_review(raw, store_id=job.store_id, platform_id=job.platform_id)
-            for raw in raw_reviews
-            if raw.get("displayStatus", "DISPLAY") == "DISPLAY"
-        ]
-    except (BaeminScrapeError, KeyError) as e:
-        job.status = "failed"
-        job.error_message = f"리뷰 조회/매핑 실패: {e}"
-        job.finished_at = datetime.now(timezone.utc)
-        db.commit()
-        return
-    finally:
-        session.close()
-
     existing_ids = set(db.scalars(
         select(Review.external_review_id).where(Review.external_review_id.isnot(None))
     ).all())
 
-    inserted = 0
-    for m in mapped:
-        if m["external_review_id"] in existing_ids:
-            continue
-        db.add(Review(**m))
-        existing_ids.add(m["external_review_id"])
-        inserted += 1
+    # 배민 리뷰 id(external_review_id)는 매장(브랜드)이 아니라 계정 전체에서
+    # 유일하므로, 중복 판별 집합은 매장 루프 전체에 걸쳐 하나만 공유한다.
+    total_fetched = 0
+    total_inserted = 0
+    succeeded_any = False
+    last_error: str | None = None
 
+    try:
+        for shop_no, shop_name in session.shops:
+            # 매장 발견 자체는 로그인 단계에서 이미 끝났으므로, 이후 리뷰
+            # 조회가 이 매장에서 실패해도 브랜드 이름은 저장해둔다.
+            _upsert_shop_brand(db, conn.id, shop_no, shop_name)
+
+            try:
+                raw_reviews = fetch_all_reviews(session.page, shop_no)
+                mapped = [
+                    map_review(
+                        raw, store_id=job.store_id, platform_id=job.platform_id,
+                        platform_shop_no=str(shop_no),
+                    )
+                    for raw in raw_reviews
+                    if raw.get("displayStatus", "DISPLAY") == "DISPLAY"
+                ]
+            except (BaeminScrapeError, KeyError) as e:
+                # 한 매장의 실패가 다른 매장 동기화를 막지 않는다 — 마지막
+                # 에러 메시지만 기억해뒀다가, 모든 매장이 실패했을 때만 job
+                # 실패 사유로 쓴다.
+                last_error = f"리뷰 조회/매핑 실패 (매장: {shop_name}): {e}"
+                continue
+
+            succeeded_any = True
+            total_fetched += len(mapped)
+            for m in mapped:
+                if m["external_review_id"] in existing_ids:
+                    continue
+                db.add(Review(**m))
+                existing_ids.add(m["external_review_id"])
+                total_inserted += 1
+    finally:
+        session.close()
+
+    if not succeeded_any:
+        # session.shops가 비어 있던 경우(사실상 불가능하지만 방어적으로)에도
+        # last_error가 없을 수 있으므로 기본 메시지를 둔다.
+        job.status = "failed"
+        job.error_message = last_error or "동기화할 매장을 찾지 못했습니다"
+        job.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        return
+
+    # 일부 매장만 실패한 경우는 job 실패로 보지 않는다 — 예: 4개 브랜드 중
+    # 3개가 정상 동기화되고 1개만 일시적 오류라면 이는 대체로 성공한
+    # 동기화이지 전체 실패가 아니다.
     job.status = "success"
-    job.reviews_fetched = len(mapped)
-    job.reviews_inserted = inserted
+    job.reviews_fetched = total_fetched
+    job.reviews_inserted = total_inserted
     job.finished_at = datetime.now(timezone.utc)
     db.commit()
 

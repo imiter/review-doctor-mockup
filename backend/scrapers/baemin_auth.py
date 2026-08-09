@@ -1,9 +1,14 @@
 """Playwright로 배민 사장님광장(self.baemin.com)에 실제 로그인해 인증된 세션을 만든다.
 
-로그인 성공 후 계정에 연결된 첫 번째 매장의 shopNo도 함께 확인해 반환한다(여러
-매장이 있어도 매장 선택 UI는 만들지 않는다 — 범위 밖). 로그인 폼의 선택자와
-매장 목록 확인 방식은 추측하지 않고 실제 화면에서 `playwright codegen`으로
-확인한 값을 쓴다.
+로그인 성공 후 계정에 연결된 매장을 전부(하나의 로그인에 여러 브랜드/매장이
+딸린 계정도 있다 — 실 계정 스크린샷으로 확인) 확인해 `BaeminSession.shops`로
+반환한다. `review_sync.py`의 리뷰 동기화 단계는 이 리스트를 순회하며 매장마다
+`fetch_all_reviews`를 호출해 계정에 딸린 모든 브랜드의 리뷰를 동기화한다.
+`shop_no`/`shop_name` 필드는 하위 호환을 위해 첫 번째 매장 값을 그대로 남겨둔다
+— 예: 최초 배민 로그인 시 연결(`store_platform_connections`)의
+`platform_store_id`로 저장되는 대표 매장 표시용. 로그인 폼의 선택자와 매장 목록
+확인 방식은 추측하지 않고 실제 화면에서 `playwright codegen`으로 확인한 값을
+쓴다.
 
 확인된 동작:
 - `https://self.baemin.com/login`으로 바로 이동하면 "페이지를 찾을 수 없음" 에러
@@ -24,7 +29,7 @@
 - 로그인 성공 직후 대시보드 홈에 "스마트 모드로 효과를 높여요!" 같은 프로모션
   모달이 backdrop과 함께 뜰 때가 있다(매번 재현되지는 않아 세션/일자에 따라
   달라지는 것으로 보인다). 이 backdrop이 클릭을 가로채 이후 "리뷰관리" 클릭이
-  타임아웃 나므로, `_discover_first_shop` 호출 전에 방어적으로 Escape 키를
+  타임아웃 나므로, `_discover_all_shops` 호출 전에 방어적으로 Escape 키를
   눌러 닫는다(실 계정으로 재현·해결 확인).
 - 리뷰 API(self-api.baemin.com)를 `context.request`(브라우저 밖 `APIRequestContext`)로
   직접 호출하면 쿠키가 실려도 HTTP 403이 난다(실 계정으로 재현 확인). 실제
@@ -61,6 +66,7 @@ class BaeminSession:
     page: object
     shop_no: int
     shop_name: str
+    shops: list[tuple[int, str]]
     _playwright: object
     _browser: object
 
@@ -84,7 +90,7 @@ def _extract_login_error(page) -> str | None:
     return None
 
 
-def _discover_first_shop(page) -> tuple[int, str]:
+def _discover_all_shops(page) -> list[tuple[int, str]]:
     page.get_by_role("button", name="리뷰관리 리뷰관리").click()
     shop_select = page.get_by_role("combobox").nth(1)
     # click()은 버튼 자체의 등장만 기다린다 — 그 뒤에 렌더링되는 select의
@@ -96,12 +102,15 @@ def _discover_first_shop(page) -> tuple[int, str]:
     # 불안정하기 때문 — DOM에 붙었는지만 확인하면 충분하다.
     shop_select.locator("option").first.wait_for(state="attached")
     options = shop_select.locator("option").all()
+    shops: list[tuple[int, str]] = []
     for option in options:
         value = option.get_attribute("value")
         if not value or not value.isdigit():
             continue  # "선택하세요" 같은 플레이스홀더 옵션은 건너뛴다
-        return int(value), option.inner_text().strip()
-    raise BaeminLoginError("매장 목록을 확인하지 못했습니다")
+        shops.append((int(value), option.inner_text().strip()))
+    if not shops:
+        raise BaeminLoginError("매장 목록을 확인하지 못했습니다")
+    return shops
 
 
 def login(login_id: str, password: str, headless: bool = True) -> BaeminSession:
@@ -166,12 +175,14 @@ def login(login_id: str, password: str, headless: bool = True) -> BaeminSession:
         page.keyboard.press("Escape")
         page.wait_for_timeout(500)
 
-        shop_no, shop_name = _discover_first_shop(page)
+        shops = _discover_all_shops(page)
+        shop_no, shop_name = shops[0]
 
         session = BaeminSession(
             page=page,
             shop_no=shop_no,
             shop_name=shop_name,
+            shops=shops,
             _playwright=playwright,
             _browser=browser,
         )
