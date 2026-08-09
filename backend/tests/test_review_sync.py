@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from cryptography.fernet import Fernet
 
-from app.credential_crypto import encrypt_credential
+from app.credential_crypto import CredentialCryptoError, encrypt_credential
 from app.models import Review, ReviewSyncJob, StorePlatformConnection
 from app.review_sync import sync_reviews_for_job
 from scrapers.baemin_auth import BaeminLoginError
@@ -143,4 +143,45 @@ def test_sync_records_fetch_failure_and_still_closes_session(db_session, sync_se
 
     assert job.status == "failed"
     assert "HTTP 500" in job.error_message
+    assert fake_session.closed is True
+
+
+def test_sync_records_credential_decryption_failure(db_session, sync_setup, monkeypatch):
+    """CREDENTIAL_ENCRYPTION_KEY가 바뀌는 등으로 복호화가 실패해도 running에 멈추지 않아야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+
+    def _raise(ciphertext):
+        raise CredentialCryptoError("test message")
+
+    monkeypatch.setattr(review_sync_mod, "decrypt_credential", _raise)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "failed"
+    assert job.error_message is not None
+    assert "test message" in job.error_message
+    assert job.finished_at is not None
+
+
+def test_sync_records_unclassified_fetch_exception_and_still_closes_session(db_session, sync_setup, monkeypatch):
+    """fetch_all_reviews가 BaeminScrapeError/KeyError가 아닌 예외(예: Playwright 내부 오류)를
+    던져도 안전망이 job을 failed로 종결시키고 세션도 닫아야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+
+    def _raise(page, shop_no):
+        raise RuntimeError("simulated Playwright error")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _raise)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "failed"
+    assert job.error_message is not None
+    assert job.finished_at is not None
     assert fake_session.closed is True

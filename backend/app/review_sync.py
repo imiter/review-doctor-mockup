@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.credential_crypto import decrypt_credential
+from app.credential_crypto import CredentialCryptoError, decrypt_credential
 from app.db import SessionLocal
 from app.models import Review, ReviewSyncJob, StorePlatformConnection
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
@@ -19,13 +19,32 @@ from scrapers.baemin_reviews import BaeminScrapeError, fetch_all_reviews, map_re
 
 
 def sync_reviews_for_job(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) -> None:
+    """작업 상태를 반드시 종결(success/failed)시키는 바깥쪽 안전망.
+
+    어떤 예외가 어디서 나든 — 로그인 단계든 스크래핑/매핑 단계든, 우리가
+    미리 알고 있는 예외 타입이든 아니든 — 이 함수를 빠져나갈 때 job은 항상
+    "running"이 아닌 상태로 끝난다. `_run_sync`가 이미 처리한 알려진 실패는
+    거기서 더 구체적인 메시지와 함께 status="failed"로 커밋되고 그대로
+    반환되므로, 여기 except 블록은 `_run_sync` 자체가 예상치 못하게 실패한
+    경우(신규/미분류 예외)를 잡는 마지막 방어선 역할만 한다.
+    """
     job.status = "running"
     db.commit()
 
     try:
+        _run_sync(job, conn, db)
+    except Exception as e:
+        job.status = "failed"
+        job.error_message = f"동기화 중 예기치 못한 오류가 발생했습니다: {e}"
+        job.finished_at = datetime.now(timezone.utc)
+        db.commit()
+
+
+def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) -> None:
+    try:
         credential = decrypt_credential(conn.credential_ciphertext)
         session = baemin_login(credential["login_id"], credential["password"])
-    except BaeminLoginError as e:
+    except (BaeminLoginError, CredentialCryptoError) as e:
         job.status = "failed"
         job.error_message = str(e)
         job.finished_at = datetime.now(timezone.utc)
