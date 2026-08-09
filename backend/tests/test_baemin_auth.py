@@ -12,7 +12,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scrapers.baemin_auth import BaeminLoginError, login
+from scrapers.baemin_auth import BaeminLoginError, _discover_all_shops, login
+
+
+def _fake_option(value, text):
+    option = MagicMock()
+    option.get_attribute.return_value = value
+    option.inner_text.return_value = text
+    return option
 
 
 def test_login_cleans_up_browser_and_playwright_on_unexpected_error():
@@ -37,6 +44,55 @@ def test_login_cleans_up_browser_and_playwright_on_unexpected_error():
 
     fake_browser.close.assert_called_once()
     fake_playwright.stop.assert_called_once()
+
+
+def test_discover_all_shops_returns_every_real_option_and_skips_placeholder():
+    """실 계정에서는 로그인 한 번에 여러 브랜드가 매장 선택 <select>에 딸려
+    나온다(4개 브랜드 계정으로 실측 확인). 옵션 중 값이 숫자가 아닌
+    플레이스홀더("선택하세요" 같은)는 매장이 아니므로 제외돼야 하고, 나머지는
+    <select>에 나온 순서 그대로 (shop_no, shop_name) 튜플로 반환돼야 한다."""
+    fake_page = MagicMock()
+
+    shop_select = MagicMock()
+    options = [
+        _fake_option("", "선택하세요"),  # 플레이스홀더 — 빈 value는 건너뛰어야 함
+        _fake_option("11111", "브랜드A"),
+        _fake_option("22222", "브랜드B"),
+        _fake_option("33333", "브랜드C"),
+    ]
+    shop_select.locator.return_value.all.return_value = options
+    combobox_locator = MagicMock()
+    combobox_locator.nth.return_value = shop_select
+    fake_page.get_by_role.side_effect = lambda role, name=None: (
+        combobox_locator if role == "combobox" else MagicMock()
+    )
+
+    shops = _discover_all_shops(fake_page)
+
+    assert shops == [(11111, "브랜드A"), (22222, "브랜드B"), (33333, "브랜드C")]
+
+
+def test_discover_all_shops_skips_non_digit_placeholder_value():
+    """value가 비어있지 않지만 숫자가 아닌 플레이스홀더("선택" 등)도 매장이
+    아니므로 제외돼야 한다 — 빈 문자열 케이스와는 다른 분기(`not value.isdigit()`)를
+    탄다."""
+    fake_page = MagicMock()
+
+    shop_select = MagicMock()
+    options = [
+        _fake_option("선택", "선택하세요"),
+        _fake_option("99999", "유일한매장"),
+    ]
+    shop_select.locator.return_value.all.return_value = options
+    combobox_locator = MagicMock()
+    combobox_locator.nth.return_value = shop_select
+    fake_page.get_by_role.side_effect = lambda role, name=None: (
+        combobox_locator if role == "combobox" else MagicMock()
+    )
+
+    shops = _discover_all_shops(fake_page)
+
+    assert shops == [(99999, "유일한매장")]
 
 
 def test_login_does_not_close_session_resources_on_success():
@@ -81,3 +137,43 @@ def test_login_does_not_close_session_resources_on_success():
     # 로그인 성공 후 매장 탐색 전에 프로모션 모달을 방어적으로 닫는지 확인한다
     # (실 모달 유무는 이 mock으로 검증 불가 — Escape가 항상 눌리는지만 확인).
     fake_page.keyboard.press.assert_called_once_with("Escape")
+
+
+def test_login_sets_legacy_shop_fields_from_first_of_multiple_shops():
+    """실 계정(4개 브랜드)처럼 <select>에 매장이 여러 개 나오는 경우에도
+    BaeminSession.shop_no/shop_name은 하위 호환 필드로서 shops[0]과 정확히
+    같아야 한다 — review_sync.py가 여러 매장을 순회하는 것과 별개로, 최초
+    로그인 시 connections.platform_store_id에 저장되는 대표 매장은 항상 첫
+    번째 매장이라는 계약을 명시적으로 고정한다."""
+    fake_playwright = MagicMock()
+    fake_browser = MagicMock()
+    fake_context = MagicMock()
+    fake_page = MagicMock()
+
+    fake_playwright.chromium.launch.return_value = fake_browser
+    fake_browser.new_context.return_value = fake_context
+    fake_context.new_page.return_value = fake_page
+    fake_page.wait_for_url.return_value = None
+
+    shop_select = MagicMock()
+    options = [
+        _fake_option("11111", "브랜드A"),
+        _fake_option("22222", "브랜드B"),
+        _fake_option("33333", "브랜드C"),
+    ]
+    shop_select.locator.return_value.all.return_value = options
+    combobox_locator = MagicMock()
+    combobox_locator.nth.return_value = shop_select
+    fake_page.get_by_role.side_effect = lambda role, name=None: (
+        combobox_locator if role == "combobox" else MagicMock()
+    )
+
+    with patch("scrapers.baemin_auth.sync_playwright") as mock_sync_playwright:
+        mock_sync_playwright.return_value.start.return_value = fake_playwright
+
+        session = login("test-id", "test-pw", headless=True)
+
+    assert session.shops == [(11111, "브랜드A"), (22222, "브랜드B"), (33333, "브랜드C")]
+    assert (session.shop_no, session.shop_name) == session.shops[0]
+    assert session.shop_no == 11111
+    assert session.shop_name == "브랜드A"

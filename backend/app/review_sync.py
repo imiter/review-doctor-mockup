@@ -18,7 +18,7 @@ from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 from scrapers.baemin_reviews import BaeminScrapeError, fetch_all_reviews, map_review
 
 
-def _upsert_shop_brand(db: Session, connection_id: int, shop_no: int, shop_name: str) -> None:
+def upsert_shop_brand(db: Session, connection_id: int, shop_no: int, shop_name: str) -> None:
     """로그인 시 발견된 브랜드(shop_no/shop_name)를 upsert한다. 리뷰 동기화
     성공 여부와 무관하게 매장 발견 자체는 로그인 단계에서 이미 성공했으므로,
     리뷰 조회가 실패한 매장이라도 이름/번호는 저장해 프런트 브랜드 드롭다운에
@@ -78,13 +78,16 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
     total_fetched = 0
     total_inserted = 0
     succeeded_any = False
-    last_error: str | None = None
+    # 실패한 매장을 전부 모은다(마지막 것만이 아니라) — 일부만 실패해도 그
+    # 사실이 눈에 보여야 하고, 전부 실패했을 때도 어느 매장이 왜 실패했는지
+    # 전부 알 수 있어야 한다.
+    failed_shops: list[str] = []
 
     try:
         for shop_no, shop_name in session.shops:
             # 매장 발견 자체는 로그인 단계에서 이미 끝났으므로, 이후 리뷰
             # 조회가 이 매장에서 실패해도 브랜드 이름은 저장해둔다.
-            _upsert_shop_brand(db, conn.id, shop_no, shop_name)
+            upsert_shop_brand(db, conn.id, shop_no, shop_name)
 
             try:
                 raw_reviews = fetch_all_reviews(session.page, shop_no)
@@ -97,10 +100,10 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                     if raw.get("displayStatus", "DISPLAY") == "DISPLAY"
                 ]
             except (BaeminScrapeError, KeyError) as e:
-                # 한 매장의 실패가 다른 매장 동기화를 막지 않는다 — 마지막
-                # 에러 메시지만 기억해뒀다가, 모든 매장이 실패했을 때만 job
-                # 실패 사유로 쓴다.
-                last_error = f"리뷰 조회/매핑 실패 (매장: {shop_name}): {e}"
+                # 한 매장의 실패가 다른 매장 동기화를 막지 않는다 — 모든
+                # 실패를 기록해뒀다가, 전부 실패했을 때는 job 실패 사유로,
+                # 일부만 실패했을 때는 성공한 job에 눈에 보이는 경고로 남긴다.
+                failed_shops.append(f"{shop_name}: {e}")
                 continue
 
             succeeded_any = True
@@ -116,19 +119,28 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
 
     if not succeeded_any:
         # session.shops가 비어 있던 경우(사실상 불가능하지만 방어적으로)에도
-        # last_error가 없을 수 있으므로 기본 메시지를 둔다.
+        # failed_shops가 비어 있을 수 있으므로 기본 메시지를 둔다.
         job.status = "failed"
-        job.error_message = last_error or "동기화할 매장을 찾지 못했습니다"
+        job.error_message = "; ".join(failed_shops) if failed_shops else "동기화할 매장을 찾지 못했습니다"
         job.finished_at = datetime.now(timezone.utc)
         db.commit()
         return
 
     # 일부 매장만 실패한 경우는 job 실패로 보지 않는다 — 예: 4개 브랜드 중
     # 3개가 정상 동기화되고 1개만 일시적 오류라면 이는 대체로 성공한
-    # 동기화이지 전체 실패가 아니다.
+    # 동기화이지 전체 실패가 아니다. 다만 부분 실패 자체는 조용히 묻히면 안
+    # 되므로, success 상태를 유지한 채 error_message에 요약을 남긴다 — 이
+    # 실패가 계속 반복되는 상황(예: 4개 중 3개가 매번 실패)이 "항상 깨끗한
+    # success"로 영원히 가려지는 걸 막기 위해서다. 실패가 하나도 없었던
+    # 흔한 경우에는 error_message를 건드리지 않고 None으로 둔다.
     job.status = "success"
     job.reviews_fetched = total_fetched
     job.reviews_inserted = total_inserted
+    if failed_shops:
+        job.error_message = (
+            f"{len(session.shops)}개 중 {len(failed_shops)}개 매장 동기화 실패: "
+            f"{'; '.join(failed_shops)}"
+        )
     job.finished_at = datetime.now(timezone.utc)
     db.commit()
 

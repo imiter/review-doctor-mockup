@@ -277,6 +277,7 @@ def test_sync_syncs_all_shops_and_sums_counts_with_distinct_shop_tags(db_session
     assert job.status == "success"
     assert job.reviews_fetched == 2
     assert job.reviews_inserted == 2
+    assert job.error_message is None  # 실패한 매장이 없는 흔한 경우엔 노이즈를 남기지 않는다
     assert fake_session.closed is True
 
     review_a = db_session.query(Review).filter_by(external_review_id=3001).one()
@@ -314,6 +315,14 @@ def test_sync_partial_shop_failure_still_succeeds_with_only_successful_shop_coun
     assert job.reviews_fetched == 1
     assert job.reviews_inserted == 1
     assert fake_session.closed is True
+
+    # 부분 실패는 조용히 묻히면 안 된다 — job은 success지만 몇 개 중 몇 개가
+    # 실패했는지가 error_message에 남아야 한다(이게 없으면 sync-status
+    # 엔드포인트가 매번 "깨끗한 성공"만 보여주게 된다).
+    assert job.error_message is not None
+    assert "2개 중 1개 매장 동기화 실패" in job.error_message
+    assert "브랜드A" in job.error_message
+    assert "일시적 오류" in job.error_message
 
     assert db_session.query(Review).filter_by(external_review_id=3002).one()
     assert db_session.query(Review).filter_by(external_review_id=3001).first() is None

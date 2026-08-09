@@ -143,7 +143,7 @@ def login(login_id: str, password: str, headless: bool = True) -> BaeminSession:
 
         # 아래에서 나는 실패는 BaeminLoginError만이 아니다 — page.goto의
         # 네트워크/타임아웃 오류, get_by_test_id("id")/("password")/로그인 버튼의
-        # 기본 30초 타임아웃, _discover_first_shop의 리뷰관리 클릭·option 대기
+        # 기본 30초 타임아웃, _discover_all_shops의 리뷰관리 클릭·option 대기
         # 타임아웃 등도 전부 여기서 날 수 있다. 예전에는 `except BaeminLoginError`만
         # 정리를 했어서 그 외 예외는 브라우저/Playwright 드라이버 프로세스를 그대로
         # 흘려보냈다(실제로 봉 탐지 차단으로 인한 fill() 타임아웃에서 재현됨).

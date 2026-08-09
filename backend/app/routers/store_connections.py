@@ -17,7 +17,7 @@ from app.auth import get_current_user, get_user_default_store_id
 from app.credential_crypto import encrypt_credential
 from app.db import get_db
 from app.models import BaeminShopBrand, Platform, ReviewSyncJob, Store, StorePlatformConnection, User
-from app.review_sync import run_review_sync_job
+from app.review_sync import run_review_sync_job, upsert_shop_brand
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 
 router = APIRouter(tags=["store-connections"])
@@ -121,7 +121,7 @@ def baemin_login_endpoint(
         session = baemin_login(body.platform_login_id, body.platform_login_password)
     except BaeminLoginError as e:
         raise HTTPException(400, str(e))
-    shop_no, shop_name = session.shop_no, session.shop_name
+    shop_no, shop_name, shops = session.shop_no, session.shop_name, session.shops
     session.close()
 
     ciphertext = encrypt_credential(body.platform_login_id, body.platform_login_password)
@@ -141,6 +141,14 @@ def baemin_login_endpoint(
     else:
         conn.platform_store_id = str(shop_no)
     conn.credential_ciphertext = ciphertext
+    db.flush()  # conn.id가 신규 연결이면 아직 없으므로 brand upsert 전에 확보해둔다
+
+    # 로그인 시점에 이미 전체 브랜드 목록(session.shops)을 알고 있으므로 여기서
+    # 바로 저장한다 — 첫 리뷰 동기화(몇 분 걸릴 수 있음)가 끝날 때까지
+    # 기다리지 않아도 GET /store-connections/baemin/shops가 즉시 채워진다.
+    for s_no, s_name in shops:
+        upsert_shop_brand(db, conn.id, s_no, s_name)
+
     db.commit()
     db.refresh(conn)
     return {"connected": True, "shop_name": shop_name, "platform_store_id": conn.platform_store_id}

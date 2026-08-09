@@ -69,6 +69,7 @@ def test_baemin_login_upgrades_existing_mock_connection(client, seeded_user, pla
     class _FakeSession:
         shop_no = 99999001
         shop_name = "테스트가게"
+        shops = [(99999001, "테스트가게")]
         closed = False
 
         def close(self):
@@ -93,6 +94,46 @@ def test_baemin_login_upgrades_existing_mock_connection(client, seeded_user, pla
     assert baemin_conn["platform_store_id"] == "99999001"  # 시드의 Mock MK-1이 실제 값으로 교체됨
     assert baemin_conn["has_real_credential"] is True
     assert len(listed) == 1  # 새로 만들지 않고 기존 연결을 업그레이드
+
+    # 첫 리뷰 동기화가 끝나기 전에도 로그인 직후 브랜드 목록이 즉시 채워져야 한다.
+    shops = client.get("/store-connections/baemin/shops", headers=auth_headers).json()
+    assert shops == [{"shop_no": "99999001", "shop_name": "테스트가게"}]
+
+
+def test_baemin_login_persists_all_discovered_shop_brands_immediately(client, seeded_user, platforms, auth_headers, monkeypatch):
+    """한 로그인에 브랜드가 여러 개 딸린 계정(실 계정 4개 브랜드 케이스)도,
+    리뷰 동기화를 한 번도 돌리지 않은 채 로그인 직후 전부 조회 가능해야 한다."""
+    from cryptography.fernet import Fernet
+
+    from app.routers import store_connections as sc
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+    class _FakeMultiShopSession:
+        shop_no = 11111
+        shop_name = "브랜드A"
+        shops = [(11111, "브랜드A"), (22222, "브랜드B"), (33333, "브랜드C")]
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    fake_session = _FakeMultiShopSession()
+    monkeypatch.setattr(sc, "baemin_login", lambda login_id, password: fake_session)
+
+    res = client.post(
+        "/store-connections/baemin/login",
+        json={"platform_login_id": "test_id", "platform_login_password": "test_pw_123"},
+        headers=auth_headers,
+    )
+    assert res.status_code == 200
+
+    shops = client.get("/store-connections/baemin/shops", headers=auth_headers).json()
+    assert shops == [
+        {"shop_no": "11111", "shop_name": "브랜드A"},
+        {"shop_no": "22222", "shop_name": "브랜드B"},
+        {"shop_no": "33333", "shop_name": "브랜드C"},
+    ]
 
 
 def test_baemin_login_failure_returns_400_with_baemin_message(client, seeded_user, platforms, auth_headers, monkeypatch):
@@ -199,8 +240,24 @@ def test_sync_reviews_allowed_after_previous_job_finished(client, db_session, se
     assert res.status_code == 202
 
 
-def test_list_baemin_shop_brands_returns_empty_when_no_connection(client, seeded_user, platforms, auth_headers):
+def test_list_baemin_shop_brands_returns_empty_when_no_brands_synced_yet(client, seeded_user, platforms, auth_headers):
     # seeded_user는 baemin 연결은 있지만(Mock) baemin_shop_brands 행은 없다
+    res = client.get("/store-connections/baemin/shops", headers=auth_headers)
+    assert res.status_code == 200
+    assert res.json() == []
+
+
+def test_list_baemin_shop_brands_returns_empty_when_no_baemin_connection_at_all(client, db_session, seeded_user, platforms, auth_headers):
+    """seeded_user의 baemin 연결(Mock) 자체를 지워서, 연결이 아예 없는 경우의
+    조기 반환 분기(conn is None)를 실제로 타는지 확인한다."""
+    from app.models import StorePlatformConnection
+
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    db_session.delete(conn)
+    db_session.commit()
+
     res = client.get("/store-connections/baemin/shops", headers=auth_headers)
     assert res.status_code == 200
     assert res.json() == []
