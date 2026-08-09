@@ -54,6 +54,7 @@ OK와 실제 리뷰 JSON을 받는다 — 아무 상호작용 없이 화면에 �
 """
 
 from datetime import datetime
+from urllib.parse import urlparse
 
 _MAX_SCROLL_ATTEMPTS = 5
 _SCROLL_WAIT_MS = 1_500
@@ -64,8 +65,8 @@ class BaeminScrapeError(Exception):
     pass
 
 
-def _review_list_prefix(shop_no: int) -> str:
-    return f"/v1/review/shops/{shop_no}/reviews?from="
+def _review_list_path(shop_no: int) -> str:
+    return f"/v1/review/shops/{shop_no}/reviews"
 
 
 def fetch_all_reviews(page, shop_no: int) -> list[dict]:
@@ -73,13 +74,18 @@ def fetch_all_reviews(page, shop_no: int) -> list[dict]:
     응답을 가로채 수집한다. 우리는 요청을 직접 만들지 않는다 (모듈 docstring
     참고 — raw fetch()는 CORS로 차단된다).
     """
-    prefix = _review_list_prefix(shop_no)
+    path = _review_list_path(shop_no)
     collected: dict[int, dict] = {}
+    state = {"observed_review_endpoint": False}
 
     def _on_response(response) -> None:
         url = response.url
-        if prefix not in url:
+        if urlparse(url).path != path:
             return
+        # 상태 코드와 무관하게 "리뷰 목록 엔드포인트 자체는 응답을 줬다"는
+        # 사실은 기록한다 — 401/500이 와도 우리가 올바른 엔드포인트를
+        # 찾긴 했다는 뜻이므로, 아래 200 파싱 실패와는 구분해야 한다.
+        state["observed_review_endpoint"] = True
         if response.status != 200:
             return
         try:
@@ -117,9 +123,16 @@ def fetch_all_reviews(page, shop_no: int) -> list[dict]:
     finally:
         page.remove_listener("response", _on_response)
 
+    # 리뷰 목록 엔드포인트 응답을 한 번도 관측하지 못했다면 — URL 패턴 변경,
+    # 클라이언트 사이드 404, 모든 요청이 인증 만료로 실패하는 경우 등 — 이건
+    # "리뷰 0건"과 절대 같은 의미가 아니다. 조용히 빈 리스트를 반환하면 이번
+    # 동기화 오류 신고 작업 전체가 무력화되므로 명시적으로 실패시킨다.
+    if not state["observed_review_endpoint"]:
+        raise BaeminScrapeError("리뷰 목록 API 응답을 한 번도 확인하지 못했습니다")
+
     # 리뷰 0건은 매장에 리뷰가 아직 없다는 뜻일 수도 있는 정상 데이터다 —
-    # 여기서는 에러로 취급하지 않는다. BaeminScrapeError는 위에서 이미 페이지
-    # 이동 실패 같은 명확한 실패 신호에만 raise한다.
+    # 엔드포인트 응답을 최소 한 번 관측했다면(위 체크 통과) 여기서는 에러로
+    # 취급하지 않는다.
     return list(collected.values())
 
 

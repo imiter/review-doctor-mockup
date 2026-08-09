@@ -192,6 +192,26 @@ def test_sync_dedupes_duplicate_external_id_within_same_batch(db_session, sync_s
     assert len(rows) == 1
 
 
+def test_sync_succeeds_with_zero_reviews_when_fetch_returns_empty_list(db_session, sync_setup, monkeypatch):
+    """fetch_all_reviews가 (엔드포인트를 관측했지만 리뷰가 없어서) 빈 리스트를
+    반환하는 정상 케이스는 여전히 success/reviews_fetched=0으로 끝나야 한다 —
+    이는 BaeminScrapeError를 던지는 "한 번도 못 봄" 실패 경로(다른 테스트에서
+    검증)와는 구분되는, 명시적으로 유효한 상태다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert job.reviews_fetched == 0
+    assert job.reviews_inserted == 0
+    assert fake_session.closed is True
+
+
 def test_sync_records_unclassified_fetch_exception_and_still_closes_session(db_session, sync_setup, monkeypatch):
     """fetch_all_reviews가 BaeminScrapeError/KeyError가 아닌 예외(예: Playwright 내부 오류)를
     던져도 안전망이 job을 failed로 종결시키고 세션도 닫아야 한다."""

@@ -91,7 +91,12 @@ class _FakePage:
         self._handlers[event] = handler
 
     def remove_listener(self, event, handler):
-        self._handlers.pop(event, None)
+        # 실제 Playwright처럼 handler 정체가 일치할 때만 제거한다 — 등록된
+        # 핸들러와 다른 객체로 remove_listener를 호출하면 아무 일도 일어나지
+        # 않아야, "removes listener when done" 테스트가 진짜로 올바른
+        # handler를 넘겼는지 검증하는 의미를 가진다.
+        if self._handlers.get(event) is handler:
+            del self._handlers[event]
 
     def goto(self, url):
         self.goto_calls.append(url)
@@ -160,13 +165,18 @@ def test_fetch_all_reviews_deduplicates_by_id_across_responses():
 
 
 def test_fetch_all_reviews_ignores_other_endpoints():
+    # 쿼리 스트링을 붙여야 경로 기반 매칭이 실제로 걸러내는지 검증된다 —
+    # 쿼리 스트링 없는 URL은 예전 prefix 매칭 버그도 못 잡았을 adversarial하지
+    # 않은 케이스다.
     stat_response = _FakeResponse(
-        f"https://self-api.baemin.com/v1/review/shops/{_SHOP_NO}/reviews/stat",
+        f"https://self-api.baemin.com/v1/review/shops/{_SHOP_NO}/reviews/stat"
+        "?from=2026-01-01",
         200,
         {"reviews": [_RAW_REVIEW]},
     )
     count_response = _FakeResponse(
-        f"https://self-api.baemin.com/v1/review/shops/{_SHOP_NO}/reviews/count",
+        f"https://self-api.baemin.com/v1/review/shops/{_SHOP_NO}/reviews/count"
+        "?from=2026-01-01",
         200,
         {"count": 42},
     )
@@ -177,12 +187,64 @@ def test_fetch_all_reviews_ignores_other_endpoints():
                 self._fired = True
                 self._handlers["response"](stat_response)
                 self._handlers["response"](count_response)
+                self._handlers["response"](_review_response([_RAW_REVIEW]))
 
     p = _Page()
     p._fired = False
     result = fetch_all_reviews(p, shop_no=_SHOP_NO)
 
-    assert result == []
+    # stat/count 응답에도 "reviews" 키가 있었지만 경로가 다르므로 수집되지
+    # 않아야 한다 — 실제로 관측된 리뷰 목록 응답의 리뷰 1건만 남는다.
+    assert len(result) == 1
+    assert result[0]["id"] == _RAW_REVIEW["id"]
+
+
+def test_fetch_all_reviews_matches_review_list_response_with_reordered_query_params():
+    # 파라미터 순서가 바뀌어도(offset이 from보다 먼저 와도) 경로만 같으면
+    # 매칭돼야 한다 — 문자열 prefix 매칭이었다면 이 케이스는 놓쳤을 것이다.
+    reordered_url = (
+        f"https://self-api.baemin.com/v1/review/shops/{_SHOP_NO}/reviews"
+        "?offset=0&limit=10&to=2026-08-10&from=2026-02-11"
+    )
+    response = _FakeResponse(reordered_url, 200, {"reviews": [_RAW_REVIEW]})
+
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not self._fired:
+                self._fired = True
+                self._handlers["response"](response)
+
+    p = _Page()
+    p._fired = False
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    assert len(result) == 1
+    assert result[0]["id"] == _RAW_REVIEW["id"]
+
+
+def test_fetch_all_reviews_ignores_response_for_different_shop_no():
+    other_shop_review_id = 555
+    other_shop_response = _FakeResponse(
+        f"https://self-api.baemin.com/v1/review/shops/{_SHOP_NO + 1}/reviews"
+        "?from=2026-02-11&to=2026-08-10&offset=0&limit=10",
+        200,
+        {"reviews": [{**_RAW_REVIEW, "id": other_shop_review_id}]},
+    )
+
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not self._fired:
+                self._fired = True
+                self._handlers["response"](other_shop_response)
+                self._handlers["response"](_review_response([_RAW_REVIEW]))
+
+    p = _Page()
+    p._fired = False
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    ids = {r["id"] for r in result}
+    assert ids == {_RAW_REVIEW["id"]}
+    assert other_shop_review_id not in ids
 
 
 def test_fetch_all_reviews_skips_non_200_review_list_response():
@@ -209,13 +271,100 @@ def test_fetch_all_reviews_raises_on_navigation_failure():
         fetch_all_reviews(page, shop_no=_SHOP_NO)
 
 
-def test_fetch_all_reviews_returns_empty_list_without_raising_when_no_reviews_captured():
+def test_fetch_all_reviews_raises_when_review_list_endpoint_never_observed():
+    # 리뷰 목록 엔드포인트에 대한 응답을 단 한 번도 보지 못했다면 — URL 패턴이
+    # 바뀌었거나, 클라이언트 사이드 404거나, 인증이 만료됐거나 — 이건 "리뷰
+    # 0건"과 절대 같은 의미가 아니므로 조용히 빈 리스트를 반환해서는 안 된다.
     page = _FakePage()
-    result = fetch_all_reviews(page, shop_no=_SHOP_NO)
+    with pytest.raises(BaeminScrapeError, match="한 번도"):
+        fetch_all_reviews(page, shop_no=_SHOP_NO)
+
+
+def test_fetch_all_reviews_returns_empty_list_when_shop_genuinely_has_no_reviews():
+    # 엔드포인트 응답을 실제로 관측했고, 그 응답의 reviews가 빈 배열이면
+    # 매장에 리뷰가 아직 없다는 정상 상태이므로 에러가 아니다.
+    empty_response = _FakeResponse(_REVIEWS_URL, 200, {"reviews": []})
+
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not self._fired:
+                self._fired = True
+                self._handlers["response"](empty_response)
+
+    p = _Page()
+    p._fired = False
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+    assert result == []
+
+
+def test_fetch_all_reviews_does_not_raise_when_endpoint_observed_only_via_error_status():
+    # 200이 아니어도(401/500 등) 리뷰 목록 엔드포인트 자체는 응답을 준 것이므로
+    # "한 번도 확인하지 못함" 에러를 던지면 안 된다 — 이 케이스는 다운스트림
+    # 문제(인증 만료 등)이지 엔드포인트를 놓친 게 아니다.
+    error_response = _FakeResponse(_REVIEWS_URL, 401, None)
+
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not self._fired:
+                self._fired = True
+                self._handlers["response"](error_response)
+
+    p = _Page()
+    p._fired = False
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
     assert result == []
 
 
 def test_fetch_all_reviews_removes_response_listener_when_done():
-    page = _FakePage()
-    fetch_all_reviews(page, shop_no=_SHOP_NO)
-    assert "response" not in page._handlers
+    # 리스너 제거 자체를 검증하는 테스트이므로, 새로 추가된 "한 번도 못 봄"
+    # 에러 경로와는 분리해 정상 성공 경로(관측됨 + 리뷰 있음)로 확인한다.
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not self._fired:
+                self._fired = True
+                self._handlers["response"](_review_response([_RAW_REVIEW]))
+
+    p = _Page()
+    p._fired = False
+    fetch_all_reviews(p, shop_no=_SHOP_NO)
+    assert "response" not in p._handlers
+
+
+def test_fetch_all_reviews_stops_scrolling_after_two_consecutive_no_progress_attempts():
+    # 초기 로드에서 리뷰 1건을 관측시켜 엔드포인트를 확인시킨 뒤, 이후 스크롤
+    # 대기에서는 새 응답을 전혀 발생시키지 않는다(진행 없음). "연속 2번
+    # 무진행" 조기 종료 규칙에 따라 정확히 2번만 스크롤해야 한다.
+    class _Page(_FakePage):
+        def __init__(self):
+            super().__init__()
+            self._wait_count = 0
+
+        def wait_for_timeout(self, ms):
+            self._wait_count += 1
+            if self._wait_count == 1:
+                self._handlers["response"](_review_response([_RAW_REVIEW]))
+
+    p = _Page()
+    fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    assert len(p.mouse.wheel_calls) == 2
+
+
+def test_fetch_all_reviews_hits_hard_cap_when_every_scroll_makes_progress():
+    # 매 스크롤마다 새 리뷰가 하나씩 도착해 진행이 계속되는 상황을 흉내낸다.
+    # 조기 종료 조건이 절대 걸리지 않아도 하드 캡(5회)에서 반드시 멈춰야 한다.
+    class _Page(_FakePage):
+        def __init__(self):
+            super().__init__()
+            self._wait_count = 0
+
+        def wait_for_timeout(self, ms):
+            self._wait_count += 1
+            self._handlers["response"](
+                _review_response([{**_RAW_REVIEW, "id": 9_000_000 + self._wait_count}])
+            )
+
+    p = _Page()
+    fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    assert len(p.mouse.wheel_calls) == 5
