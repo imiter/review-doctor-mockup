@@ -165,6 +165,33 @@ def test_sync_records_credential_decryption_failure(db_session, sync_setup, monk
     assert job.finished_at is not None
 
 
+def test_sync_dedupes_duplicate_external_id_within_same_batch(db_session, sync_setup, monkeypatch):
+    """fetch_all_reviews가 페이지네이션 겹침 등으로 같은 external_review_id를
+    한 배치 안에서 두 번 반환해도, 두 번째는 조용히 스킵돼야 한다(IntegrityError로
+    번지지 않고 job이 success로 종결돼야 함)."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+
+    _raw_dup = {**_RAW_2}  # id=1002, 배치 내에서 두 번 등장하는 상황을 흉내낸다
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_all_reviews",
+        lambda page, shop_no: [_raw_dup, dict(_raw_dup)],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert job.reviews_fetched == 2
+    assert job.reviews_inserted == 1  # 배치 내 중복은 두 번째부터 스킵
+    assert fake_session.closed is True
+
+    rows = db_session.query(Review).filter_by(external_review_id=1002).all()
+    assert len(rows) == 1
+
+
 def test_sync_records_unclassified_fetch_exception_and_still_closes_session(db_session, sync_setup, monkeypatch):
     """fetch_all_reviews가 BaeminScrapeError/KeyError가 아닌 예외(예: Playwright 내부 오류)를
     던져도 안전망이 job을 failed로 종결시키고 세션도 닫아야 한다."""

@@ -34,6 +34,7 @@ def sync_reviews_for_job(job: ReviewSyncJob, conn: StorePlatformConnection, db: 
     try:
         _run_sync(job, conn, db)
     except Exception as e:
+        db.rollback()
         job.status = "failed"
         job.error_message = f"동기화 중 예기치 못한 오류가 발생했습니다: {e}"
         job.finished_at = datetime.now(timezone.utc)
@@ -76,6 +77,7 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         if m["external_review_id"] in existing_ids:
             continue
         db.add(Review(**m))
+        existing_ids.add(m["external_review_id"])
         inserted += 1
 
     job.status = "success"
