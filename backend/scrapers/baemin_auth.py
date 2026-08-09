@@ -65,8 +65,13 @@ class BaeminSession:
     _browser: object
 
     def close(self) -> None:
-        self._browser.close()
-        self._playwright.stop()
+        # browser.close()가 실패해도(예: 배민 봉 탐지로 브라우저 프로세스가 이미
+        # 죽은 경우) playwright.stop()은 항상 실행되어야 드라이버 프로세스가
+        # 남지 않는다.
+        try:
+            self._browser.close()
+        finally:
+            self._playwright.stop()
 
 
 def _extract_login_error(page) -> str | None:
@@ -100,34 +105,41 @@ def _discover_first_shop(page) -> tuple[int, str]:
 
 
 def login(login_id: str, password: str, headless: bool = True) -> BaeminSession:
+    # success 플래그 + finally로 성공 여부와 무관하게 항상 정리한다. 이 스코프는
+    # playwright.start() 직후부터 시작해 browser/context/page 생성 자체의 실패까지
+    # 덮는다 — 예전에는 이 생성 단계가 try 블록 밖에 있어서, 예를 들어
+    # chromium.launch()가 실패하면(배포 환경에 브라우저 바이너리가 없는 경우 등)
+    # Playwright 드라이버 프로세스가 정리 없이 그대로 흘렀다. browser는 launch()
+    # 자체가 실패하면 아직 없을 수 있으므로 None으로 초기화해 finally에서 가드한다.
     playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(
-        headless=headless,
-        # 자동화 흔적이 남는 기본 headless 설정은 배민의 봉 탐지에 걸려
-        # "비정상 동작이 감지되어 잠시 이용이 제한돼요" 차단 화면으로 리다이렉트된다
-        # (실 계정으로 재현 확인). 아래 인자와 context 설정이 그 우회다.
-        args=["--disable-blink-features=AutomationControlled"],
-    )
-    context = browser.new_context(
-        user_agent=_DESKTOP_USER_AGENT,
-        viewport={"width": 1280, "height": 800},
-        locale="ko-KR",
-    )
-    context.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
-    page = context.new_page()
-
-    # 아래 try 블록에서 나는 실패는 BaeminLoginError만이 아니다 — page.goto의
-    # 네트워크/타임아웃 오류, get_by_test_id("id")/("password")/로그인 버튼의
-    # 기본 30초 타임아웃, _discover_first_shop의 리뷰관리 클릭·option 대기
-    # 타임아웃 등도 전부 여기서 날 수 있다. 예전에는 `except BaeminLoginError`만
-    # 정리를 했어서 그 외 예외는 브라우저/Playwright 드라이버 프로세스를 그대로
-    # 흘려보냈다(실제로 봉 탐지 차단으로 인한 fill() 타임아웃에서 재현됨).
-    # success 플래그 + finally로 성공 여부와 무관하게 항상 정리하고, 호출자가
-    # BaeminLoginError 하나만 잡으면 되도록 다른 예외는 여기서 감싸 다시 던진다.
+    browser = None
     success = False
     try:
+        browser = playwright.chromium.launch(
+            headless=headless,
+            # 자동화 흔적이 남는 기본 headless 설정은 배민의 봉 탐지에 걸려
+            # "비정상 동작이 감지되어 잠시 이용이 제한돼요" 차단 화면으로 리다이렉트된다
+            # (실 계정으로 재현 확인). 아래 인자와 context 설정이 그 우회다.
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        context = browser.new_context(
+            user_agent=_DESKTOP_USER_AGENT,
+            viewport={"width": 1280, "height": 800},
+            locale="ko-KR",
+        )
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        page = context.new_page()
+
+        # 아래에서 나는 실패는 BaeminLoginError만이 아니다 — page.goto의
+        # 네트워크/타임아웃 오류, get_by_test_id("id")/("password")/로그인 버튼의
+        # 기본 30초 타임아웃, _discover_first_shop의 리뷰관리 클릭·option 대기
+        # 타임아웃 등도 전부 여기서 날 수 있다. 예전에는 `except BaeminLoginError`만
+        # 정리를 했어서 그 외 예외는 브라우저/Playwright 드라이버 프로세스를 그대로
+        # 흘려보냈다(실제로 봉 탐지 차단으로 인한 fill() 타임아웃에서 재현됨).
+        # 호출자가 BaeminLoginError 하나만 잡으면 되도록 다른 예외는 여기서 감싸
+        # 다시 던진다.
         page.goto(_LOGIN_URL)
 
         try:
@@ -171,5 +183,6 @@ def login(login_id: str, password: str, headless: bool = True) -> BaeminSession:
         raise BaeminLoginError(f"로그인 처리 중 예기치 못한 오류가 발생했습니다: {e}") from e
     finally:
         if not success:
-            browser.close()
+            if browser is not None:
+                browser.close()
             playwright.stop()
