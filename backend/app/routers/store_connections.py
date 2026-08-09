@@ -165,6 +165,16 @@ def start_review_sync(
     if conn is None or conn.credential_ciphertext is None:
         raise HTTPException(400, "먼저 배민 로그인이 필요합니다")
 
+    existing_job = db.scalar(
+        select(ReviewSyncJob).where(
+            ReviewSyncJob.store_id == sid,
+            ReviewSyncJob.platform_id == platform.id,
+            ReviewSyncJob.status.in_(("pending", "running")),
+        )
+    )
+    if existing_job is not None:
+        raise HTTPException(409, "이미 진행 중인 동기화가 있습니다")
+
     job = ReviewSyncJob(
         store_id=sid, platform_id=platform.id, status="pending",
         started_at=datetime.now(timezone.utc),

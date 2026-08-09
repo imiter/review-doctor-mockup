@@ -147,6 +147,58 @@ def test_sync_reviews_creates_pending_job_and_dispatches_background_task(client,
     assert status["status"] == "pending"  # run_review_sync_job을 no-op으로 바꿨으니 상태 변경 없음
 
 
+def test_sync_reviews_rejected_while_job_already_in_progress(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
+    from datetime import datetime, timezone
+
+    from cryptography.fernet import Fernet
+
+    from app.credential_crypto import encrypt_credential
+    from app.models import ReviewSyncJob, StorePlatformConnection
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    db_session.add(ReviewSyncJob(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, status="running",
+        started_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    res = client.post("/store-connections/baemin/sync-reviews", headers=auth_headers)
+    assert res.status_code == 409
+    assert "이미 진행 중" in res.json()["detail"]
+
+
+def test_sync_reviews_allowed_after_previous_job_finished(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
+    from datetime import datetime, timezone
+
+    from cryptography.fernet import Fernet
+
+    from app.credential_crypto import encrypt_credential
+    from app.models import ReviewSyncJob, StorePlatformConnection
+    from app.routers import store_connections as sc
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    db_session.add(ReviewSyncJob(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, status="success",
+        started_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    monkeypatch.setattr(sc, "run_review_sync_job", lambda job_id: None)
+
+    res = client.post("/store-connections/baemin/sync-reviews", headers=auth_headers)
+    assert res.status_code == 202
+
+
 def test_sync_status_forbidden_for_other_users_job(client, db_session, seeded_user, platforms, auth_headers):
     from datetime import datetime, timezone
 
