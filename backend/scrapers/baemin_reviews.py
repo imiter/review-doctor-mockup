@@ -39,16 +39,35 @@ OK와 실제 리뷰 JSON을 받는다 — 아무 상호작용 없이 화면에 �
 동일 화면의 다른 API 호출은 제외)만 골라 파싱하고, `id` 기준으로 중복 제거해
 누적한다.
 
-### 알려진 한계 (지금 단계에서는 더 해결하지 않는, 받아들이는 한계)
+### 페이지네이션: 스크롤이 아니라 명시적 "더보기" 버튼 (재조사로 갱신)
 
 리뷰관리 화면에 진입하면 최근 리뷰 약 20건(오프셋 0/10, 각 limit=10인 두
 페이지, 최근 약 6개월치)이 상호작용 없이 자동으로 로드된다(실 계정 진단으로
-확인). 추가 페이지네이션은 마우스 휠 스크롤로 best-effort 시도하지만, 실
-계정으로 5회 스크롤을 테스트했을 때 처음 자동 로드된 2페이지를 넘어서는 추가
-요청이 전혀 발생하지 않았다(실제 스크롤 가능한 리스트 컨테이너를 스크롤 휠이
-타겟하지 못했거나, 이 정도 상호작용으로는 페이지가 추가로 lazy-load 하지 않는
-것으로 추정). 즉 한 번의 동기화로 매장의 전체 리뷰 이력을 다 가져온다는 보장은
-없다 — 이번 단계에서는 받아들이는 한계로 남겨두고 더 해결하지 않는다.
+확인). 처음에는 추가 페이지네이션이 마우스 휠 스크롤로 트리거될 것으로
+가정했으나, 실 계정으로 5회 스크롤을 테스트했을 때 처음 자동 로드된 2페이지를
+넘어서는 추가 요청이 전혀 발생하지 않아 "스크롤은 신뢰할 수 없다"로 결론
+내렸었다.
+
+이후 실 계정으로 다시 조사한 결과, 이 화면은 애초에 스크롤 기반 무한 로드가
+아니라 리스트 하단에 명시적 "더보기" 버튼이 있다는 사실이 확인됐다(고정
+`data-testid`/`aria-label`은 없고 텍스트로만 식별 가능 — 이 코드베이스가 이미
+쓰는 "홈으로 이동"/"리뷰관리 리뷰관리"/"로그인" 버튼 선택자와 같은 부류). 이
+버튼을 반복 클릭하면 매번 organic하게 올바르게 서명된 추가 요청이 발생한다.
+
+실 계정 재현: 20건(초기 자동 로드) → 40건(1차 클릭) → 52건(2차 클릭) → 이후
+반복 클릭에서는 더 이상 새 리뷰가 늘지 않음(해당 매장의 조회 기간(~6개월)
+전체 리뷰 수가 52건이었던 것으로 확인). 즉 이 방식으로는 화면이 기본으로
+잡는 기간 안에서 매장의 전체 리뷰 이력을 안정적으로 다 가져올 수 있다 — 이건
+지금 확인된 실측 동작이지, 배민이 이 버튼의 마크업이나 동작을 바꿔도 계속
+유지된다는 보장은 아니다.
+
+실 계정 관찰상 "더보기" 버튼은 리스트가 끝에 도달해도 사라지거나
+비활성화되지 않고 계속 클릭 가능한 상태로 남아있었다 — 그래서 버튼 존재
+여부(`count() == 0`)만으로는 종료 시점을 판단할 수 없고, 연속 클릭 무진행
+카운터(`_MAX_CONSECUTIVE_NO_PROGRESS`)가 실질적인 종료 신호다. 클릭
+횟수에는 별도로 하드 캡(`_MAX_LOAD_MORE_CLICKS`)을 둬서, 위 가정이 어떤
+매장/상황에서 깨지더라도(예: 무진행 카운터가 어떤 이유로 절대 트리거되지
+않는 경우) 무한 루프에 빠지지 않게 방어한다.
 
 인증 자체는 `baemin_auth.login()`이 반환한 세션이 담당한다.
 """
@@ -56,8 +75,11 @@ OK와 실제 리뷰 JSON을 받는다 — 아무 상호작용 없이 화면에 �
 from datetime import datetime
 from urllib.parse import urlparse
 
-_MAX_SCROLL_ATTEMPTS = 5
-_SCROLL_WAIT_MS = 1_500
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+_MAX_LOAD_MORE_CLICKS = 30
+_MAX_CONSECUTIVE_NO_PROGRESS = 2
+_LOAD_MORE_WAIT_MS = 1_500
 _INITIAL_LOAD_WAIT_MS = 3_000
 
 
@@ -107,18 +129,28 @@ def fetch_all_reviews(page, shop_no: int) -> list[dict]:
         # 기다린다.
         page.wait_for_timeout(_INITIAL_LOAD_WAIT_MS)
 
-        # 추가 페이지네이션은 best-effort. 연속 2번의 스크롤이 새 리뷰를
-        # 하나도 못 얻으면 더 스크롤해도 소용없다고 보고 조기 종료한다.
-        consecutive_empty_scrolls = 0
-        for _ in range(_MAX_SCROLL_ATTEMPTS):
+        # 추가 페이지네이션은 리스트 하단의 "더보기" 버튼을 반복 클릭해
+        # 트리거한다(모듈 docstring 참고 — 스크롤이 아니라 명시적 버튼).
+        # 버튼은 리스트가 끝에 도달해도 사라지지 않는 것으로 관찰돼
+        # count() == 0은 보너스 조기 종료일 뿐, 연속 무진행 카운터가 실질적인
+        # 종료 조건이다.
+        consecutive_no_progress = 0
+        for _ in range(_MAX_LOAD_MORE_CLICKS):
+            more_button = page.get_by_text("더보기", exact=True)
+            if more_button.count() == 0:
+                break
             before = len(collected)
-            page.mouse.wheel(0, 2000)
-            page.wait_for_timeout(_SCROLL_WAIT_MS)
+            try:
+                more_button.first.scroll_into_view_if_needed()
+                more_button.first.click(timeout=5_000)
+            except PlaywrightTimeoutError:
+                break
+            page.wait_for_timeout(_LOAD_MORE_WAIT_MS)
             if len(collected) > before:
-                consecutive_empty_scrolls = 0
+                consecutive_no_progress = 0
             else:
-                consecutive_empty_scrolls += 1
-                if consecutive_empty_scrolls >= 2:
+                consecutive_no_progress += 1
+                if consecutive_no_progress >= _MAX_CONSECUTIVE_NO_PROGRESS:
                     break
     finally:
         page.remove_listener("response", _on_response)

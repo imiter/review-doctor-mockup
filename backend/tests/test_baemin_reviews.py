@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from scrapers.baemin_reviews import BaeminScrapeError, fetch_all_reviews, map_review
 
@@ -54,12 +55,33 @@ def test_map_review_handles_empty_content():
     assert map_review(raw, store_id=7, platform_id=1)["content"] == ""
 
 
-class _FakeMouse:
-    def __init__(self):
-        self.wheel_calls: list[tuple[int, int]] = []
+class _FakeMoreButtonLocator:
+    """`page.get_by_text("더보기", exact=True)`가 반환하는 Locator의 최소 흉내.
+    실제 코드가 쓰는 부분만 흉내낸다: `.count()`, `.first`,
+    `.scroll_into_view_if_needed()`, `.click(timeout=...)`. 기본값은 "버튼이
+    항상 있고 클릭은 항상 성공하지만 진행은 안 남"이라 대부분의 응답 캡처
+    테스트가 이 기본값을 그대로 써도 무진행 조기 종료로 부작용 없이 끝난다.
+    """
 
-    def wheel(self, x, y):
-        self.wheel_calls.append((x, y))
+    def __init__(self):
+        self.present = True
+        self.click_calls = 0
+        self.click_raises: Exception | None = None
+
+    def count(self):
+        return 1 if self.present else 0
+
+    @property
+    def first(self):
+        return self
+
+    def scroll_into_view_if_needed(self):
+        pass
+
+    def click(self, timeout=None):
+        self.click_calls += 1
+        if self.click_raises:
+            raise self.click_raises
 
 
 class _FakeResponse:
@@ -78,13 +100,13 @@ class _FakePage:
       테스트는 등록된 handler를 직접 호출해 응답 이벤트를 시뮬레이션한다.
     - goto(url): URL만 기록.
     - wait_for_timeout(ms): no-op.
-    - mouse.wheel(x, y): 호출만 기록.
+    - get_by_text("더보기", exact=True): "더보기" 버튼 Locator 흉내(_FakeMoreButtonLocator)를 반환.
     """
 
     def __init__(self, goto_raises: Exception | None = None):
         self._handlers: dict[str, object] = {}
         self.goto_calls: list[str] = []
-        self.mouse = _FakeMouse()
+        self.more_button = _FakeMoreButtonLocator()
         self._goto_raises = goto_raises
 
     def on(self, event, handler):
@@ -105,6 +127,9 @@ class _FakePage:
 
     def wait_for_timeout(self, ms):
         pass
+
+    def get_by_text(self, text, exact=False):
+        return self.more_button
 
 
 def _review_response(reviews: list[dict], offset: int = 0) -> _FakeResponse:
@@ -330,10 +355,13 @@ def test_fetch_all_reviews_removes_response_listener_when_done():
     assert "response" not in p._handlers
 
 
-def test_fetch_all_reviews_stops_scrolling_after_two_consecutive_no_progress_attempts():
-    # 초기 로드에서 리뷰 1건을 관측시켜 엔드포인트를 확인시킨 뒤, 이후 스크롤
-    # 대기에서는 새 응답을 전혀 발생시키지 않는다(진행 없음). "연속 2번
-    # 무진행" 조기 종료 규칙에 따라 정확히 2번만 스크롤해야 한다.
+def test_fetch_all_reviews_stops_load_more_after_two_consecutive_no_progress_clicks():
+    # 초기 로드에서 리뷰 1건을 관측시켜 엔드포인트를 확인시킨 뒤, 이후 "더보기"
+    # 클릭 대기에서는 새 응답을 전혀 발생시키지 않는다(진행 없음). "연속 2번
+    # 무진행" 조기 종료 규칙에 따라 정확히 2번만 클릭해야 한다. 버튼 자체는
+    # 계속 존재한다고 흉내낸다(_FakeMoreButtonLocator 기본값 present=True) —
+    # 실 계정 관찰상 "더보기"가 끝에서도 사라지지 않았던 것과 같은 조건이라,
+    # count()==0이 아니라 무진행 카운터가 실제로 종료시켰는지를 검증한다.
     class _Page(_FakePage):
         def __init__(self):
             super().__init__()
@@ -347,12 +375,13 @@ def test_fetch_all_reviews_stops_scrolling_after_two_consecutive_no_progress_att
     p = _Page()
     fetch_all_reviews(p, shop_no=_SHOP_NO)
 
-    assert len(p.mouse.wheel_calls) == 2
+    assert p.more_button.click_calls == 2
 
 
-def test_fetch_all_reviews_hits_hard_cap_when_every_scroll_makes_progress():
-    # 매 스크롤마다 새 리뷰가 하나씩 도착해 진행이 계속되는 상황을 흉내낸다.
-    # 조기 종료 조건이 절대 걸리지 않아도 하드 캡(5회)에서 반드시 멈춰야 한다.
+def test_fetch_all_reviews_hits_hard_cap_when_every_click_makes_progress():
+    # 매 "더보기" 클릭마다 새 리뷰가 하나씩 도착해 진행이 계속되는 상황을
+    # 흉내낸다. 무진행 조기 종료 조건이 절대 걸리지 않아도 하드 캡(30회)에서
+    # 반드시 멈춰야 한다.
     class _Page(_FakePage):
         def __init__(self):
             super().__init__()
@@ -367,4 +396,53 @@ def test_fetch_all_reviews_hits_hard_cap_when_every_scroll_makes_progress():
     p = _Page()
     fetch_all_reviews(p, shop_no=_SHOP_NO)
 
-    assert len(p.mouse.wheel_calls) == 5
+    assert p.more_button.click_calls == 30
+
+
+def test_fetch_all_reviews_stops_early_when_more_button_disappears():
+    # 첫 클릭은 진행이 있었다고(새 리뷰 1건) 흉내낸 다음 "더보기" 버튼이
+    # 사라지게(count() == 0) 만든다. 무진행 카운터는 아직 한 번도 증가하지
+    # 않았고 하드 캡(30)에도 한참 못 미치므로, 버튼 소멸 자체가 조기 종료를
+    # 일으켰는지를 검증한다.
+    class _Page(_FakePage):
+        def __init__(self):
+            super().__init__()
+            self._wait_count = 0
+
+        def wait_for_timeout(self, ms):
+            self._wait_count += 1
+            if self._wait_count == 1:
+                self._handlers["response"](_review_response([_RAW_REVIEW]))
+            elif self._wait_count == 2:
+                self._handlers["response"](
+                    _review_response([{**_RAW_REVIEW, "id": 2}])
+                )
+                self.more_button.present = False
+
+    p = _Page()
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    assert len(result) == 2
+    assert p.more_button.click_calls == 1
+
+
+def test_fetch_all_reviews_stops_when_more_button_click_times_out():
+    # 클릭 자체가 PlaywrightTimeoutError로 실패하면(버튼이 안 보이거나 다른
+    # 요소에 가려진 경우 등) 더 시도하지 않고 조용히 루프를 빠져나와야 한다 —
+    # 이미 수집된 리뷰는 그대로 반환한다.
+    class _Page(_FakePage):
+        def __init__(self):
+            super().__init__()
+            self._wait_count = 0
+
+        def wait_for_timeout(self, ms):
+            self._wait_count += 1
+            if self._wait_count == 1:
+                self._handlers["response"](_review_response([_RAW_REVIEW]))
+
+    p = _Page()
+    p.more_button.click_raises = PlaywrightTimeoutError("click timed out")
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    assert len(result) == 1
+    assert p.more_button.click_calls == 1
