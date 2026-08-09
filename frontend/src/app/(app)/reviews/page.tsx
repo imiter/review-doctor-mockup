@@ -10,6 +10,7 @@ type ReplyRef = { content: string; style_id: number } | null;
 type Review = {
   id: number;
   platform_name: string;
+  platform_shop_no: string | null;
   menu_summary: string;
   rating: number;
   content: string;
@@ -20,6 +21,7 @@ type Review = {
   final_reply: ReplyRef;
   draft_reply: ReplyRef;
 };
+type Brand = { shop_no: string; shop_name: string };
 
 const FILTERS = [
   { key: "unanswered", label: "답글 대기" },
@@ -28,7 +30,11 @@ const FILTERS = [
   { key: "", label: "전체" },
 ] as const;
 
-function ReviewCard({ review, styles, onSaved }: { review: Review; styles: ReplyStyle[]; onSaved: () => void }) {
+function ReviewCard({
+  review, styles, onSaved, brandName,
+}: {
+  review: Review; styles: ReplyStyle[]; onSaved: () => void; brandName?: string;
+}) {
   const [styleId, setStyleId] = useState(review.draft_reply?.style_id ?? styles[0]?.id ?? 0);
   const [draft, setDraft] = useState(review.draft_reply?.content ?? "");
   const [generating, setGenerating] = useState(false);
@@ -66,6 +72,9 @@ function ReviewCard({ review, styles, onSaved }: { review: Review; styles: Reply
     <div className="rounded-xl border border-border-subtle bg-surface-2 p-4">
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
         <span className="rounded bg-surface px-2 py-0.5 font-medium text-accent">{review.platform_name}</span>
+        {brandName && (
+          <span className="rounded bg-surface px-2 py-0.5 font-medium text-foreground">{brandName}</span>
+        )}
         <span className="text-warning">{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
         <span className="font-medium text-foreground">{review.customer_nickname}</span>
         <span>· {review.customer_order_count}회 주문</span>
@@ -137,16 +146,26 @@ export default function ReviewsPage() {
   const [reviews, setReviews] = useState<Review[]>([]);
   const [styles, setStyles] = useState<ReplyStyle[]>([]);
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["key"]>("unanswered");
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [selectedShopNo, setSelectedShopNo] = useState(""); // "" = 전체 브랜드
 
   const load = useCallback(async () => {
     if (!storeId) return;
     const qs = filter ? `&status=${filter}` : "";
-    setReviews(await apiGet<Review[]>(`/reviews?store_id=${storeId}${qs}`));
-  }, [storeId, filter]);
+    const brandQs = selectedShopNo ? `&platform_shop_no=${selectedShopNo}` : "";
+    setReviews(await apiGet<Review[]>(`/reviews?store_id=${storeId}${qs}${brandQs}`));
+  }, [storeId, filter, selectedShopNo]);
 
   useEffect(() => {
     apiGet<ReplyStyle[]>("/reply-styles").then(setStyles);
   }, []);
+  useEffect(() => {
+    // 배민처럼 한 연결에 여러 브랜드(매장)가 있는 경우에만 의미가 있다 —
+    // Mock 연결이나 단일 매장 계정은 빈 배열이 오고, 이 경우 드롭다운 자체를
+    // 렌더링하지 않는다(아래 JSX의 brands.length > 1 조건).
+    if (!storeId) return;
+    apiGet<Brand[]>(`/store-connections/baemin/shops?store_id=${storeId}`).then(setBrands);
+  }, [storeId]);
   useEffect(() => {
     load();
   }, [load]);
@@ -157,6 +176,24 @@ export default function ReviewsPage() {
         <h1 className="text-xl font-semibold">리뷰 관리</h1>
         <p className="text-sm text-muted">답글 생성은 스타일 템플릿 기반 Mock — 실제 AI 호출 없음</p>
       </div>
+
+      {brands.length > 1 && (
+        <div>
+          <label className="mb-1 block text-xs text-muted">브랜드(매장) 선택</label>
+          <select
+            value={selectedShopNo}
+            onChange={(e) => setSelectedShopNo(e.target.value)}
+            className="w-full max-w-sm rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+          >
+            <option value="">전체 브랜드 ({brands.length}개)</option>
+            {brands.map((b) => (
+              <option key={b.shop_no} value={b.shop_no}>
+                {b.shop_name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <div className="flex gap-2">
         {FILTERS.map((f) => (
@@ -177,7 +214,19 @@ export default function ReviewsPage() {
           {reviews.length === 0 ? (
             <p className="text-sm text-muted">해당하는 리뷰가 없습니다.</p>
           ) : (
-            reviews.map((r) => <ReviewCard key={r.id} review={r} styles={styles} onSaved={load} />)
+            reviews.map((r) => (
+              <ReviewCard
+                key={r.id}
+                review={r}
+                styles={styles}
+                onSaved={load}
+                brandName={
+                  brands.length > 1
+                    ? brands.find((b) => b.shop_no === r.platform_shop_no)?.shop_name
+                    : undefined
+                }
+              />
+            ))
           )}
         </div>
       </Card>
