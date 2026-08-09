@@ -3,7 +3,13 @@ from datetime import datetime
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from scrapers.baemin_reviews import BaeminScrapeError, fetch_all_reviews, map_review
+from scrapers.baemin_reviews import (
+    _INITIAL_LOAD_WAIT_MS,
+    _LOAD_MORE_WAIT_MS,
+    BaeminScrapeError,
+    fetch_all_reviews,
+    map_review,
+)
 
 _RAW_REVIEW = {
     "id": 2026080402827696,
@@ -95,6 +101,26 @@ class _FakeResponse:
         return self._body
 
 
+class _FakeBackdropLocator:
+    """`page.get_by_test_id("backdrop")`가 반환하는 Locator의 최소 흉내.
+    `.count()`만 있으면 된다 — 실제 코드는 개수만 확인하고 클릭/조작하지 않는다.
+    """
+
+    def __init__(self):
+        self.present = False
+
+    def count(self):
+        return 1 if self.present else 0
+
+
+class _FakeKeyboard:
+    def __init__(self):
+        self.press_calls: list[str] = []
+
+    def press(self, key):
+        self.press_calls.append(key)
+
+
 class _FakePage:
     """실제 코드가 기대하는 page 인터페이스의 최소 흉내:
     - on(event, handler) / remove_listener(event, handler): response 리스너 등록/해제.
@@ -102,12 +128,17 @@ class _FakePage:
     - goto(url): URL만 기록.
     - wait_for_timeout(ms): no-op.
     - get_by_text("더보기", exact=True): "더보기" 버튼 Locator 흉내(_FakeMoreButtonLocator)를 반환.
+    - get_by_test_id("backdrop"): 프로모션 모달 backdrop Locator 흉내(_FakeBackdropLocator)를 반환.
+      기본값은 present=False(backdrop 없음)라 대부분의 테스트에 부작용이 없다.
+    - keyboard.press("Escape"): backdrop을 닫는 동작의 흉내(_FakeKeyboard).
     """
 
     def __init__(self, goto_raises: Exception | None = None):
         self._handlers: dict[str, object] = {}
         self.goto_calls: list[str] = []
         self.more_button = _FakeMoreButtonLocator()
+        self.backdrop = _FakeBackdropLocator()
+        self.keyboard = _FakeKeyboard()
         self._goto_raises = goto_raises
 
     def on(self, event, handler):
@@ -131,6 +162,10 @@ class _FakePage:
 
     def get_by_text(self, text, exact=False):
         return self.more_button
+
+    def get_by_test_id(self, test_id):
+        assert test_id == "backdrop"
+        return self.backdrop
 
 
 def _review_response(reviews: list[dict], offset: int = 0) -> _FakeResponse:
@@ -427,10 +462,13 @@ def test_fetch_all_reviews_stops_early_when_more_button_disappears():
     assert p.more_button.click_calls == 1
 
 
-def test_fetch_all_reviews_stops_when_more_button_click_times_out():
-    # 클릭 자체가 PlaywrightTimeoutError로 실패하면(버튼이 안 보이거나 다른
-    # 요소에 가려진 경우 등) 더 시도하지 않고 조용히 루프를 빠져나와야 한다 —
-    # 이미 수집된 리뷰는 그대로 반환한다.
+def test_fetch_all_reviews_retries_after_click_timeout_instead_of_giving_up_immediately():
+    # 클릭 자체가 PlaywrightTimeoutError로 실패해도(예: backdrop이 클릭 순간에
+    # 막 떠서 요소가 안정되지 않은 경우) 곧바로 포기하지 않는다 — 실 계정
+    # 재현에서 첫 클릭이 타임아웃 났는데도 그 사이에 실제로는 데이터가 계속
+    # 로드되고 있었던 사례가 있었다(모듈 docstring 참고). 그래서 매번 클릭이
+    # 타임아웃 나더라도 무진행 카운터가 실제로 종료 조건을 채울 때까지는
+    # 계속 재시도해야 한다 — 정확히 2회(연속 무진행 한도) 시도 후 멈춘다.
     class _Page(_FakePage):
         def __init__(self):
             super().__init__()
@@ -446,4 +484,38 @@ def test_fetch_all_reviews_stops_when_more_button_click_times_out():
     result = fetch_all_reviews(p, shop_no=_SHOP_NO)
 
     assert len(result) == 1
-    assert p.more_button.click_calls == 1
+    assert p.more_button.click_calls == 2
+
+
+def test_fetch_all_reviews_dismisses_backdrop_that_reappears_mid_load_and_keeps_progressing():
+    # 실 계정 재현(398건 매장): backdrop이 로그인 직후뿐 아니라 리뷰 목록을
+    # 계속 불러오는 도중에도 다시 뜰 수 있고, 그걸 방치하면 "더보기" 클릭이
+    # 막혀 무진행으로 오판해 조기 종료한다(실제로 이 버그 때문에 140건
+    # 근처에서 멈췄었다). backdrop이 뜬 것을 감지하면 매 클릭 시도 전에
+    # Escape로 닫아야 계속 진행할 수 있다는 게 이 테스트의 핵심 — backdrop이
+    # 계속 present인 상태를 흉내내면서, 실제 코드가 호출하는 대기 시간(ms
+    # 인자)으로 "초기 로드 대기"와 "클릭 후 대기"를 구분해 각 단계에서 새
+    # 리뷰가 도착하는 상황을 흉내낸다. backdrop을 닫기 위한 500ms 대기에는
+    # 아무 응답도 쏘지 않는다(실제로도 그 대기는 리뷰 로드와 무관하다).
+    class _Page(_FakePage):
+        def __init__(self):
+            super().__init__()
+            self.backdrop.present = True  # 처음부터, 그리고 계속 backdrop이 떠 있는 상태
+
+        def wait_for_timeout(self, ms):
+            if ms == _INITIAL_LOAD_WAIT_MS:
+                self._handlers["response"](_review_response([{**_RAW_REVIEW, "id": 9_000_000}]))
+            elif ms == _LOAD_MORE_WAIT_MS:
+                self._handlers["response"](
+                    _review_response([{**_RAW_REVIEW, "id": 9_000_000 + self.more_button.click_calls}])
+                )
+            # ms가 그 외 값(backdrop을 닫은 뒤의 500ms)이면 아무 응답도 쏘지 않는다.
+
+    p = _Page()
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    # backdrop이 계속 떠 있었지만(매번 present=True로 유지) 매 클릭 전에
+    # Escape로 닫아줬기 때문에 무진행 없이 하드 캡까지 전부 진행됐다.
+    assert p.more_button.click_calls == 30
+    assert len(result) == 31  # 초기 로드 1건 + 클릭 30회, 각 클릭마다 새 리뷰 1건
+    assert p.keyboard.press_calls.count("Escape") == 30
