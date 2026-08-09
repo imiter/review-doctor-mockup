@@ -79,13 +79,23 @@ API 사이에 서로를 연결하는 공통 키가 없다는 걸 확인했다 �
 있으면 연결하는 선택적 FK로 강등, 실제로 채워지는 경우는 없음).
 
 "가게 연결" 화면에서 배민 카드만 실제 ID/PW를 받아 Playwright로 사장님광장에
-로그인하고(`backend/scrapers/baemin_auth.py`), 로그인 세션의 request context로
-리뷰 API를 직접 호출해(`backend/scrapers/baemin_reviews.py`) 실제 DB에
-적재한다. 자격증명은 Fernet으로 암호화해 저장한다
-(`backend/app/credential_crypto.py`, `CREDENTIAL_ENCRYPTION_KEY` 환경변수).
-쿠팡이츠/요기요는 아직 미승인이라 "절대 금지" 그대로 유지, 배민의 주문/정산
-실데이터 연동과 리뷰 답글 실제 자동 등록도 여전히 범위 밖이다. 설계 상세는
-`docs/superpowers/specs/2026-08-09-baemin-review-scraping-design.md` 참고.
+로그인한다(`backend/scrapers/baemin_auth.py`). 리뷰 수집(`backend/scrapers/
+baemin_reviews.py`)은 직접 HTTP 호출이 아니다 — 로그인된 페이지가 "리뷰관리"
+화면을 열 때 스스로 발생시키는, 이미 서명된 API 응답을 `page.on("response")`로
+가로챈다. 직접 시도한 두 방식은 모두 실 계정으로 재현된 이유로 폐기했다:
+`APIRequestContext`로 리뷰 API를 브라우저 밖에서 직접 호출하면 배민이 매
+요청마다 동적으로 계산하는 서명 헤더(`x-e-request`)가 없어 403이 나고,
+페이지 안에서 raw `fetch()`를 실행해도 배민이 전역 fetch를 감싸지 않고 별도
+내부 API 클라이언트로 서명하기 때문에 CORS로 막힌다(상세 재현 기록은
+`baemin_reviews.py`/`baemin_auth.py` 모듈 docstring 참고). 자격증명은 Fernet으로
+암호화해 저장한다(`backend/app/credential_crypto.py`, `CREDENTIAL_ENCRYPTION_KEY`
+환경변수). 로그인 시 배민의 자동화 탐지가 기본 headless 세션을 차단해서
+(`--disable-blink-features=AutomationControlled`, `navigator.webdriver` 오버라이드,
+데스크톱 Chrome User-Agent/뷰포트/로케일 위장으로 우회, 상세는 `baemin_auth.py`
+모듈 docstring 참고) — 이 봇 탐지 우회는 사용자 본인 계정에 한해 명시적으로
+승인받았다. 쿠팡이츠/요기요는 아직 미승인이라 "절대 금지" 그대로 유지, 배민의
+주문/정산 실데이터 연동과 리뷰 답글 실제 자동 등록도 여전히 범위 밖이다. 설계
+상세는 `docs/superpowers/specs/2026-08-09-baemin-review-scraping-design.md` 참고.
 
 ### 모바일 앱 (예외 허용)
 원래 "Flutter 앱 구현 금지"로 모바일 앱 자체를 범위 밖으로 뒀으나, 웹과 같은
