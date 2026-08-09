@@ -29,11 +29,14 @@
 - 리뷰 API(self-api.baemin.com)를 `context.request`(브라우저 밖 `APIRequestContext`)로
   직접 호출하면 쿠키가 실려도 HTTP 403이 난다(실 계정으로 재현 확인). 실제
   요청에는 매 요청마다 값이 바뀌는 `x-e-request` 서명 헤더가 실려 있는데, 이는
-  배민 프런트 JS가 동적으로 생성하는 값이라 정적으로 재현할 수 없다. 그래서
-  로그인 성공 후에도 `page`를 닫지 않고 세션에 그대로 담아 반환한다 —
-  `baemin_reviews.py`의 리뷰 조회가 이 살아있는 페이지 안에서
-  `page.evaluate()`로 `fetch()`를 실행해, 그 페이지의 JS 런타임이 알아서
-  `x-e-request`를 계산하도록 한다.
+  배민 프런트 JS가 동적으로 생성하는 값이라 정적으로 재현할 수 없다.
+  `page.evaluate()`로 페이지 안에서 raw `fetch()`를 직접 실행해도 이 서명
+  로직을 우회하게 돼 CORS로 차단된다(실 계정 콘솔 캡처로 재현 확인 —
+  `baemin_reviews.py` 모듈 docstring 참고). 그래서 로그인 성공 후에도 `page`를
+  닫지 않고 세션에 그대로 담아 반환한다 — `baemin_reviews.py`의 리뷰 조회는
+  이 살아있는 페이지가 "리뷰관리" 화면을 로드하며 스스로 발생시키는(organic)
+  올바르게 서명된 네트워크 응답을 `page.on("response", ...)`로 가로채는
+  방식으로 동작한다.
 """
 
 from dataclasses import dataclass

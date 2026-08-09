@@ -1,5 +1,4 @@
 from datetime import datetime
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -15,6 +14,12 @@ _RAW_REVIEW = {
     "createdAt": "2026-08-04T21:12:33+09:00",
     "displayStatus": "DISPLAY",
 }
+
+_SHOP_NO = 14804912
+_REVIEWS_URL = (
+    f"https://self-api.baemin.com/v1/review/shops/{_SHOP_NO}/reviews"
+    "?from=2026-02-11&to=2026-08-10&offset=0&limit=10"
+)
 
 
 def test_map_review_translates_baemin_fields_to_our_schema():
@@ -49,50 +54,168 @@ def test_map_review_handles_empty_content():
     assert map_review(raw, store_id=7, platform_id=1)["content"] == ""
 
 
-def _offset_of(url: str) -> int:
-    return int(parse_qs(urlparse(url).query)["offset"][0])
+class _FakeMouse:
+    def __init__(self):
+        self.wheel_calls: list[tuple[int, int]] = []
+
+    def wheel(self, x, y):
+        self.wheel_calls.append((x, y))
 
 
-def _limit_of(url: str) -> int:
-    return int(parse_qs(urlparse(url).query)["limit"][0])
+class _FakeResponse:
+    def __init__(self, url: str, status: int, body: dict | None = None):
+        self.url = url
+        self.status = status
+        self._body = body
+
+    def json(self):
+        return self._body
 
 
 class _FakePage:
-    """page.evaluate(script, url) 흉내. 실제 코드는 page.evaluate()로 인증된
-    페이지 안에서 fetch()를 실행해 {status, body} 딕셔너리를 돌려받는다 —
-    브라우저 밖 request_context.get()이 아니다(x-e-request 서명 헤더 때문에
-    403이 나서 바뀐 구조)."""
+    """실제 코드가 기대하는 page 인터페이스의 최소 흉내:
+    - on(event, handler) / remove_listener(event, handler): response 리스너 등록/해제.
+      테스트는 등록된 handler를 직접 호출해 응답 이벤트를 시뮬레이션한다.
+    - goto(url): URL만 기록.
+    - wait_for_timeout(ms): no-op.
+    - mouse.wheel(x, y): 호출만 기록.
+    """
 
-    def __init__(self, pages: list[dict]):
-        self._pages = pages
-        self.calls: list[str] = []
+    def __init__(self, goto_raises: Exception | None = None):
+        self._handlers: dict[str, object] = {}
+        self.goto_calls: list[str] = []
+        self.mouse = _FakeMouse()
+        self._goto_raises = goto_raises
 
-    def evaluate(self, script, url):
-        self.calls.append(url)
-        page = self._pages[_offset_of(url) // _limit_of(url)]
-        return {"status": 200, "body": page}
+    def on(self, event, handler):
+        self._handlers[event] = handler
 
+    def remove_listener(self, event, handler):
+        self._handlers.pop(event, None)
 
-def test_fetch_all_reviews_paginates_until_next_is_false():
-    pages = [
-        {"reviews": [_RAW_REVIEW], "next": True},
-        {"reviews": [{**_RAW_REVIEW, "id": 999}], "next": False},
-    ]
-    page = _FakePage(pages)
+    def goto(self, url):
+        self.goto_calls.append(url)
+        if self._goto_raises:
+            raise self._goto_raises
 
-    result = fetch_all_reviews(page, shop_no=14804318, limit=1)
-
-    assert len(result) == 2
-    assert [r["id"] for r in result] == [2026080402827696, 999]
-    assert len(page.calls) == 2
-    assert _offset_of(page.calls[0]) == 0
-    assert _offset_of(page.calls[1]) == 1
+    def wait_for_timeout(self, ms):
+        pass
 
 
-def test_fetch_all_reviews_raises_on_non_200():
-    class _FailingPage:
-        def evaluate(self, script, url):
-            return {"status": 401, "body": {}}
+def _review_response(reviews: list[dict], offset: int = 0) -> _FakeResponse:
+    url = (
+        f"https://self-api.baemin.com/v1/review/shops/{_SHOP_NO}/reviews"
+        f"?from=2026-02-11&to=2026-08-10&offset={offset}&limit=10"
+    )
+    return _FakeResponse(url, 200, {"reviews": reviews, "next": True})
 
+
+def test_fetch_all_reviews_captures_single_organic_response():
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not self._fired:
+                self._fired = True
+                self._handlers["response"](_review_response([_RAW_REVIEW]))
+
+    p = _Page()
+    p._fired = False
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    assert len(result) == 1
+    assert result[0]["id"] == _RAW_REVIEW["id"]
+    assert p.goto_calls == [f"https://self.baemin.com/shops/{_SHOP_NO}/reviews"]
+
+
+def test_fetch_all_reviews_combines_two_organic_prefetch_pages():
+    second_review = {**_RAW_REVIEW, "id": 999}
+
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not self._fired:
+                self._fired = True
+                self._handlers["response"](_review_response([_RAW_REVIEW], offset=0))
+                self._handlers["response"](_review_response([second_review], offset=10))
+
+    p = _Page()
+    p._fired = False
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    ids = {r["id"] for r in result}
+    assert ids == {_RAW_REVIEW["id"], 999}
+
+
+def test_fetch_all_reviews_deduplicates_by_id_across_responses():
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not self._fired:
+                self._fired = True
+                self._handlers["response"](_review_response([_RAW_REVIEW]))
+                self._handlers["response"](_review_response([_RAW_REVIEW]))
+
+    p = _Page()
+    p._fired = False
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    assert len(result) == 1
+
+
+def test_fetch_all_reviews_ignores_other_endpoints():
+    stat_response = _FakeResponse(
+        f"https://self-api.baemin.com/v1/review/shops/{_SHOP_NO}/reviews/stat",
+        200,
+        {"reviews": [_RAW_REVIEW]},
+    )
+    count_response = _FakeResponse(
+        f"https://self-api.baemin.com/v1/review/shops/{_SHOP_NO}/reviews/count",
+        200,
+        {"count": 42},
+    )
+
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not self._fired:
+                self._fired = True
+                self._handlers["response"](stat_response)
+                self._handlers["response"](count_response)
+
+    p = _Page()
+    p._fired = False
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    assert result == []
+
+
+def test_fetch_all_reviews_skips_non_200_review_list_response():
+    failed_response = _FakeResponse(_REVIEWS_URL, 500, {"reviews": [_RAW_REVIEW]})
+
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not self._fired:
+                self._fired = True
+                self._handlers["response"](failed_response)
+                self._handlers["response"](_review_response([{**_RAW_REVIEW, "id": 1}]))
+
+    p = _Page()
+    p._fired = False
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    assert len(result) == 1
+    assert result[0]["id"] == 1
+
+
+def test_fetch_all_reviews_raises_on_navigation_failure():
+    page = _FakePage(goto_raises=RuntimeError("network error"))
     with pytest.raises(BaeminScrapeError):
-        fetch_all_reviews(_FailingPage(), shop_no=1)
+        fetch_all_reviews(page, shop_no=_SHOP_NO)
+
+
+def test_fetch_all_reviews_returns_empty_list_without_raising_when_no_reviews_captured():
+    page = _FakePage()
+    result = fetch_all_reviews(page, shop_no=_SHOP_NO)
+    assert result == []
+
+
+def test_fetch_all_reviews_removes_response_listener_when_done():
+    page = _FakePage()
+    fetch_all_reviews(page, shop_no=_SHOP_NO)
+    assert "response" not in page._handlers
