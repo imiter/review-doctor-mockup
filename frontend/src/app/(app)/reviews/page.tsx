@@ -30,6 +30,73 @@ const FILTERS = [
   { key: "", label: "전체" },
 ] as const;
 
+const pad = (n: number) => String(n).padStart(2, "0");
+const toDateStr = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+// 배민 사장님광장의 "오늘/어제/최근 1주일/최근 1개월/지난주/지난달" 프리셋을
+// 참고해 우리 화면에 맞게 재구성했다(화면을 그대로 복제하지 않음).
+const DATE_PRESETS: { label: string; range: () => [string, string] }[] = [
+  {
+    label: "오늘",
+    range: () => {
+      const t = toDateStr(new Date());
+      return [t, t];
+    },
+  },
+  {
+    label: "어제",
+    range: () => {
+      const d = new Date();
+      d.setDate(d.getDate() - 1);
+      const t = toDateStr(d);
+      return [t, t];
+    },
+  },
+  {
+    label: "최근 1주일",
+    range: () => {
+      const to = new Date();
+      const from = new Date();
+      from.setDate(from.getDate() - 6);
+      return [toDateStr(from), toDateStr(to)];
+    },
+  },
+  {
+    label: "최근 1개월",
+    range: () => {
+      const to = new Date();
+      const from = new Date();
+      from.setMonth(from.getMonth() - 1);
+      return [toDateStr(from), toDateStr(to)];
+    },
+  },
+  {
+    label: "지난주",
+    range: () => {
+      const today = new Date();
+      const mondayOffset = today.getDay() === 0 ? 6 : today.getDay() - 1;
+      const thisMonday = new Date(today);
+      thisMonday.setDate(today.getDate() - mondayOffset);
+      const lastMonday = new Date(thisMonday);
+      lastMonday.setDate(thisMonday.getDate() - 7);
+      const lastSunday = new Date(thisMonday);
+      lastSunday.setDate(thisMonday.getDate() - 1);
+      return [toDateStr(lastMonday), toDateStr(lastSunday)];
+    },
+  },
+  {
+    label: "지난달",
+    range: () => {
+      const today = new Date();
+      const firstOfThisMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+      const lastOfPrevMonth = new Date(firstOfThisMonth);
+      lastOfPrevMonth.setDate(lastOfPrevMonth.getDate() - 1);
+      const firstOfPrevMonth = new Date(lastOfPrevMonth.getFullYear(), lastOfPrevMonth.getMonth(), 1);
+      return [toDateStr(firstOfPrevMonth), toDateStr(lastOfPrevMonth)];
+    },
+  },
+];
+
 function ReviewCard({
   review, styles, onSaved, brandName,
 }: {
@@ -150,6 +217,19 @@ export default function ReviewsPage() {
   const [selectedShopNo, setSelectedShopNo] = useState(""); // "" = 전체 브랜드
   const [dateFrom, setDateFrom] = useState(""); // "" = 시작일 제한 없음
   const [dateTo, setDateTo] = useState(""); // "" = 종료일 제한 없음
+  const [activePreset, setActivePreset] = useState<string | null>(null);
+
+  const applyPreset = (preset: (typeof DATE_PRESETS)[number]) => {
+    const [from, to] = preset.range();
+    setDateFrom(from);
+    setDateTo(to);
+    setActivePreset(preset.label);
+  };
+  const clearDateRange = () => {
+    setDateFrom("");
+    setDateTo("");
+    setActivePreset(null);
+  };
 
   const load = useCallback(async () => {
     if (!storeId) return;
@@ -180,57 +260,81 @@ export default function ReviewsPage() {
         <p className="text-sm text-muted">답글 생성은 스타일 템플릿 기반 Mock — 실제 AI 호출 없음</p>
       </div>
 
-      {brands.length > 1 && (
-        <div>
-          <label className="mb-1 block text-xs text-muted">브랜드(매장) 선택</label>
-          <select
-            value={selectedShopNo}
-            onChange={(e) => setSelectedShopNo(e.target.value)}
-            className="w-full max-w-sm rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-          >
-            <option value="">전체 브랜드 ({brands.length}개)</option>
-            {brands.map((b) => (
-              <option key={b.shop_no} value={b.shop_no}>
-                {b.shop_name}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
+      <Card>
+        <div className="space-y-4">
+          {brands.length > 1 && (
+            <div>
+              <label className="mb-1 block text-xs text-muted">브랜드(매장) 선택</label>
+              <select
+                value={selectedShopNo}
+                onChange={(e) => setSelectedShopNo(e.target.value)}
+                className="w-full rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+              >
+                <option value="">전체 브랜드 ({brands.length}개)</option>
+                {brands.map((b) => (
+                  <option key={b.shop_no} value={b.shop_no}>
+                    {b.shop_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
-      <div className="flex flex-wrap items-end gap-2">
-        <div>
-          <label className="mb-1 block text-xs text-muted">시작일</label>
-          <input
-            type="date"
-            value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
-            max={dateTo || undefined}
-            className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-          />
+          <div className="flex flex-wrap items-end gap-2">
+            <div>
+              <label className="mb-1 block text-xs text-muted">시작일</label>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => {
+                  setDateFrom(e.target.value);
+                  setActivePreset(null);
+                }}
+                max={dateTo || undefined}
+                className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+              />
+            </div>
+            <span className="pb-2.5 text-muted">~</span>
+            <div>
+              <label className="mb-1 block text-xs text-muted">종료일</label>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => {
+                  setDateTo(e.target.value);
+                  setActivePreset(null);
+                }}
+                min={dateFrom || undefined}
+                className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+              />
+            </div>
+            {(dateFrom || dateTo) && (
+              <button
+                onClick={clearDateRange}
+                className="rounded-lg px-3 py-2 text-xs text-muted transition hover:text-foreground"
+              >
+                기간 초기화
+              </button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {DATE_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                onClick={() => applyPreset(preset)}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+                  activePreset === preset.label
+                    ? "border-accent bg-accent-soft text-accent"
+                    : "border-border-subtle text-muted hover:text-foreground"
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
         </div>
-        <div>
-          <label className="mb-1 block text-xs text-muted">종료일</label>
-          <input
-            type="date"
-            value={dateTo}
-            onChange={(e) => setDateTo(e.target.value)}
-            min={dateFrom || undefined}
-            className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-          />
-        </div>
-        {(dateFrom || dateTo) && (
-          <button
-            onClick={() => {
-              setDateFrom("");
-              setDateTo("");
-            }}
-            className="rounded-lg border border-border-subtle px-3 py-2 text-xs text-muted transition hover:text-foreground"
-          >
-            기간 초기화
-          </button>
-        )}
-      </div>
+      </Card>
 
       <div className="flex gap-2">
         {FILTERS.map((f) => (
