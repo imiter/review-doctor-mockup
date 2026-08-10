@@ -108,3 +108,55 @@ def test_reviews_filtered_by_platform_shop_no(client, db_session, seeded_user, p
     listed = client.get("/reviews?platform_shop_no=11111", headers=auth_headers).json()
     assert [r["id"] for r in listed] == [review_a.id]
     assert listed[0]["platform_shop_no"] == "11111"
+
+
+def test_reviews_filtered_by_date_range(client, db_session, seeded_user, platforms, auth_headers):
+    old_review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, menu_summary="메뉴",
+        rating=5, content="1월 리뷰", customer_nickname="고객1",
+        customer_order_count=1, created_at=datetime(2026, 1, 15, 12, 0, tzinfo=timezone.utc),
+    )
+    in_range_review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, menu_summary="메뉴",
+        rating=5, content="2월 리뷰", customer_nickname="고객2",
+        customer_order_count=1, created_at=datetime(2026, 2, 15, 12, 0, tzinfo=timezone.utc),
+    )
+    boundary_review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, menu_summary="메뉴",
+        rating=5, content="2월 마지막날 늦은 시각 리뷰", customer_nickname="고객3",
+        customer_order_count=1, created_at=datetime(2026, 2, 28, 23, 59, tzinfo=timezone.utc),
+    )
+    later_review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, menu_summary="메뉴",
+        rating=5, content="3월 리뷰", customer_nickname="고객4",
+        customer_order_count=1, created_at=datetime(2026, 3, 1, 0, 30, tzinfo=timezone.utc),
+    )
+    db_session.add_all([old_review, in_range_review, boundary_review, later_review])
+    db_session.commit()
+
+    listed = client.get("/reviews?date_from=2026-02-01&date_to=2026-02-28", headers=auth_headers).json()
+    ids = {r["id"] for r in listed}
+    assert ids == {in_range_review.id, boundary_review.id}  # date_to는 그날 끝까지 포함
+
+
+def test_reviews_date_from_only_includes_everything_after(client, db_session, seeded_user, platforms, auth_headers):
+    old_review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, menu_summary="메뉴",
+        rating=5, content="1월 리뷰", customer_nickname="고객1",
+        customer_order_count=1, created_at=datetime(2026, 1, 15, 12, 0, tzinfo=timezone.utc),
+    )
+    recent_review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, menu_summary="메뉴",
+        rating=5, content="3월 리뷰", customer_nickname="고객2",
+        customer_order_count=1, created_at=datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc),
+    )
+    db_session.add_all([old_review, recent_review])
+    db_session.commit()
+
+    listed = client.get("/reviews?date_from=2026-02-01", headers=auth_headers).json()
+    assert [r["id"] for r in listed] == [recent_review.id]
+
+
+def test_reviews_invalid_date_format_returns_400(client, seeded_user, auth_headers):
+    res = client.get("/reviews?date_from=2026/02/01", headers=auth_headers)
+    assert res.status_code == 400

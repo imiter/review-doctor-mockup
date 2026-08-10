@@ -148,13 +148,16 @@ export default function ReviewsPage() {
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["key"]>("unanswered");
   const [brands, setBrands] = useState<Brand[]>([]);
   const [selectedShopNo, setSelectedShopNo] = useState(""); // "" = 전체 브랜드
+  const [dateFrom, setDateFrom] = useState(""); // "" = 시작일 제한 없음
+  const [dateTo, setDateTo] = useState(""); // "" = 종료일 제한 없음
 
   const load = useCallback(async () => {
     if (!storeId) return;
     const qs = filter ? `&status=${filter}` : "";
     const brandQs = selectedShopNo ? `&platform_shop_no=${selectedShopNo}` : "";
-    setReviews(await apiGet<Review[]>(`/reviews?store_id=${storeId}${qs}${brandQs}`));
-  }, [storeId, filter, selectedShopNo]);
+    const dateQs = `${dateFrom ? `&date_from=${dateFrom}` : ""}${dateTo ? `&date_to=${dateTo}` : ""}`;
+    setReviews(await apiGet<Review[]>(`/reviews?store_id=${storeId}${qs}${brandQs}${dateQs}`));
+  }, [storeId, filter, selectedShopNo, dateFrom, dateTo]);
 
   useEffect(() => {
     apiGet<ReplyStyle[]>("/reply-styles").then(setStyles);
@@ -194,6 +197,40 @@ export default function ReviewsPage() {
           </select>
         </div>
       )}
+
+      <div className="flex flex-wrap items-end gap-2">
+        <div>
+          <label className="mb-1 block text-xs text-muted">시작일</label>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            max={dateTo || undefined}
+            className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-muted">종료일</label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            min={dateFrom || undefined}
+            className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+          />
+        </div>
+        {(dateFrom || dateTo) && (
+          <button
+            onClick={() => {
+              setDateFrom("");
+              setDateTo("");
+            }}
+            className="rounded-lg border border-border-subtle px-3 py-2 text-xs text-muted transition hover:text-foreground"
+          >
+            기간 초기화
+          </button>
+        )}
+      </div>
 
       <div className="flex gap-2">
         {FILTERS.map((f) => (

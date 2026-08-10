@@ -1,6 +1,6 @@
 """리뷰 관리 + 답글 스타일. 답글 생성은 템플릿 기반 Mock — 실제 AI 호출 없음."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -41,6 +41,8 @@ def list_reviews(
     status: str | None = None,
     store_id: int | None = None,
     platform_shop_no: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -55,6 +57,20 @@ def list_reviews(
         stmt = stmt.where(Review.status == status)
     if platform_shop_no:
         stmt = stmt.where(Review.platform_shop_no == platform_shop_no)
+    if date_from:
+        try:
+            start = datetime.combine(date.fromisoformat(date_from), datetime.min.time(), tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(400, "date_from 형식이 올바르지 않습니다 (YYYY-MM-DD)")
+        stmt = stmt.where(Review.created_at >= start)
+    if date_to:
+        try:
+            # date_to는 그날 하루 전체를 포함해야 하므로(23:59:59까지),
+            # 다음날 자정을 배타적 상한으로 쓴다.
+            end = datetime.combine(date.fromisoformat(date_to), datetime.min.time(), tzinfo=timezone.utc) + timedelta(days=1)
+        except ValueError:
+            raise HTTPException(400, "date_to 형식이 올바르지 않습니다 (YYYY-MM-DD)")
+        stmt = stmt.where(Review.created_at < end)
 
     reviews = db.scalars(stmt).unique().all()
     result = []
