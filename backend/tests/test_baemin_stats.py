@@ -1,6 +1,7 @@
 from scrapers.baemin_stats import (
     compute_repurchase_rates,
     map_deposits_by_date,
+    map_orders_to_daily_sales,
     map_repurchase_by_date,
     map_sales_by_date,
 )
@@ -36,6 +37,50 @@ def test_map_sales_by_date_rounds_fractional_amounts():
 
 def test_map_sales_by_date_empty_list_returns_empty_dict():
     assert map_sales_by_date([]) == {}
+
+
+# 실 계정(치밥대장/블랙닭갈비 등)에서 확인한 실제 GET /v4/orders 응답의
+# contents[] 항목 형태(fix round, fetch_current_month_orders로 이번 달
+# 1일~오늘 범위를 조회해 캡처, 무관한 필드는 생략).
+_ORDER_ITEM_1 = {
+    "order": {
+        "orderNumber": "T2FB0001H1UC", "status": "CLOSED",
+        "orderDateTime": "2026-08-10T22:19:10", "payAmount": 34400,
+        "shopNumber": 14804914,
+    },
+}
+_ORDER_ITEM_2 = {
+    "order": {
+        "orderNumber": "T2FB0001FQS0", "status": "CLOSED",
+        "orderDateTime": "2026-08-10T21:48:55", "payAmount": 18200,
+        "shopNumber": 14804914,
+    },
+}
+_ORDER_ITEM_3 = {
+    "order": {
+        "orderNumber": "T2FB0002ABCD", "status": "CLOSED",
+        "orderDateTime": "2026-08-01T12:03:44", "payAmount": 15000,
+        "shopNumber": 14804912,
+    },
+}
+
+
+def test_map_orders_to_daily_sales_sums_pay_amount_by_date_across_brands():
+    # 브랜드(shopNumber)가 달라도 같은 날짜면 합산된다 -- 주문내역 화면 자체가
+    # 계정 전체(여러 브랜드)를 한 번의 조회로 합쳐서 준다(fetch_current_month_orders
+    # docstring 참고).
+    result = map_orders_to_daily_sales([_ORDER_ITEM_1, _ORDER_ITEM_2, _ORDER_ITEM_3])
+    assert result == {"2026-08-10": 52600, "2026-08-01": 15000}
+
+
+def test_map_orders_to_daily_sales_takes_only_date_portion_of_datetime():
+    # "2026-08-10T22:19:10" 같은 ISO datetime에서 앞 10글자(YYYY-MM-DD)만 쓴다.
+    item = {"order": {"orderDateTime": "2026-08-10T22:19:10", "payAmount": 100}}
+    assert map_orders_to_daily_sales([item]) == {"2026-08-10": 100}
+
+
+def test_map_orders_to_daily_sales_empty_list_returns_empty_dict():
+    assert map_orders_to_daily_sales([]) == {}
 
 
 # 실 계정에서 확인한 실제 settle/history/summary 응답 형태(페이지 2개로 흉내).

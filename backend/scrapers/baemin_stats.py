@@ -1,10 +1,11 @@
-"""배민 사장님광장의 가게통계(매출/재주문율)·정산내역(입금) API 응답을
-날짜별로 집계하는 순수 함수와, 그 organic 응답을 실제로 캡처하는
-`fetch_shop_stats`/`fetch_account_settlement`.
+"""배민 사장님광장의 가게통계(매출/재주문율)·정산내역(입금)·주문내역(이번
+달 보완 매출) API 응답을 날짜별로 집계하는 순수 함수와, 그 organic 응답을
+실제로 캡처하는 `fetch_shop_stats`/`fetch_account_settlement`/
+`fetch_current_month_orders`.
 
 브랜드(치밥대장 등)별로 분리하지 않고 전부 날짜 단위로 합산한다 — 설계
 결정(계정 전체 합산만 지원, 입금이 애초에 브랜드별로 안 나뉘어 나오기
-때문). 세 함수 모두 여러 브랜드/여러 달/여러 페이지에 걸친 raw 응답
+때문). 매핑 함수는 모두 여러 브랜드/여러 달/여러 페이지에 걸친 raw 응답
 리스트를 받아 하나의 날짜별 dict로 합친다.
 
 ### fetch 함수의 화면 조작 방식 (실 계정 조사로 확인, 2026-08-11)
@@ -52,13 +53,74 @@ persist된 마지막으로 조회했던 달이었다(실측 시점엔 우연히 
 다이얼로그로 scope하지 않으면 아래쪽 다이얼로그의 버튼을 잘못 클릭해
 포인터 이벤트가 가로채이는 것으로 확인됐다.
 
-**정산내역 페이지네이션**: 좁은 기본 범위에서는 안 보이지만, 90일로 넓히면
-`/v3/settle/history/summary?...&page=0&size=10`처럼 페이지당 10건으로
-잘리고, 리스트 하단에 리뷰 리스트와 동일한 "더보기" 텍스트 버튼이 나타난다
-(실측 확인: 90일 범위 적용 후 렌더링된 항목이 정확히 10건이었고, 마우스
-휠 스크롤만으로는 추가 페이지가 로드되지 않았다 — "더보기" 클릭이
-필요하다). 그래서 `fetch_account_settlement`는 `baemin_reviews.py`의
-"더보기" 반복 클릭 + 연속 무진행 카운터 패턴을 그대로 재사용한다.
+**정산내역/주문내역 페이지네이션**: 좁은 기본 범위에서는 안 보이지만, 범위를
+넓히면(정산내역 90일, 주문내역은 최대 페이지당 10건) 리스트 하단에 리뷰
+리스트와 동일한 "더보기" 텍스트 버튼이 나타난다(실측 확인: 마우스 휠
+스크롤만으로는 추가 페이지가 로드되지 않았다 — "더보기" 클릭이 필요하다).
+`_click_load_more_until_done`이 `baemin_reviews.py`의 "더보기" 반복 클릭 +
+연속 무진행 카운터 패턴을 공유 헬퍼로 재사용하며, `fetch_account_settlement`와
+`fetch_current_month_orders` 둘 다 이걸 쓴다.
+
+**주문내역(`/orders/history`)은 정산내역과 완전히 같은 날짜 범위 다이얼로그
+컴포넌트를 쓴다**(실측 확인, 2026-08-11 fix round) — "날짜 직접 선택" 버튼
+텍스트, "기간" 다이얼로그 구조, 두 달짜리 캘린더 그리드까지 전부 동일해서
+`_open_date_range_picker`/`_set_date_range`를 그대로 재사용할 수 있었다.
+차이는 안내 문구(정산내역 "최근 5년 동안의 정산내역만", 주문내역 "최근
+5년 동안 받은 주문을 볼 수 있어요" + "한번에 6개월까지 조회할 수 있어요")뿐.
+`GET /v4/orders?...&shopNumbers=&orderStatus=CLOSED`처럼 `shopNumbers`가
+빈 채로 나가는 것도 실측 확인했다 — 계정에 연결된 모든 브랜드를 한 번의
+조회로 함께 반환하므로, `fetch_shop_stats`처럼 shop_no별로 반복할 필요가
+없다.
+
+### crmInfo 재조사 결과 (fix round, 2026-08-11)
+
+Task 2 최초 구현에서는 crmInfo가 두 차례 재현 모두 0건이라 미관측을
+비하드에러로 감내했었다. 사용자가 실제 화면에서 "신규·재주문" 위젯이
+분명히 데이터를 보여주는 걸 직접 확인해 재조사를 요청했고, 재조사 결과는
+"원인 불명"이 아니라 실제로 찾아 고칠 수 있는 버그와, 고쳐도 남는
+잔여 flakiness 두 가지로 나뉜다.
+
+**찾아서 고친 진짜 버그**: 원래 구현은 "신규-재주문"(하이픈)으로 헤딩을
+찾아 그 위치로 스크롤을 시도했는데, 실제 DOM 텍스트는 "신규·재주문"
+(가운뎃점 U+00B7 — 이 사이트가 "일・주" 탭처럼 구분자로 흔히 쓰는 문자)
+이라 검색이 매번 실패했고, 매칭 실패 시 쓰던 fallback(고정 1200px 스크롤)이
+위젯을 정확히 뷰포트 안에 넣지 못해 지연 로드가 트리거되지 않았다 —
+그래서 원래 두 차례 재현 모두 0건이었다. 구분자 문자에 의존하지 않는
+"재주문" 부분 문자열 검색 + 정확한 bounding box 계산 후 뷰포트 세로
+중앙으로 스크롤하는 방식으로 바꾼 뒤, **격리된 진단 스크립트로 두 차례
+재현했을 때 2초 만에 크린하게 잡히는 걸 확인했다**(이 텍스트 매칭 버그가
+"원인 불명"이 아니라 진짜 원인이었다는 확증).
+
+**같은 수정을 `fetch_shop_stats` 안에서 실행했을 때 남는 잔여
+flakiness**: 위 수정된 스크롤 타겟팅 로직을 그대로 `fetch_shop_stats`에
+반영하고, 헤딩 렌더 대기 재시도(최대 5초)·다단계 폴링(최대 12초)·재트리거용
+스크롤 지글(scroll away then back)까지 추가로 붙였는데도, `fetch_shop_stats`를
+실제로 호출한 4번의 시도 중 2번은 여전히 crmInfo가 안 잡혔다(격리
+진단에서는 2번 다 성공). 동일 세션의 매출/정산/주문내역 엔드포인트는 이
+fix round 동안 단 한 번도 놓친 적이 없다는 것과 대비된다 — "신규·재주문"
+위젯 자체의 지연 로드 타이밍이 클라이언트 쪽에서 아무리 정밀하게
+스크롤해도 완전히 통제되지 않는, Baemin 쪽의 잔여 flakiness로 보인다.
+그래서 `fetch_shop_stats`는 crmInfo 미관측을 여전히 하드 에러로 취급하지
+않는다(매출/정산/주문내역과 다른 엄격도) — 다만 이제는 "원인 불명이라
+포기"가 아니라 "근본 원인 하나는 찾아 고쳤고, 남은 부분은 재현 가능한
+확률적 flakiness"라는 근거가 있다.
+
+**부수 발견 — 관련 있지만 대체재는 아닌 엔드포인트**: 재조사 도중
+"신규·재주문" 위젯의 스켈레톤 DOM 클래스가 `NewReOrderCardSkeleton-module__...`
+인 걸 보고, 실제로 그 이름과 일치하는 `GET /v3/statistics/new-reorder/summary
+?shopNumber={shop_no}&period=MONTH&month=YYYY-MM` 요청이 (crmInfo와는 별개로)
+관측됐다. 그런데 이 응답의 실제 형태는
+`{"newOrderCount": int, "reOrderCount": int, "details": [{"group": "ALL_ORDER"|"INSTANT_DISCOUNT"|"BAEMIN_CLUB"|"MFO"|"TAKEOUT", "orderCount": int, "newOrderCount": int, "reOrderCount": int}, ...]}`
+로, 날짜별 데이터가 전혀 없고(그 달 전체의 단일 합계를 주문 채널별로만
+나눔) `map_repurchase_by_date`가 기대하는
+`newReorderSummary.timeNewGraph`/`timeReorderGraph`(날짜별 x/y 포인트) 형태와
+완전히 다르다 — `repurchase_metrics`가 요구하는 날짜별 재주문율(위 "정규화
+원칙"/테이블 설명 참고)과 근본적으로 호환되지 않는다. 그래서 이번
+fix round에서는 이 엔드포인트로 갈아타지 않았다 — crmInfo가 그대로
+목표로 남아있고, 이 엔드포인트는 "왜 crmInfo가 아닌 다른 요청도 같이
+관측되는지"를 설명하는 참고 정보로만 문서에 남긴다. 날짜별 재주문율을
+이 엔드포인트 기반으로 다시 설계하려면 스키마/집계 로직 자체를 다시
+논의해야 한다(이 fix round의 범위 밖).
 
 **backdrop 처리 시 주의**: `data-testid="backdrop"`은 프로모션 모달
 전용이 아니라, 배민 자체 디자인시스템의 모든 다이얼로그(기간 모달, 월
@@ -106,6 +168,22 @@ def map_sales_by_date(responses: list[dict]) -> dict[str, int]:
         for point in resp["graph"]["data"]:
             date_str = point["x"]
             totals[date_str] = totals.get(date_str, 0) + round(point["y"])
+    return totals
+
+
+def map_orders_to_daily_sales(order_contents: list[dict]) -> dict[str, int]:
+    """`GET /v4/orders` 응답의 `contents[].order.{orderDateTime,payAmount}`를
+    날짜별로 합산한다. `orderDateTime`은 `"2026-08-10T22:19:10"` 형태라
+    앞 10글자(`YYYY-MM-DD`)만 날짜 키로 쓴다. `fetch_current_month_orders`가
+    반환한(여러 페이지에 걸쳐 이미 dedup된) flat 리스트를 그대로 받는다 —
+    가게통계 화면의 월별 조회가 진행 중인 이번 달을 지원하지 않는 제약(모듈
+    docstring의 discrepancy 절 참고)을 주문내역 화면 데이터로 보완하기 위한
+    함수다."""
+    totals: dict[str, int] = {}
+    for item in order_contents:
+        order = item["order"]
+        date_str = order["orderDateTime"][:10]
+        totals[date_str] = totals.get(date_str, 0) + order["payAmount"]
     return totals
 
 
@@ -238,12 +316,12 @@ def fetch_shop_stats(page, shop_no: int, months: list[str]) -> tuple[list[dict],
     (모듈 docstring의 discrepancy 절 참고) — 반환되는 `sales_responses`가
     `len(months)`보다 적을 수 있다.
 
-    `crm_responses`는 빈 리스트일 수 있다 — "신규-재주문" 위젯은 화면
-    하단에서 지연 로드되는데, 실 계정으로 두 차례 재현했을 때(위젯을
-    스크롤로 뷰포트에 넣고 최대 8초까지 나눠 기다려도) 매번 organic 요청이
-    잡히지 않았다(원인 불명, 추후 조사 필요 — 매출 엔드포인트는 동일한
-    조건에서 매번 확실히 잡혔다). 그래서 매출과 달리 crmInfo 미관측은
-    하드 에러로 취급하지 않는다.
+    `crm_responses`는 빈 리스트일 수 있다 — "신규·재주문" 위젯은 화면
+    하단에서 지연 로드되는데, 정확한 헤딩 텍스트(가운뎃점 구분자, 하이픈
+    아님) + 뷰포트 중앙 스크롤 + 스크롤 재시도까지 다 갖춘 뒤에도 이 함수
+    호출 4번 중 2번은 여전히 안 잡혔다(원인 규명·수정 경위는 모듈 docstring
+    "crmInfo 재조사 결과" 절 참고) — 매출/정산/주문내역과 달리 이 잔여
+    flakiness 때문에 crmInfo 미관측은 하드 에러로 취급하지 않는다.
     """
     sales_responses: list[dict] = []
     crm_responses: list[dict] = []
@@ -288,20 +366,70 @@ def fetch_shop_stats(page, shop_no: int, months: list[str]) -> tuple[list[dict],
 
         page.wait_for_timeout(3_000)  # 첫 로드(예측 불가한 기본 달) 대기
         _dismiss_backdrop_if_present(page)
-        # "신규-재주문"(crmInfo) 위젯은 화면 하단에 스켈레톤 placeholder로
+        # "신규·재주문"(crmInfo) 위젯은 화면 하단에 스켈레톤 placeholder로
         # 렌더링된 채 대기하다가 실제로 뷰포트에 들어와야 organic 요청이
-        # 발생한다(실측 확인 — 스크롤 없이 3초 대기만으로는 잡히지 않았다).
-        # 정확한 위젯 위치로 스크롤하고, 지연 로드가 늦게 뜨는 경우를 대비해
-        # 짧게 여러 번 나눠 기다린다(고정 픽셀 스크롤보다 안정적).
-        heading = page.get_by_text("신규-재주문", exact=False).first
-        try:
-            heading.scroll_into_view_if_needed(timeout=5_000)
-        except PlaywrightTimeoutError:
-            page.mouse.wheel(0, 1_200)  # 위젯 텍스트를 못 찾으면 대략적으로라도 스크롤
-        for _ in range(4):
+        # 발생한다(실측 확인). 처음에는 "신규-재주문"(하이픈)으로 헤딩을
+        # 찾았는데 실제 DOM 텍스트는 "신규·재주문"(가운뎃점, U+00B7 —
+        # "일・주" 탭처럼 이 사이트가 구분자로 흔히 쓰는 문자)이라 전혀
+        # 매칭되지 않았고, 매칭 실패 시 쓰던 fallback(고정 1200px 스크롤)이
+        # 위젯을 정확히 뷰포트 안에 넣지 못해 지연 로드가 트리거되지 않았던
+        # 것으로 재현·확인했다. 구분자 문자에 의존하지 않도록 "재주문"
+        # 부분 문자열로 찾고, 뷰포트 가장자리가 아니라 세로 중앙에 오도록
+        # 정확히 스크롤한다(일부 지연 로드 위젯은 IntersectionObserver
+        # threshold가 엄격해 가장자리 노출만으로는 안 뜬다) — 이렇게 하니
+        # 재현 시 스크롤 후 2초 만에 응답이 잡혔다.
+        # 헤딩 자체가 아직 DOM에 안 붙었을 수도 있다(첫 로드 직후 3초 대기가
+        # 매번 충분하다는 보장이 없다 — 실측 재현에서 세션마다 편차가 있었다)
+        # — 짧게 재시도하며 나타나길 기다린다.
+        heading = page.get_by_text(re.compile(r"재주문")).first
+        for _ in range(5):
+            if heading.count() > 0:
+                break
+            page.wait_for_timeout(1_000)
+
+        if heading.count() > 0:
+            box = heading.bounding_box()
+            if box:
+                viewport = page.viewport_size
+                target_scroll_y = box["y"] - (viewport["height"] / 2) + (box["height"] / 2)
+                page.evaluate(f"window.scrollBy(0, {target_scroll_y})")
+        else:
+            # 헤딩을 끝내 못 찾았으면(텍스트가 또 바뀌었거나 렌더가 유난히
+            # 느린 경우) 최소한 대략적인 스크롤이라도 시도해 위젯이 뷰포트에
+            # 걸릴 가능성을 높인다 — 정밀 타겟팅의 대체제일 뿐이라 이 경로만
+            # 믿지는 않는다(아래 폴링에서도 여러 단계로 나눠 스크롤한다).
+            for _ in range(3):
+                page.mouse.wheel(0, 600)
+                page.wait_for_timeout(800)
+                if state["observed_crm_endpoint"]:
+                    break
+
+        # 한 번의 긴 대기 대신 짧게 나눠 최대 12초까지 기다리며 잡히는 대로
+        # 바로 빠져나온다(느린 세션에서도 불필요하게 오래 기다리지 않기 위함).
+        for _ in range(6):
             page.wait_for_timeout(2_000)
             if state["observed_crm_endpoint"]:
                 break
+
+        if not state["observed_crm_endpoint"] and heading.count() > 0:
+            # 그래도 안 잡히면 위로 스크롤했다가 다시 중앙으로 되돌아온다 —
+            # 페이지가 이미 그 위치로 스크롤된 채 로드됐다면(예: 브라우저의
+            # 스크롤 위치 복원) IntersectionObserver가 "새로 진입"하는
+            # 이벤트 자체가 안 생겨서 최초 진입 트리거를 놓쳤을 수 있다.
+            # 스크롤을 위로 뺐다가 다시 중앙으로 넣으면 새 진입 이벤트를
+            # 강제로 만들 수 있다.
+            page.evaluate("window.scrollBy(0, -400)")
+            page.wait_for_timeout(500)
+            box = heading.bounding_box()
+            if box:
+                viewport = page.viewport_size
+                target_scroll_y = box["y"] - (viewport["height"] / 2) + (box["height"] / 2)
+                page.evaluate(f"window.scrollBy(0, {target_scroll_y})")
+            for _ in range(3):
+                page.wait_for_timeout(2_000)
+                if state["observed_crm_endpoint"]:
+                    break
+
         state["collect_sales"] = True
 
         for month in months:
@@ -318,14 +446,15 @@ def fetch_shop_stats(page, shop_no: int, months: list[str]) -> tuple[list[dict],
 
     if not state["observed_sales_endpoint"]:
         raise BaeminStatsScrapeError("매출 통계 API 응답을 한 번도 확인하지 못했습니다")
-    # crmInfo는 매출과 달리 하드 실패시키지 않는다 — 실 계정으로 두 차례
-    # 재현했을 때(스크롤로 위젯을 뷰포트에 넣고 최대 8초까지 나눠 기다려도)
-    # 이 화면에서 안정적으로 organic 요청을 발생시키지 못했다(원인 불명 —
-    # 매출/정산 엔드포인트는 동일한 조건에서 매번 확실히 잡혔던 것과 대비됨,
-    # 추가 조사 필요). crm_responses가 빈 리스트여도 map_repurchase_by_date는
-    # 안전하게 빈 dict를 반환하므로(순수 함수, 빈 입력에 대해 크래시하지
-    # 않음), 매출/정산이라는 이 태스크의 핵심 데이터를 재주문율 하나 때문에
-    # 통째로 실패시키지 않는 쪽을 택했다.
+    # crmInfo는 매출/정산/주문내역과 달리 하드 실패시키지 않는다(fix round
+    # 재조사 결론, 모듈 docstring의 "crmInfo 재조사 결과" 절 참고) — 근본
+    # 원인(헤딩 텍스트 구분자 불일치로 스크롤 타겟팅 자체가 실패) 하나는
+    # 실제로 찾아 고쳤고 그 수정이 격리된 진단 스크립트에서 두 차례
+    # 재현됐지만, 같은 수정을 `fetch_shop_stats` 안에서 실행했을 때는
+    # 여전히 못 잡을 때가 있었다(4번 중 2번 성공) — 위젯 자체의 지연 로드
+    # 타이밍이 클라이언트 쪽 스크롤 정밀도만으로는 완전히 통제되지 않는
+    # 잔여 flakiness로 보인다. 매출/정산/주문내역은 이 fix round 동안 매번
+    # 안정적으로 잡혔던 것과 대비된다.
     return sales_responses, crm_responses
 
 
@@ -400,6 +529,44 @@ def _set_date_range(page, start_date: str, end_date: str) -> None:
             outer_apply.first.click(timeout=5_000)
 
 
+def _click_load_more_until_done(page, progress_fn) -> None:
+    """"더보기" 버튼을 연속 무진행이 감지될 때까지 반복 클릭한다.
+    `baemin_reviews.py`의 리뷰 리스트 페이지네이션과 동일한 패턴이고, 정산
+    내역·주문내역 화면에서도 실측으로 동일하게 확인됐다(리스트 하단에
+    "더보기" 텍스트 버튼, 스크롤만으로는 추가 페이지가 로드되지 않음) —
+    세 화면(리뷰/정산/주문내역) 모두 같은 디자인시스템 컴포넌트를 쓰는
+    것으로 보인다. `progress_fn()`은 현재까지 수집한 항목 수를 반환해야
+    한다(클릭 전후로 비교해 진행 여부를 판단).
+
+    "더보기" 버튼은 리스트가 끝에 도달해도 사라지지 않을 수 있다(리뷰
+    리스트에서 실측 확인된 동작) — 그래서 버튼 존재 여부(`count()==0`)는
+    보너스 조기 종료일 뿐, 연속 무진행 카운터가 실질적인 종료 조건이다.
+    """
+    consecutive_no_progress = 0
+    for _ in range(_MAX_LOAD_MORE_CLICKS):
+        more_button = page.get_by_text("더보기", exact=True)
+        if more_button.count() == 0:
+            break
+        before = progress_fn()
+        if page.get_by_test_id("backdrop").count() > 0:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+        try:
+            more_button.first.scroll_into_view_if_needed()
+            more_button.first.click(timeout=5_000)
+        except PlaywrightTimeoutError:
+            if page.get_by_test_id("backdrop").count() > 0:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
+        page.wait_for_timeout(_LOAD_MORE_WAIT_MS)
+        if progress_fn() > before:
+            consecutive_no_progress = 0
+        else:
+            consecutive_no_progress += 1
+            if consecutive_no_progress >= _MAX_CONSECUTIVE_NO_PROGRESS:
+                break
+
+
 def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]:
     """정산내역 화면(`/orders/billing`)에서 계정 전체 입금 배치
     (settle/history/summary) organic 응답을 가로챈다. 날짜 범위를 지정한 뒤
@@ -436,31 +603,8 @@ def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]
         page.wait_for_timeout(2_000)
 
         # 90일처럼 넓은 범위에서는 페이지당 10건으로 잘려 "더보기" 버튼이
-        # 나타난다(모듈 docstring 참고) — baemin_reviews.py의 "더보기" 반복
-        # 클릭 + 연속 무진행 카운터 패턴을 그대로 재사용한다.
-        consecutive_no_progress = 0
-        for _ in range(_MAX_LOAD_MORE_CLICKS):
-            more_button = page.get_by_text("더보기", exact=True)
-            if more_button.count() == 0:
-                break
-            before = len(responses)
-            if page.get_by_test_id("backdrop").count() > 0:
-                page.keyboard.press("Escape")
-                page.wait_for_timeout(500)
-            try:
-                more_button.first.scroll_into_view_if_needed()
-                more_button.first.click(timeout=5_000)
-            except PlaywrightTimeoutError:
-                if page.get_by_test_id("backdrop").count() > 0:
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(500)
-            page.wait_for_timeout(_LOAD_MORE_WAIT_MS)
-            if len(responses) > before:
-                consecutive_no_progress = 0
-            else:
-                consecutive_no_progress += 1
-                if consecutive_no_progress >= _MAX_CONSECUTIVE_NO_PROGRESS:
-                    break
+        # 나타난다(모듈 docstring 참고).
+        _click_load_more_until_done(page, lambda: len(responses))
     finally:
         page.remove_listener("response", _on_response)
 
@@ -468,3 +612,75 @@ def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]
         raise BaeminStatsScrapeError("정산내역 API 응답을 한 번도 확인하지 못했습니다")
 
     return responses
+
+
+def fetch_current_month_orders(page) -> list[dict]:
+    """주문내역 화면(`/orders/history`)에서 이번 달 1일부터 오늘까지의 주문
+    (`/v4/orders`) organic 응답을 가로챈다. 가게통계 화면의 월별 조회가
+    진행 중인 이번 달을 지원하지 않는다는 제약(모듈 docstring의 discrepancy
+    절 참고)을 보완하기 위한 함수 — 호출자는 이 함수가 반환한 `contents`
+    항목 리스트를 `map_orders_to_daily_sales`로 집계해 이번 달 매출만 별도로
+    채운다.
+
+    날짜 범위 지정은 정산내역(`/orders/billing`)과 완전히 동일한 공유
+    다이얼로그 컴포넌트를 그대로 재사용한다(실측 확인 — "날짜 직접 선택"
+    클릭 시 뜨는 "기간" 다이얼로그와 두 달짜리 캘린더 구조가 정산내역과
+    동일했다) — 그래서 `_open_date_range_picker`/`_set_date_range`를 그대로
+    호출한다. 페이지네이션도 "더보기" 버튼으로 동일하게 동작한다(실측
+    확인 — `_click_load_more_until_done` 재사용).
+
+    `shopNumbers` 쿼리 파라미터가 빈 채로 나가는 것을 실측 확인했다 —
+    가게통계(브랜드별로 shop_no를 순회해야 함)와 달리 이 화면은 계정에
+    연결된 모든 브랜드를 한 번의 조회로 함께 반환하므로, `fetch_shop_stats`와
+    달리 `shop_no` 인자를 받지 않고 브랜드별 반복도 하지 않는다.
+
+    반환값은 `contents` 항목을 `order.orderNumber` 기준으로 중복 제거해
+    합친 flat 리스트다(리뷰 리스트의 `id` 기준 dedup과 동일한 방어적
+    패턴 — 페이지네이션 경계에서 항목이 겹칠 가능성에 대비)."""
+    today = date.today()
+    start_date = today.replace(day=1).isoformat()
+    end_date = today.isoformat()
+
+    collected: dict[object, dict] = {}
+    observed = {"any": False}
+
+    def _on_response(response) -> None:
+        url = response.url
+        if urlparse(url).path != "/v4/orders":
+            return
+        observed["any"] = True
+        if response.status != 200:
+            return
+        try:
+            body = response.json()
+        except Exception:
+            return
+        for item in body.get("contents", []):
+            order_number = item.get("order", {}).get("orderNumber")
+            key = order_number if order_number is not None else id(item)
+            collected[key] = item
+
+    page.on("response", _on_response)
+    try:
+        try:
+            page.goto("https://self.baemin.com/orders/history")
+        except Exception as e:
+            raise BaeminStatsScrapeError(f"주문내역 페이지 이동에 실패했습니다: {e}") from e
+
+        page.wait_for_timeout(2_000)
+        _dismiss_backdrop_if_present(page)
+        try:
+            _open_date_range_picker(page)
+            _set_date_range(page, start_date, end_date)
+        except PlaywrightTimeoutError as e:
+            raise BaeminStatsScrapeError(f"주문내역 날짜 범위 지정에 실패했습니다: {e}") from e
+        page.wait_for_timeout(2_000)
+
+        _click_load_more_until_done(page, lambda: len(collected))
+    finally:
+        page.remove_listener("response", _on_response)
+
+    if not observed["any"]:
+        raise BaeminStatsScrapeError("주문내역 API 응답을 한 번도 확인하지 못했습니다")
+
+    return list(collected.values())
