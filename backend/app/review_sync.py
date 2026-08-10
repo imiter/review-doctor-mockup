@@ -13,9 +13,9 @@ from sqlalchemy.orm import Session
 
 from app.credential_crypto import CredentialCryptoError, decrypt_credential
 from app.db import SessionLocal
-from app.models import BaeminShopBrand, Review, ReviewSyncJob, StorePlatformConnection
+from app.models import BaeminShopBrand, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
-from scrapers.baemin_reviews import BaeminScrapeError, fetch_all_reviews, map_review
+from scrapers.baemin_reviews import BaeminScrapeError, extract_owner_reply, fetch_all_reviews, map_review
 
 
 def upsert_shop_brand(db: Session, connection_id: int, shop_no: int, shop_name: str) -> None:
@@ -91,10 +91,17 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
 
             try:
                 raw_reviews = fetch_all_reviews(session.page, shop_no)
-                mapped = [
-                    map_review(
-                        raw, store_id=job.store_id, platform_id=job.platform_id,
-                        platform_shop_no=str(shop_no),
+                # raw를 map_review 결과와 함께 들고 있는다 — 신규로 실제
+                # INSERT하는 리뷰에 대해서만 extract_owner_reply()로 이미
+                # 달린 사장님 답글을 review_replies에 같이 적재하기 위해서다
+                # (raw 원본이 없으면 답글 내용을 다시 알아낼 방법이 없다).
+                mapped_with_raw = [
+                    (
+                        raw,
+                        map_review(
+                            raw, store_id=job.store_id, platform_id=job.platform_id,
+                            platform_shop_no=str(shop_no),
+                        ),
                     )
                     for raw in raw_reviews
                     if raw.get("displayStatus", "DISPLAY") == "DISPLAY"
@@ -107,11 +114,23 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 continue
 
             succeeded_any = True
-            total_fetched += len(mapped)
-            for m in mapped:
+            total_fetched += len(mapped_with_raw)
+            for raw, m in mapped_with_raw:
                 if m["external_review_id"] in existing_ids:
                     continue
-                db.add(Review(**m))
+                review = Review(**m)
+                db.add(review)
+                # review_replies가 review_id FK로 참조하려면 실제 id가
+                # 필요하다 — autoflush=False(app.db.SessionLocal)라 명시적으로
+                # flush해야 방금 만든 review의 id가 채워진다.
+                db.flush()
+                owner_reply = extract_owner_reply(raw)
+                if owner_reply is not None:
+                    reply_content, replied_at = owner_reply
+                    db.add(ReviewReply(
+                        review_id=review.id, reply_type="final", style_id=None,
+                        content=reply_content, created_at=replied_at,
+                    ))
                 existing_ids.add(m["external_review_id"])
                 total_inserted += 1
     finally:

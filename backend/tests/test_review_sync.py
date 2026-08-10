@@ -4,7 +4,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.credential_crypto import CredentialCryptoError, encrypt_credential
-from app.models import BaeminShopBrand, Review, ReviewSyncJob, StorePlatformConnection
+from app.models import BaeminShopBrand, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
 from app.review_sync import sync_reviews_for_job
 from scrapers.baemin_auth import BaeminLoginError
 from scrapers.baemin_reviews import BaeminScrapeError
@@ -23,6 +23,17 @@ _RAW_HIDDEN = {
     "id": 1003, "rating": 1.0, "contents": "숨김 리뷰", "memberNickname": "숨김고객",
     "orderCount": 1, "menus": [{"name": "메뉴"}], "createdAt": "2026-08-03T10:00:00+09:00",
     "displayStatus": "HIDDEN",
+}
+_RAW_ALREADY_REPLIED = {
+    "id": 1004, "rating": 5.0, "contents": "이미 사장님이 답글 단 리뷰", "memberNickname": "답글받은고객",
+    "orderCount": 1, "menus": [{"name": "메뉴"}], "createdAt": "2026-08-04T10:00:00+09:00",
+    "displayStatus": "DISPLAY",
+    "comments": [{
+        # 실 계정에서 확인한 실제 형식: 답글의 createdAt은 타임존 오프셋이 없는
+        # naive datetime 문자열이다(리뷰 자체의 createdAt과는 다르다).
+        "id": 5001, "managerNickname": "사장님", "contents": "감사합니다! 또 방문해주세요.",
+        "displayType": "CEO", "displayStatus": "DISPLAY", "createdAt": "2026-08-04T18:00:00.123456",
+    }],
 }
 
 
@@ -84,6 +95,36 @@ def test_sync_inserts_new_reviews_and_skips_duplicates_and_hidden(db_session, sy
     inserted = db_session.query(Review).filter_by(external_review_id=1002).one()
     assert inserted.customer_nickname == "새고객"
     assert inserted.menu_summary == "새메뉴"
+
+
+def test_sync_captures_owner_reply_already_on_baemin_as_final_reply(db_session, sync_setup, monkeypatch):
+    # 배민에 이미 사장님이 직접 단 답글이 있는 리뷰는 우리 DB에도 그 답글
+    # 내용을 review_replies(final)로 같이 적재해야 하고, 리뷰 자체 상태도
+    # "answered"여야 한다 — 안 그러면 이미 답한 리뷰를 앱이 "미답변"으로
+    # 잘못 보여주게 된다.
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_all_reviews",
+        lambda page, shop_no: [_RAW_ALREADY_REPLIED],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert job.reviews_inserted == 1
+
+    review = db_session.query(Review).filter_by(external_review_id=1004).one()
+    assert review.status == "answered"
+
+    reply = db_session.query(ReviewReply).filter_by(review_id=review.id).one()
+    assert reply.reply_type == "final"
+    assert reply.style_id is None
+    assert reply.content == "감사합니다! 또 방문해주세요."
+    assert reply.created_at == datetime.fromisoformat("2026-08-04T18:00:00.123456")
 
 
 def test_sync_records_login_failure(db_session, sync_setup, monkeypatch):

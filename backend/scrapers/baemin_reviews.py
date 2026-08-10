@@ -192,6 +192,32 @@ def fetch_all_reviews(page, shop_no: int) -> list[dict]:
     return list(collected.values())
 
 
+def extract_owner_reply(raw: dict) -> tuple[str, datetime] | None:
+    """리뷰에 이미 달려있는 사장님 답글(있다면)의 (내용, 작성일시)를 반환한다.
+
+    실 계정 raw JSON 확인 결과(치밥대장, 답글 281/320건): 배민 리뷰 API의
+    각 리뷰는 `comments` 리스트를 갖고, 사장님이 실제로 배민 사장님광장에서
+    직접 단 답글은 그 리스트의 원소로 들어있다 — 화면상 리뷰 하나에 답글은
+    보통 0개 또는 1개다. 예시:
+
+        "comments": [{
+            "id": 2026072903000545, "managerNickname": "사장님",
+            "contents": "안녕하세요, ... 감사드리고, 좋은 하루 보내세요!",
+            "displayType": "CEO", "displayStatus": "DISPLAY",
+            "createdAt": "2026-07-30T19:03:18.416481", ...
+        }]
+
+    `displayStatus`가 `DISPLAY`가 아닌 답글(가려짐/삭제)은 실제 화면에도 안
+    보이므로 없는 것으로 취급한다. 리스트에 여러 건이 있으면 첫 번째
+    DISPLAY 답글만 쓴다(같은 리뷰에 사장님 답글이 여러 개 달리는 흐름은
+    확인되지 않았다).
+    """
+    for comment in raw.get("comments") or []:
+        if comment.get("displayStatus") == "DISPLAY":
+            return comment["contents"], datetime.fromisoformat(comment["createdAt"])
+    return None
+
+
 def map_review(raw: dict, store_id: int, platform_id: int, platform_shop_no: str) -> dict:
     menus = raw.get("menus") or []
     if not menus:
@@ -212,5 +238,10 @@ def map_review(raw: dict, store_id: int, platform_id: int, platform_shop_no: str
         "store_id": store_id,
         "platform_id": platform_id,
         "platform_shop_no": platform_shop_no,
-        "status": "unanswered",
+        # 배민에 이미 답글이 달려있는 리뷰는 우리 시스템에서도 "답글 완료"로
+        # 들어와야 한다 — 안 그러면 사장님이 이미 답한 리뷰를 우리 앱이
+        # "미답변"이라고 잘못 표시하게 된다. 실제 답글 내용은
+        # extract_owner_reply()가 담당하고(review_sync.py가 review_replies에
+        # 별도로 적재), 여기서는 상태만 결정한다.
+        "status": "answered" if extract_owner_reply(raw) else "unanswered",
     }

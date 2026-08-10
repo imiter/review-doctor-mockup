@@ -7,6 +7,7 @@ from scrapers.baemin_reviews import (
     _INITIAL_LOAD_WAIT_MS,
     _LOAD_MORE_WAIT_MS,
     BaeminScrapeError,
+    extract_owner_reply,
     fetch_all_reviews,
     map_review,
 )
@@ -20,6 +21,21 @@ _RAW_REVIEW = {
     "menus": [{"name": "양념치킨"}],
     "createdAt": "2026-08-04T21:12:33+09:00",
     "displayStatus": "DISPLAY",
+}
+
+# 실 계정(치밥대장)에서 확인한 실제 답글 달린 리뷰의 comments 구조.
+_OWNER_REPLY_COMMENT = {
+    "id": 2026072903000545,
+    "managerNo": 251001000193,
+    "managerNickname": "사장님",
+    "contents": "안녕하세요, 맛있게 드셨다니 정말 기쁩니다! 감사합니다.",
+    "displayType": "CEO",
+    "displayStatus": "DISPLAY",
+    "createdDate": "지난 달",
+    "createdAt": "2026-07-30T19:03:18.416481",
+    "modifiable": False,
+    "blockType": "NONE",
+    "blockMessage": "",
 }
 
 _SHOP_NO = 14804912
@@ -55,6 +71,46 @@ def test_map_review_summarizes_multiple_menus():
 def test_map_review_rounds_fractional_rating():
     raw = {**_RAW_REVIEW, "rating": 4.0}
     assert map_review(raw, store_id=7, platform_id=1, platform_shop_no="14804912")["rating"] == 4
+
+
+def test_extract_owner_reply_returns_none_when_no_comments():
+    assert extract_owner_reply(_RAW_REVIEW) is None
+    assert extract_owner_reply({**_RAW_REVIEW, "comments": []}) is None
+
+
+def test_extract_owner_reply_returns_content_and_timestamp():
+    raw = {**_RAW_REVIEW, "comments": [_OWNER_REPLY_COMMENT]}
+    result = extract_owner_reply(raw)
+    assert result == (
+        "안녕하세요, 맛있게 드셨다니 정말 기쁩니다! 감사합니다.",
+        datetime.fromisoformat("2026-07-30T19:03:18.416481"),
+    )
+
+
+def test_extract_owner_reply_ignores_hidden_comment():
+    hidden = {**_OWNER_REPLY_COMMENT, "displayStatus": "HIDDEN"}
+    raw = {**_RAW_REVIEW, "comments": [hidden]}
+    assert extract_owner_reply(raw) is None
+
+
+def test_extract_owner_reply_uses_first_display_comment_when_multiple():
+    second = {**_OWNER_REPLY_COMMENT, "id": 999, "contents": "두 번째 답글", "createdAt": "2026-08-01T00:00:00"}
+    raw = {**_RAW_REVIEW, "comments": [_OWNER_REPLY_COMMENT, second]}
+    content, _ = extract_owner_reply(raw)
+    assert content == _OWNER_REPLY_COMMENT["contents"]
+
+
+def test_map_review_status_is_answered_when_owner_already_replied():
+    raw = {**_RAW_REVIEW, "comments": [_OWNER_REPLY_COMMENT]}
+    mapped = map_review(raw, store_id=7, platform_id=1, platform_shop_no="14804912")
+    assert mapped["status"] == "answered"
+
+
+def test_map_review_status_is_unanswered_when_only_hidden_comment_present():
+    hidden = {**_OWNER_REPLY_COMMENT, "displayStatus": "HIDDEN"}
+    raw = {**_RAW_REVIEW, "comments": [hidden]}
+    mapped = map_review(raw, store_id=7, platform_id=1, platform_shop_no="14804912")
+    assert mapped["status"] == "unanswered"
 
 
 def test_map_review_handles_empty_content():
