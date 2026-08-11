@@ -28,6 +28,12 @@ type AdPerformance = {
   category: string; cpc: number; cvr: number; aov: number; acos: number | null; score: number | null;
   order_share: number | null; clicks: number; ad_orders: number;
 };
+type ClickPerformance = {
+  shop_no: string; period_days: number; ad_spend: number; impressions: number; clicks: number;
+  ad_orders: number; ad_revenue: number; cpc: number; cvr: number; aov: number;
+  acos: number | null; score: number | null;
+};
+type ShopBrand = { shop_no: string; shop_name: string };
 type DailyRow = { date: string; amount: number };
 type RepurchaseRow = { metric_date: string; new_orders: number; repeat_orders: number; rate_raw: number; rate_adjusted: number };
 type BreakdownRow = { platform_name: string; sales_amount: number; commission_estimate: number; payment_fee_estimate: number; net_estimate: number; actual_deposit: number };
@@ -50,19 +56,19 @@ function ClickableCard({ title, onClick, children }: { title: string; onClick: (
   );
 }
 
-function UgacleModal({ storeId }: { storeId: number }) {
-  const [perf, setPerf] = useState<AdPerformance | null>(null);
+function UgacleModal({ storeId, shopNo }: { storeId: number; shopNo: string }) {
+  const [perf, setPerf] = useState<ClickPerformance | null>(null);
   useEffect(() => {
-    apiGet<AdPerformance[]>(`/ads/performance?store_id=${storeId}&days=14`).then((rows) => setPerf(rows[0] ?? null));
-  }, [storeId]);
+    if (!shopNo) return;
+    apiGet<ClickPerformance>(`/ads/click-performance?store_id=${storeId}&shop_no=${shopNo}&days=14`).then(setPerf);
+  }, [storeId, shopNo]);
 
-  if (perf === null) return <p className="text-sm text-muted">등록된 광고 캠페인이 없어 우가클 점수를 계산할 수 없습니다.</p>;
+  if (perf === null) return <p className="text-sm text-muted">불러오는 중...</p>;
   return (
     <div>
       <p className="mb-4 rounded-lg bg-surface-2 p-3 text-xs text-muted">
-        조회 시점의 클릭당 단가 기준으로 지표를 계산합니다. 최근 14일 광고 성과 원본을 집계한 값입니다.
+        최근 14일 우리가게클릭(배민 실데이터) 성과를 집계한 값입니다.
       </p>
-      <p className="mb-3 text-sm font-medium">{perf.category} 캠페인</p>
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-lg bg-surface-2 p-3">
           <p className="text-xs text-muted">주문전환율 (CVR)</p>
@@ -73,9 +79,8 @@ function UgacleModal({ storeId }: { storeId: number }) {
           <p className="mt-1 text-lg font-bold">{perf.acos !== null ? `${perf.acos}%` : "—"}</p>
         </div>
         <div className="rounded-lg bg-surface-2 p-3">
-          <p className="text-xs text-muted">우가클 주문 비중</p>
-          <p className="mt-1 text-lg font-bold">{perf.order_share !== null ? percent(perf.order_share) : "—"}</p>
-          <p className="mt-0.5 text-[11px] text-muted">전체 주문 중 광고 경유 비중</p>
+          <p className="text-xs text-muted">노출수</p>
+          <p className="mt-1 text-lg font-bold">{perf.impressions.toLocaleString()}회</p>
         </div>
         <div className="rounded-lg bg-surface-2 p-3">
           <p className="text-xs text-muted">클릭당 단가 (CPC)</p>
@@ -190,6 +195,9 @@ export default function DashboardPage() {
   const [deposits, setDeposits] = useState<SummaryResponse | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [openModal, setOpenModal] = useState<"ugacle" | "sales_breakdown" | "repurchase" | "sales_daily" | "deposit_daily" | null>(null);
+  const [brands, setBrands] = useState<ShopBrand[]>([]);
+  const [selectedShopNo, setSelectedShopNo] = useState("");
+  const [clickPerf, setClickPerf] = useState<ClickPerformance | null>(null);
   // 매출/입금/재주문율 요약은 배민 실데이터만 보여준다 — 요기요/쿠팡이츠는
   // 아직 Mock 연동뿐이라 실데이터와 섞으면 숫자가 왜곡된다. "매출 분석" 카드를
   // 클릭해 여는 플랫폼별 비교 상세(SalesBreakdownModal)는 예외 — 거기서는
@@ -207,6 +215,19 @@ export default function DashboardPage() {
     apiGet<DashboardResponse>(`/dashboard?store_id=${storeId}&platform_id=${baeminPlatformId}`).then(setDashboard);
     apiGet<Alert[]>(`/alerts?store_id=${storeId}`).then((a) => setAlerts(a.slice(0, 5)));
   }, [storeId, baeminPlatformId]);
+
+  useEffect(() => {
+    if (!storeId) return;
+    apiGet<ShopBrand[]>(`/store-connections/baemin/shops?store_id=${storeId}`).then((b) => {
+      setBrands(b);
+      if (b.length > 0) setSelectedShopNo((prev) => prev || b[0].shop_no);
+    });
+  }, [storeId]);
+
+  useEffect(() => {
+    if (!storeId || !selectedShopNo) return;
+    apiGet<ClickPerformance>(`/ads/click-performance?store_id=${storeId}&shop_no=${selectedShopNo}&days=14`).then(setClickPerf);
+  }, [storeId, selectedShopNo]);
 
   useEffect(() => {
     if (!storeId || !baeminPlatformId) return;
@@ -238,10 +259,29 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <ClickableCard title="우가클 점수" onClick={() => setOpenModal("ugacle")}>
-          <p className="text-2xl font-bold text-accent">{dashboard.ad_performance?.score ?? "—"}점</p>
-          <p className="mt-1 text-xs text-muted">ACoS {dashboard.ad_performance?.acos ?? "—"}%</p>
-        </ClickableCard>
+        <div className="rounded-2xl border border-border-subtle bg-surface p-5">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-foreground">우가클 점수</h2>
+            {brands.length > 0 && (
+              <select
+                value={selectedShopNo}
+                onChange={(e) => setSelectedShopNo(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                className="rounded-lg border border-border-subtle bg-surface-2 px-2 py-1 text-xs outline-none focus:border-accent"
+              >
+                {brands.map((b) => (
+                  <option key={b.shop_no} value={b.shop_no}>
+                    {b.shop_name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          <button onClick={() => setOpenModal("ugacle")} className="w-full text-left">
+            <p className="text-2xl font-bold text-accent">{clickPerf?.score ?? "—"}점</p>
+            <p className="mt-1 text-xs text-muted">ACoS {clickPerf?.acos ?? "—"}%</p>
+          </button>
+        </div>
         <ClickableCard title="매출 분석" onClick={() => setOpenModal("sales_breakdown")}>
           <p className="text-2xl font-bold">{sales ? won(sales.total_sales ?? 0) : "…"}</p>
           <p className="mt-1 text-xs text-muted">정산표 · 손익 상세 보기</p>
@@ -294,7 +334,7 @@ export default function DashboardPage() {
       </div>
 
       {openModal === "ugacle" && (
-        <Modal title="우가클 점수" onClose={() => setOpenModal(null)}><UgacleModal storeId={storeId} /></Modal>
+        <Modal title="우가클 점수" onClose={() => setOpenModal(null)}><UgacleModal storeId={storeId} shopNo={selectedShopNo} /></Modal>
       )}
       {openModal === "sales_breakdown" && (
         <Modal title="매출 분석" onClose={() => setOpenModal(null)}><SalesBreakdownModal storeId={storeId} period={period} /></Modal>
