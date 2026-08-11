@@ -90,6 +90,8 @@ function UgacleModal({ storeId }: { storeId: number }) {
   );
 }
 
+type PlatformOption = { id: number; code: string; name: string; brand_color: string | null };
+
 function SalesBreakdownModal({ storeId, period }: { storeId: number; period: Period }) {
   const [data, setData] = useState<{ platforms: BreakdownRow[] } | null>(null);
   useEffect(() => {
@@ -121,11 +123,14 @@ function SalesBreakdownModal({ storeId, period }: { storeId: number; period: Per
   );
 }
 
-function RepurchaseModal({ storeId }: { storeId: number }) {
+function RepurchaseModal({ storeId, platformId }: { storeId: number; platformId: number | null }) {
   const [rows, setRows] = useState<RepurchaseRow[]>([]);
   useEffect(() => {
-    apiGet<RepurchaseRow[]>(`/repurchase/summary?store_id=${storeId}&days=14`).then((r) => setRows(r.reverse()));
-  }, [storeId]);
+    if (!platformId) return;
+    apiGet<RepurchaseRow[]>(`/repurchase/summary?store_id=${storeId}&platform_id=${platformId}&days=14`).then((r) =>
+      setRows(r.reverse())
+    );
+  }, [storeId, platformId]);
 
   return (
     <div className="space-y-2">
@@ -144,11 +149,18 @@ function RepurchaseModal({ storeId }: { storeId: number }) {
   );
 }
 
-function DailyAmountModal({ storeId, endpoint, positive }: { storeId: number; endpoint: string; positive: boolean }) {
+function DailyAmountModal({
+  storeId, endpoint, positive, platformId,
+}: {
+  storeId: number; endpoint: string; positive: boolean; platformId: number | null;
+}) {
   const [rows, setRows] = useState<DailyRow[]>([]);
   useEffect(() => {
-    apiGet<DailyRow[]>(`${endpoint}?store_id=${storeId}&days=14`).then((r) => setRows([...r].reverse()));
-  }, [storeId, endpoint]);
+    if (!platformId) return;
+    apiGet<DailyRow[]>(`${endpoint}?store_id=${storeId}&platform_id=${platformId}&days=14`).then((r) =>
+      setRows([...r].reverse())
+    );
+  }, [storeId, endpoint, platformId]);
 
   const max = Math.max(1, ...rows.map((r) => r.amount));
   return (
@@ -178,18 +190,29 @@ export default function DashboardPage() {
   const [deposits, setDeposits] = useState<SummaryResponse | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [openModal, setOpenModal] = useState<"ugacle" | "sales_breakdown" | "repurchase" | "sales_daily" | "deposit_daily" | null>(null);
+  // 매출/입금/재주문율 요약은 배민 실데이터만 보여준다 — 요기요/쿠팡이츠는
+  // 아직 Mock 연동뿐이라 실데이터와 섞으면 숫자가 왜곡된다. "매출 분석" 카드를
+  // 클릭해 여는 플랫폼별 비교 상세(SalesBreakdownModal)는 예외 — 거기서는
+  // 플랫폼 간 비교 자체가 목적이라 전체를 그대로 보여준다.
+  const [baeminPlatformId, setBaeminPlatformId] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!storeId) return;
-    apiGet<DashboardResponse>(`/dashboard?store_id=${storeId}`).then(setDashboard);
+    apiGet<PlatformOption[]>("/platforms").then((rows) => {
+      setBaeminPlatformId(rows.find((p) => p.code === "baemin")?.id ?? null);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!storeId || !baeminPlatformId) return;
+    apiGet<DashboardResponse>(`/dashboard?store_id=${storeId}&platform_id=${baeminPlatformId}`).then(setDashboard);
     apiGet<Alert[]>(`/alerts?store_id=${storeId}`).then((a) => setAlerts(a.slice(0, 5)));
-  }, [storeId]);
+  }, [storeId, baeminPlatformId]);
 
   useEffect(() => {
-    if (!storeId) return;
-    apiGet<SummaryResponse>(`/sales/summary?period=${period}&store_id=${storeId}`).then(setSales);
-    apiGet<SummaryResponse>(`/deposits/summary?period=${period}&store_id=${storeId}`).then(setDeposits);
-  }, [storeId, period]);
+    if (!storeId || !baeminPlatformId) return;
+    apiGet<SummaryResponse>(`/sales/summary?period=${period}&store_id=${storeId}&platform_id=${baeminPlatformId}`).then(setSales);
+    apiGet<SummaryResponse>(`/deposits/summary?period=${period}&store_id=${storeId}&platform_id=${baeminPlatformId}`).then(setDeposits);
+  }, [storeId, period, baeminPlatformId]);
 
   if (!dashboard || !storeId) return <p className="text-sm text-muted">불러오는 중...</p>;
 
@@ -277,13 +300,13 @@ export default function DashboardPage() {
         <Modal title="매출 분석" onClose={() => setOpenModal(null)}><SalesBreakdownModal storeId={storeId} period={period} /></Modal>
       )}
       {openModal === "repurchase" && (
-        <Modal title="재주문율" onClose={() => setOpenModal(null)}><RepurchaseModal storeId={storeId} /></Modal>
+        <Modal title="재주문율" onClose={() => setOpenModal(null)}><RepurchaseModal storeId={storeId} platformId={baeminPlatformId} /></Modal>
       )}
       {openModal === "sales_daily" && (
-        <Modal title="일별 매출" onClose={() => setOpenModal(null)}><DailyAmountModal storeId={storeId} endpoint="/sales/daily" positive={false} /></Modal>
+        <Modal title="일별 매출" onClose={() => setOpenModal(null)}><DailyAmountModal storeId={storeId} endpoint="/sales/daily" positive={false} platformId={baeminPlatformId} /></Modal>
       )}
       {openModal === "deposit_daily" && (
-        <Modal title="일별 입금" onClose={() => setOpenModal(null)}><DailyAmountModal storeId={storeId} endpoint="/deposits/daily" positive={true} /></Modal>
+        <Modal title="일별 입금" onClose={() => setOpenModal(null)}><DailyAmountModal storeId={storeId} endpoint="/deposits/daily" positive={true} platformId={baeminPlatformId} /></Modal>
       )}
     </div>
   );

@@ -23,31 +23,40 @@ router = APIRouter(tags=["dashboard"])
 
 
 @router.get("/dashboard")
-def dashboard(store_id: int | None = None, user=Depends(get_current_user), db: Session = Depends(get_db)):
+def dashboard(
+    store_id: int | None = None, platform_id: int | None = None,
+    user=Depends(get_current_user), db: Session = Depends(get_db),
+):
     sid = store_id or get_user_default_store_id(user, db)
     store = db.get(Store, sid)
     today = date.today()
 
-    sales_today = db.scalar(
-        select(func.coalesce(func.sum(DailySettlement.sales_amount), 0))
-        .where(DailySettlement.store_id == sid, DailySettlement.settle_date == today)
+    sales_today_stmt = select(func.coalesce(func.sum(DailySettlement.sales_amount), 0)).where(
+        DailySettlement.store_id == sid, DailySettlement.settle_date == today,
     )
-    deposit_today = db.scalar(
-        select(func.coalesce(func.sum(DailySettlement.deposit_amount), 0))
-        .where(DailySettlement.store_id == sid, DailySettlement.settle_date == today)
+    deposit_today_stmt = select(func.coalesce(func.sum(DailySettlement.deposit_amount), 0)).where(
+        DailySettlement.store_id == sid, DailySettlement.settle_date == today,
     )
+    latest_repurchase_stmt = (
+        select(RepurchaseMetric)
+        .where(RepurchaseMetric.store_id == sid)
+        .order_by(RepurchaseMetric.metric_date.desc())
+        .limit(1)
+    )
+    if platform_id:
+        sales_today_stmt = sales_today_stmt.where(DailySettlement.platform_id == platform_id)
+        deposit_today_stmt = deposit_today_stmt.where(DailySettlement.platform_id == platform_id)
+        latest_repurchase_stmt = latest_repurchase_stmt.where(RepurchaseMetric.platform_id == platform_id)
+
+    sales_today = db.scalar(sales_today_stmt)
+    deposit_today = db.scalar(deposit_today_stmt)
 
     unanswered = db.scalar(
         select(func.count(Review.id))
         .where(Review.store_id == sid, Review.status == "unanswered")
     )
 
-    latest_repurchase = db.scalar(
-        select(RepurchaseMetric)
-        .where(RepurchaseMetric.store_id == sid)
-        .order_by(RepurchaseMetric.metric_date.desc())
-        .limit(1)
-    )
+    latest_repurchase = db.scalar(latest_repurchase_stmt)
 
     primary_campaign = db.scalar(
         select(AdCampaign).where(AdCampaign.store_id == sid).order_by(AdCampaign.id).limit(1)

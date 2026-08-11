@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from app.models import Alert, Order, RepurchaseMetric, Review
+from app.models import Alert, DailySettlement, Order, RepurchaseMetric, Review
 
 
 def test_dashboard_counts_unanswered_reviews(client, db_session, seeded_user, platforms, auth_headers):
@@ -45,6 +45,46 @@ def test_dashboard_shows_latest_repurchase_rate(client, db_session, seeded_user,
 
     body = client.get("/dashboard", headers=auth_headers).json()
     assert body["repurchase_rate_adjusted"] == 0.19  # 가장 최근 날짜 값
+
+
+def test_dashboard_platform_id_filters_sales_and_deposit_today(client, db_session, seeded_user, platforms, auth_headers):
+    """platform_id를 지정하면 오늘 매출/입금이 그 플랫폼만 집계돼야 한다 —
+    지정 안 하면(기존 동작) 모든 플랫폼(요기요/쿠팡이츠 Mock 포함)이 합산된다."""
+    today = date.today()
+    db_session.add_all([
+        DailySettlement(store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+                         settle_date=today, sales_amount=50000, deposit_amount=40000),
+        DailySettlement(store_id=seeded_user["store"].id, platform_id=platforms["yogiyo"].id,
+                         settle_date=today, sales_amount=30000, deposit_amount=20000),
+    ])
+    db_session.commit()
+
+    body_all = client.get("/dashboard", headers=auth_headers).json()
+    assert body_all["sales_today"] == 80000
+    assert body_all["deposit_today"] == 60000
+
+    body_baemin = client.get(
+        f"/dashboard?platform_id={platforms['baemin'].id}", headers=auth_headers
+    ).json()
+    assert body_baemin["sales_today"] == 50000
+    assert body_baemin["deposit_today"] == 40000
+
+
+def test_dashboard_platform_id_filters_latest_repurchase_rate(client, db_session, seeded_user, platforms, auth_headers):
+    """platform_id를 지정하면 그 플랫폼의 최신 재주문율만 반환해야 한다 —
+    지정 안 하면 다른 플랫폼의 더 최근 날짜 행이 섞여 들어올 수 있다."""
+    db_session.add_all([
+        RepurchaseMetric(store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+                          metric_date=date(2026, 7, 20), new_orders=10, repeat_orders=2, rate_raw="0.2000", rate_adjusted="0.2000"),
+        RepurchaseMetric(store_id=seeded_user["store"].id, platform_id=platforms["yogiyo"].id,
+                          metric_date=date(2026, 7, 25), new_orders=10, repeat_orders=5, rate_raw="0.5000", rate_adjusted="0.5000"),
+    ])
+    db_session.commit()
+
+    body_baemin = client.get(
+        f"/dashboard?platform_id={platforms['baemin'].id}", headers=auth_headers
+    ).json()
+    assert body_baemin["repurchase_rate_adjusted"] == 0.2  # 요기요의 더 최근 값(0.5)이 섞이면 안 됨
 
 
 def test_dashboard_counts_unread_alerts_only(client, db_session, seeded_user, auth_headers):
