@@ -1,4 +1,4 @@
-"""SQLAlchemy 모델 — schema.sql의 20개 테이블과 1:1 대응.
+"""SQLAlchemy 모델 — schema.sql의 21개 테이블과 1:1 대응.
 
 스키마 정본은 저장소 루트 schema.sql이다. 여기서는 컬럼과 관계만 미러링하며,
 제약(CHECK, ON DELETE 정책)은 DB 레벨에 이미 존재한다.
@@ -251,6 +251,22 @@ class AdPerformanceMetric(Base):
     campaign_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ad_campaigns.id"))
     metric_date: Mapped[date]
     ad_spend: Mapped[int] = mapped_column(default=0)
+    clicks: Mapped[int] = mapped_column(default=0)
+    ad_orders: Mapped[int] = mapped_column(default=0)
+    ad_revenue: Mapped[int] = mapped_column(default=0)
+
+
+class BrandAdClickMetric(Base):
+    __tablename__ = "brand_ad_click_metrics"
+    __table_args__ = (UniqueConstraint("store_id", "platform_id", "shop_no", "metric_date"),)
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("stores.id"))
+    platform_id: Mapped[int] = mapped_column(ForeignKey("platforms.id"))
+    shop_no: Mapped[str] = mapped_column(String(20))
+    metric_date: Mapped[date]
+    ad_spend: Mapped[int] = mapped_column(default=0)
+    impressions: Mapped[int] = mapped_column(default=0)
     clicks: Mapped[int] = mapped_column(default=0)
     ad_orders: Mapped[int] = mapped_column(default=0)
     ad_revenue: Mapped[int] = mapped_column(default=0)

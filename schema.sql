@@ -1,7 +1,7 @@
 -- ============================================================================
 -- Delivery Review & Store Insight MVP — PostgreSQL Schema
 -- ============================================================================
--- 20개 테이블. 모든 FK에 ON DELETE 정책 명시.
+-- 21개 테이블. 모든 FK에 ON DELETE 정책 명시.
 --
 -- 삭제 정책 원칙:
 --   ON DELETE CASCADE  — 부모에 종속된 소유 데이터 (사장 탈퇴 → 매장/주문/리뷰 연쇄 삭제)
@@ -19,7 +19,7 @@
 BEGIN;
 
 DROP TABLE IF EXISTS
-    baemin_shop_brands, review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
+    brand_ad_click_metrics, baemin_shop_brands, review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
     ad_performance_metrics, ad_campaigns, repurchase_metrics, daily_settlements, review_replies,
     reviews, orders, reply_settings, reply_styles, subscriptions, store_platform_connections,
     platforms, stores, users
@@ -353,6 +353,26 @@ CREATE TABLE baemin_shop_brands (
     shop_no       VARCHAR(20)  NOT NULL,
     shop_name     VARCHAR(200) NOT NULL,
     UNIQUE (connection_id, shop_no)
+);
+
+-- ----------------------------------------------------------------------------
+-- 21. brand_ad_click_metrics — 브랜드(우리가게클릭 캠페인)별 일별 광고 성과 원본.
+--     계산값(CPC·CVR·AOV·ACoS·점수)은 저장하지 않는다 (ad_performance_metrics와
+--     같은 정규화 원칙) — acos.py가 조회 시 실제 공식으로 계산한다.
+--     ad_campaigns(카테고리 기반, 광고 순위 모니터링용)와는 완전히 별개다.
+-- ----------------------------------------------------------------------------
+CREATE TABLE brand_ad_click_metrics (
+    id          BIGSERIAL PRIMARY KEY,
+    store_id    BIGINT      NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
+    platform_id INT         NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
+    shop_no     VARCHAR(20) NOT NULL,  -- baemin_shop_brands.shop_no와 동일한 값
+    metric_date DATE        NOT NULL,
+    ad_spend    INT NOT NULL DEFAULT 0 CHECK (ad_spend    >= 0),  -- spentBudget
+    impressions INT NOT NULL DEFAULT 0 CHECK (impressions >= 0),  -- displayCount
+    clicks      INT NOT NULL DEFAULT 0 CHECK (clicks      >= 0),  -- clickCount
+    ad_orders   INT NOT NULL DEFAULT 0 CHECK (ad_orders   >= 0),  -- orderCount
+    ad_revenue  INT NOT NULL DEFAULT 0 CHECK (ad_revenue  >= 0),  -- orderAmounts
+    UNIQUE (store_id, platform_id, shop_no, metric_date)
 );
 
 COMMIT;
