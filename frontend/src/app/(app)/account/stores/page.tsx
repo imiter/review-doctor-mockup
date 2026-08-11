@@ -139,7 +139,7 @@ export default function StoreConnectionsPage() {
         <h1 className="text-xl font-semibold">가게 연결</h1>
         <p className="text-sm text-muted">
           매장 {connections.length}개 플랫폼에 연결되었습니다. 배민은 실제 사장님광장 계정으로 로그인해
-          리뷰를 가져올 수 있습니다. 그 외 플랫폼은 Mock 연동이며 실제 계정 연동은 하지 않습니다.
+          리뷰·매출·입금·재주문율을 가져올 수 있습니다. 그 외 플랫폼은 Mock 연동이며 실제 계정 연동은 하지 않습니다.
         </p>
       </div>
 
@@ -195,14 +195,22 @@ export default function StoreConnectionsPage() {
                   {syncingId === c.id ? "동기화 중..." : "데이터 동기화"}
                 </button>
                 {syncStatus && (
-                  <p className="mt-2 text-xs text-muted">
-                    {syncStatus.status === "success" &&
-                      `${syncStatus.reviews_fetched}개 중 ${syncStatus.reviews_inserted}개 신규 추가`}
-                    {syncStatus.status === "failed" && (
-                      <span className="text-danger">동기화 실패: {syncStatus.error_message}</span>
+                  <>
+                    <p className="mt-2 text-xs text-muted">
+                      {syncStatus.status === "success" &&
+                        `${syncStatus.reviews_fetched}개 중 ${syncStatus.reviews_inserted}개 신규 추가`}
+                      {syncStatus.status === "failed" && (
+                        <span className="text-danger">동기화 실패: {syncStatus.error_message}</span>
+                      )}
+                      {(syncStatus.status === "pending" || syncStatus.status === "running") && "진행 중..."}
+                    </p>
+                    {/* 백엔드는 부분 실패(예: crmInfo/재주문율 누락)를 status: "success"로
+                        유지한 채 error_message에만 남긴다 — status가 실패가 아니어도
+                        error_message는 항상 보여줘야 조용히 묻히지 않는다. */}
+                    {syncStatus.status !== "failed" && syncStatus.error_message && (
+                      <p className="mt-1 text-xs text-warning">{syncStatus.error_message}</p>
                     )}
-                    {(syncStatus.status === "pending" || syncStatus.status === "running") && "진행 중..."}
-                  </p>
+                  </>
                 )}
               </div>
             )}
