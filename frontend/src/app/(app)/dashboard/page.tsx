@@ -261,13 +261,13 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <div className="rounded-2xl border border-border-subtle bg-surface p-5">
           <div className="mb-3 flex items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold text-foreground">우가클 점수</h2>
+            <h2 className="shrink-0 text-sm font-semibold text-foreground">우가클 점수</h2>
             {brands.length > 0 && (
               <select
                 value={selectedShopNo}
                 onChange={(e) => setSelectedShopNo(e.target.value)}
                 onClick={(e) => e.stopPropagation()}
-                className="rounded-lg border border-border-subtle bg-surface-2 px-2 py-1 text-xs outline-none focus:border-accent"
+                className="max-w-[140px] truncate rounded-lg border border-border-subtle bg-surface-2 px-2 py-1 text-xs outline-none focus:border-accent"
               >
                 {brands.map((b) => (
                   <option key={b.shop_no} value={b.shop_no}>
