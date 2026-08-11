@@ -53,13 +53,12 @@ persist된 마지막으로 조회했던 달이었다(실측 시점엔 우연히 
 다이얼로그로 scope하지 않으면 아래쪽 다이얼로그의 버튼을 잘못 클릭해
 포인터 이벤트가 가로채이는 것으로 확인됐다.
 
-**정산내역/주문내역 페이지네이션**: 좁은 기본 범위에서는 안 보이지만, 범위를
-넓히면(정산내역 90일, 주문내역은 최대 페이지당 10건) 리스트 하단에 리뷰
-리스트와 동일한 "더보기" 텍스트 버튼이 나타난다(실측 확인: 마우스 휠
-스크롤만으로는 추가 페이지가 로드되지 않았다 — "더보기" 클릭이 필요하다).
-`_click_load_more_until_done`이 `baemin_reviews.py`의 "더보기" 반복 클릭 +
-연속 무진행 카운터 패턴을 공유 헬퍼로 재사용하며, `fetch_account_settlement`와
-`fetch_current_month_orders` 둘 다 이걸 쓴다.
+**정산내역 페이지네이션**: 좁은 기본 범위에서는 안 보이지만, 범위를 넓히면
+(90일) 리스트 하단에 리뷰 리스트와 동일한 "더보기" 텍스트 버튼이 나타난다
+(실측 확인: 마우스 휠 스크롤만으로는 추가 페이지가 로드되지 않았다 —
+"더보기" 클릭이 필요하다). `_click_load_more_until_done`이
+`baemin_reviews.py`의 "더보기" 반복 클릭 + 연속 무진행 카운터 패턴을 공유
+헬퍼로 재사용하며, `fetch_account_settlement`는 이걸 쓴다.
 
 **주문내역(`/orders/history`)은 정산내역과 완전히 같은 날짜 범위 다이얼로그
 컴포넌트를 쓴다**(실측 확인, 2026-08-11 fix round) — "날짜 직접 선택" 버튼
@@ -71,6 +70,23 @@ persist된 마지막으로 조회했던 달이었다(실측 시점엔 우연히 
 빈 채로 나가는 것도 실측 확인했다 — 계정에 연결된 모든 브랜드를 한 번의
 조회로 함께 반환하므로, `fetch_shop_stats`처럼 shop_no별로 반복할 필요가
 없다.
+
+**정정 (2026-08-12, 실 계정 로컬 검증 중 발견) — 주문내역은 "더보기"가
+아니라 숫자 페이지네이션을 쓴다.** 위 "정산내역/주문내역 페이지네이션이
+동일하다"는 원래 서술은 틀렸다 — 실제 배포 전 로컬에서 실 계정으로 한
+달치(196건) 매출을 동기화해보니 대시보드 매출이 배민 사이트에서 직접 확인한
+값의 일부(10건, `limit=10&offset=0`)만 반영돼 있었다. 재조사 결과 주문내역
+화면에는 "더보기" 텍스트 버튼이 아예 없고(실측: `page.get_by_text("더보기",
+exact=True).count() == 0`, 스크롤을 여러 번 반복해도 추가 요청이 안
+나감), 대신 리스트 하단에 숫자 페이지네이션(`1 2 3 ... 20` + 접근성 이름
+`"다음"`인 다음-페이지 버튼)이 있다. `"다음"` 버튼을 클릭할 때마다
+`offset`이 10씩 늘어난 `/v4/orders` 요청이 새로 나가고, 마지막 페이지에서는
+버튼이 비활성화돼 클릭이 타임아웃 난다(실측: 20페이지·196건을 이 방식으로
+끝까지 수집해 8/1~8/11 전 구간이 채워지는 것까지 확인). `_click_load_more_until_done`은
+계속 `fetch_account_settlement`(정산내역, 실제로 "더보기"를 쓰는 화면)
+전용으로 남겨두고, `fetch_current_month_orders`는 별도의
+`_click_next_page_until_done`(숫자 페이지네이션 + 타임아웃 기반 종료)을
+쓰도록 고쳤다.
 
 ### crmInfo 재조사 결과 (fix round, 2026-08-11)
 
@@ -555,10 +571,10 @@ def _set_date_range(page, start_date: str, end_date: str) -> None:
 def _click_load_more_until_done(page, progress_fn) -> None:
     """"더보기" 버튼을 연속 무진행이 감지될 때까지 반복 클릭한다.
     `baemin_reviews.py`의 리뷰 리스트 페이지네이션과 동일한 패턴이고, 정산
-    내역·주문내역 화면에서도 실측으로 동일하게 확인됐다(리스트 하단에
-    "더보기" 텍스트 버튼, 스크롤만으로는 추가 페이지가 로드되지 않음) —
-    세 화면(리뷰/정산/주문내역) 모두 같은 디자인시스템 컴포넌트를 쓰는
-    것으로 보인다. `progress_fn()`은 현재까지 수집한 항목 수를 반환해야
+    내역 화면에서도 실측으로 동일하게 확인됐다(리스트 하단에 "더보기" 텍스트
+    버튼, 스크롤만으로는 추가 페이지가 로드되지 않음). 주문내역 화면은 이
+    패턴을 쓰지 않는다 — `_click_next_page_until_done` 참고.
+    `progress_fn()`은 현재까지 수집한 항목 수를 반환해야
     한다(클릭 전후로 비교해 진행 여부를 판단).
 
     "더보기" 버튼은 리스트가 끝에 도달해도 사라지지 않을 수 있다(리뷰
@@ -588,6 +604,32 @@ def _click_load_more_until_done(page, progress_fn) -> None:
             consecutive_no_progress += 1
             if consecutive_no_progress >= _MAX_CONSECUTIVE_NO_PROGRESS:
                 break
+
+
+def _click_next_page_until_done(page, progress_fn) -> None:
+    """주문내역 화면의 숫자 페이지네이션(`1 2 3 ... 20` + 접근성 이름
+    `"다음"`인 다음-페이지 버튼)을 진행이 없을 때까지 반복 클릭한다.
+    `_click_load_more_until_done`("더보기" 텍스트 버튼)과는 다른 UI라 별도
+    헬퍼로 분리했다(모듈 docstring의 2026-08-12 정정 절 참고). 클릭할
+    때마다 `offset`이 10씩 늘어난 `/v4/orders` 요청이 새로 나간다(실측
+    확인). 마지막 페이지에서는 "다음" 버튼이 비활성화돼 클릭 자체가
+    타임아웃 나므로, 그 타임아웃을 정상 종료 신호로 다룬다 — 버튼이 여전히
+    DOM에 남아있어 `count()==0`으로는 끝을 구분할 수 없기 때문이다(실측
+    확인). `progress_fn()`은 `_click_load_more_until_done`과 동일하게
+    현재까지 수집한 항목 수를 반환해야 한다."""
+    for _ in range(_MAX_LOAD_MORE_CLICKS):
+        next_button = page.get_by_role("button", name="다음")
+        if next_button.count() == 0:
+            break
+        before = progress_fn()
+        try:
+            next_button.first.scroll_into_view_if_needed()
+            next_button.first.click(timeout=5_000)
+        except PlaywrightTimeoutError:
+            break
+        page.wait_for_timeout(_LOAD_MORE_WAIT_MS)
+        if progress_fn() <= before:
+            break
 
 
 def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]:
@@ -649,8 +691,10 @@ def fetch_current_month_orders(page) -> list[dict]:
     다이얼로그 컴포넌트를 그대로 재사용한다(실측 확인 — "날짜 직접 선택"
     클릭 시 뜨는 "기간" 다이얼로그와 두 달짜리 캘린더 구조가 정산내역과
     동일했다) — 그래서 `_open_date_range_picker`/`_set_date_range`를 그대로
-    호출한다. 페이지네이션도 "더보기" 버튼으로 동일하게 동작한다(실측
-    확인 — `_click_load_more_until_done` 재사용).
+    호출한다. 페이지네이션은 정산내역과 다르다 — "더보기" 버튼이 없고
+    숫자 페이지네이션을 쓴다(모듈 docstring의 2026-08-12 정정 절 참고) —
+    그래서 `_click_load_more_until_done`이 아니라 `_click_next_page_until_done`을
+    쓴다.
 
     `shopNumbers` 쿼리 파라미터가 빈 채로 나가는 것을 실측 확인했다 —
     가게통계(브랜드별로 shop_no를 순회해야 함)와 달리 이 화면은 계정에
@@ -699,7 +743,7 @@ def fetch_current_month_orders(page) -> list[dict]:
             raise BaeminStatsScrapeError(f"주문내역 날짜 범위 지정에 실패했습니다: {e}") from e
         page.wait_for_timeout(2_000)
 
-        _click_load_more_until_done(page, lambda: len(collected))
+        _click_next_page_until_done(page, lambda: len(collected))
     finally:
         page.remove_listener("response", _on_response)
 
