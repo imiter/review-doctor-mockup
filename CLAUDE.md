@@ -125,6 +125,29 @@ API에 없어 계정(사업자) 전체 합산으로만 나오는 것을 확인�
 `docs/superpowers/specs/2026-08-11-baemin-sales-deposit-repurchase-design.md`
 참고.
 
+### 배민 우리가게클릭(우가클) 브랜드별 실데이터 연동 (예외 허용)
+원래 "우가클 점수"는 카테고리 기반 `ad_campaigns`/`ad_performance_metrics`의
+Mock 데이터로만 계산됐으나, 실 SaaS 전환 로드맵 3번의 다음 단계로 브랜드별
+실데이터를 연동하기로 결정했다(2026-08-12). 사장님광장의 "광고·서비스관리
+→ 우리가게클릭 → 마케팅 성과" 화면(`GET
+/v2/statistics/campaign/cpc/metrics/{shopNumber}`)의 organic 응답을 리뷰·
+매출과 동일한 방식으로 브랜드(shop_no)별로 가로챈다. 이 화면은 매출/입금과
+달리 브랜드 단위로만 조회되고 계정 전체 통합 화면이 없어서, 계정 전체
+합산이 아니라 **브랜드별로 완전히 분리해서** 저장하기로 결정했다 — 새 테이블
+`brand_ad_click_metrics`를 추가했다(기존 `ad_campaigns`/`ad_performance_metrics`/
+`ad_rank_snapshots`, 카테고리 기반 "광고 순위 모니터링"은 전혀 건드리지
+않고 완전히 별개로 남아있다). 계산값(CPC/CVR/AOV/ACoS/점수)은 저장하지
+않고 `acos.py`가 조회 시 실제 공식으로 계산하는 기존 정규화 원칙을
+그대로 따른다. 백필은 이번 달 포함 최근 3개월(매출/입금과 동일한 폭),
+"우가클 주문 비중"(전체 주문 대비 광고 경유 비중)은 분모가 브랜드별로 안
+나뉘어 왜곡되므로 범위 밖으로 뺐다. "가게 연결" 화면의 "데이터 동기화"
+버튼이 리뷰·매출·입금·재주문율에 이어 브랜드별 우가클 성과까지 한 번에
+가져온다. "절대 금지"의 "실제 CPC 자동 입찰 금지" 원칙은 그대로 유효—
+이번은 성과 조회(읽기)만이고 캠페인 설정을 바꾸는 기능은 아니다. 설계
+상세는
+`docs/superpowers/specs/2026-08-12-baemin-brand-ad-click-performance-design.md`
+참고.
+
 ### 모바일 앱 (예외 허용)
 원래 "Flutter 앱 구현 금지"로 모바일 앱 자체를 범위 밖으로 뒀으나, 웹과 같은
 백엔드를 쓰는 React Native 앱을 추가하기로 결정했다(추후 결정으로 예외 허용 —
@@ -142,12 +165,13 @@ API에 없어 계정(사업자) 전체 합산으로만 나오는 것을 확인�
 - users 테이블 컬럼은 최소화: id, email, nickname, phone_hash,
   marketing_agreed, created_at.
 
-## DB 설계 (19개 테이블)
+## DB 설계 (21개 테이블)
 users, stores, platforms, store_platform_connections, subscriptions,
 orders, reviews, review_replies, reply_styles, reply_settings,
 daily_settlements, repurchase_metrics, ad_campaigns,
 ad_performance_metrics, ad_rank_snapshots, alerts, social_accounts,
-signup_verifications, review_sync_jobs.
+signup_verifications, review_sync_jobs, baemin_shop_brands,
+brand_ad_click_metrics.
 
 ### 테이블 용도
 - users: 사장 계정. 전화번호는 phone_hash로 비식별화.
@@ -178,8 +202,16 @@ signup_verifications, review_sync_jobs.
   'phone' 값도 허용하지만 현재 코드 경로에서는 만들지 않는다(휴대폰 인증 단계를
   가입 위자드에서 뺐기 때문 — 위 "이메일 인증" 절 참고).
 - review_sync_jobs: 배민 데이터 동기화 작업 상태(pending/running/success/failed).
-  리뷰뿐 아니라 매출/입금/재주문율도 같은 작업 안에서 함께 동기화한다.
-  "가게 연결" 화면의 "데이터 동기화" 버튼 → 백그라운드 작업 → 폴링에 쓰인다.
+  리뷰뿐 아니라 매출/입금/재주문율/우리가게클릭도 같은 작업 안에서 함께
+  동기화한다. "가게 연결" 화면의 "데이터 동기화" 버튼 → 백그라운드 작업 →
+  폴링에 쓰인다.
+- baemin_shop_brands: 배민 계정 하나에 딸린 여러 브랜드(매장) 목록. 로그인
+  시 발견되는 shopNo/매장명을 저장해 리뷰 관리 화면의 브랜드 선택
+  드롭다운에 쓴다.
+- brand_ad_click_metrics: 브랜드(shop_no)별 일별 우리가게클릭 광고 성과
+  원본(노출/클릭/주문/광고비/광고매출). 계정 전체 합산이 아니라 브랜드별로
+  완전히 분리 저장한다(우리가게클릭 화면 자체가 브랜드 단위로만 조회되기
+  때문). ad_campaigns(카테고리 기반, 광고 순위 모니터링용)와는 별개.
 
 ### 핵심 관계 (모든 관계에 외래키와 삭제 정책 명시)
 - users 1:N stores
@@ -195,6 +227,8 @@ signup_verifications, review_sync_jobs.
 - alerts는 store 참조
 - users 1:N social_accounts
 - review_sync_jobs는 store, platform 참조
+- baemin_shop_brands는 store_platform_connections 참조
+- brand_ad_click_metrics는 store와 platform 참조 (shop_no는 FK가 아니라 값만 저장)
 
 ### 정규화 원칙
 - 매출 요약은 별도 테이블로 저장하지 않는다. daily_settlements를 기간별로
