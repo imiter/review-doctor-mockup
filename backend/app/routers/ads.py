@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.acos import calculate_performance
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
-from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order, Store, User
+from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order, Platform, Store, User
 from scripts.ingest_rank_snapshots import ingest as ingest_csv
 
 router = APIRouter(tags=["ads"])
@@ -138,20 +138,25 @@ def ads_click_performance(
     sid = store_id or get_user_default_store_id(user, db)
     since = date.today() - timedelta(days=days)
 
-    agg = db.execute(
-        select(
-            func.coalesce(func.sum(BrandAdClickMetric.ad_spend), 0),
-            func.coalesce(func.sum(BrandAdClickMetric.impressions), 0),
-            func.coalesce(func.sum(BrandAdClickMetric.clicks), 0),
-            func.coalesce(func.sum(BrandAdClickMetric.ad_orders), 0),
-            func.coalesce(func.sum(BrandAdClickMetric.ad_revenue), 0),
-        ).where(
-            BrandAdClickMetric.store_id == sid,
-            BrandAdClickMetric.shop_no == shop_no,
-            BrandAdClickMetric.metric_date >= since,
-        )
-    ).one()
-    ad_spend, impressions, clicks, ad_orders, ad_revenue = agg
+    platform = db.scalar(select(Platform).where(Platform.code == "baemin"))
+    if platform is None:
+        ad_spend, impressions, clicks, ad_orders, ad_revenue = 0, 0, 0, 0, 0
+    else:
+        agg = db.execute(
+            select(
+                func.coalesce(func.sum(BrandAdClickMetric.ad_spend), 0),
+                func.coalesce(func.sum(BrandAdClickMetric.impressions), 0),
+                func.coalesce(func.sum(BrandAdClickMetric.clicks), 0),
+                func.coalesce(func.sum(BrandAdClickMetric.ad_orders), 0),
+                func.coalesce(func.sum(BrandAdClickMetric.ad_revenue), 0),
+            ).where(
+                BrandAdClickMetric.store_id == sid,
+                BrandAdClickMetric.platform_id == platform.id,
+                BrandAdClickMetric.shop_no == shop_no,
+                BrandAdClickMetric.metric_date >= since,
+            )
+        ).one()
+        ad_spend, impressions, clicks, ad_orders, ad_revenue = agg
     perf = calculate_performance(ad_spend, clicks, ad_orders, ad_revenue)
 
     return {
