@@ -654,6 +654,41 @@ def test_sync_isolates_current_month_orders_failure_from_completed_months_sales(
     assert "주문내역" in job.error_message
 
 
+def test_sync_merges_current_month_sales_and_settlement_deposit_on_the_same_date(db_session, sync_setup, monkeypatch):
+    """오늘 날짜는 항상 두 소스 모두의 대상이다 — 주문내역(이번 달 진행분
+    매출)과 정산내역(입금)이 같은 settle_date를 각각 다른 호출로 upsert할 때,
+    autoflush=False인 프로덕션 세션에서는 두 번째 호출이 첫 번째 호출의
+    아직 flush 안 된 add()를 못 봐서 같은 키로 중복 INSERT를 시도해
+    UniqueViolation이 났다(실 배민 계정으로 로컬 검증 중 실제로 재현됨).
+    한 행에 매출과 입금이 함께 정확히 반영돼야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", lambda page, shop_no, months: ([], []))
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_current_month_orders",
+        lambda page: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+    )
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_account_settlement",
+        lambda page, start_date, end_date: [
+            {"contents": [{"depositDueDate": "2026-08-15", "giveAmount": 9000, "giveStatus": "REQUEST"}], "totalSize": 1},
+        ],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-15",
+    ).one()
+    assert row.sales_amount == 12000
+    assert row.deposit_amount == 9000
+
+
 def test_sync_sums_stats_across_multiple_shops(db_session, sync_setup, monkeypatch):
     import app.review_sync as review_sync_mod
 

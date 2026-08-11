@@ -17,7 +17,13 @@ from app.models import Platform, ReplyStyle, Store, StorePlatformConnection, Sub
 def db_session():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
+    # autoflush=False matches app.db.SessionLocal (the session review_sync.py's
+    # background job actually runs under in production) — with the default
+    # autoflush=True, a select() silently sees a prior add()'s pending row
+    # even before it's flushed, masking bugs that only reproduce when the
+    # session doesn't auto-flush (e.g. two upserts for the same key without
+    # a flush between them).
+    session = sessionmaker(bind=engine, autoflush=False)()
     yield session
     session.close()
 

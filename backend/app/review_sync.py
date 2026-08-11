@@ -77,6 +77,12 @@ def upsert_daily_settlement(
             store_id=store_id, platform_id=platform_id, settle_date=d,
             sales_amount=sales_amount or 0, deposit_amount=deposit_amount or 0,
         ))
+        # autoflush=False(app.db.SessionLocal)라 flush 없이는 이 세션의 다음
+        # select()가 방금 add()한 행을 못 본다 — 같은 날짜를 매출(주문내역)과
+        # 입금(정산내역)이 각각 다른 호출로 건드리는 흔한 경우(오늘 날짜는
+        # 항상 두 소스 모두의 대상), flush 없이는 두 번째 호출도 "없음"으로
+        # 보고 중복 INSERT를 시도해 UniqueViolation이 난다.
+        db.flush()
         return
     if sales_amount is not None:
         existing.sales_amount = sales_amount
@@ -104,6 +110,11 @@ def upsert_repurchase_metric(
             new_orders=new_orders, repeat_orders=repeat_orders,
             rate_raw=rate_raw, rate_adjusted=rate_adjusted,
         ))
+        # upsert_daily_settlement와 같은 이유(autoflush=False) — 이 함수는
+        # 현재 단일 호출 지점(crm_responses 루프, metric_date로 이미 dedup됨)
+        # 이라 관측된 충돌은 없지만, 같은 select-then-insert 패턴이라 구조적
+        # 위험은 동일해 예방적으로 맞춘다.
+        db.flush()
         return
     existing.new_orders = new_orders
     existing.repeat_orders = repeat_orders
