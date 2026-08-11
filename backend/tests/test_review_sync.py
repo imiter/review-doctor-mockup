@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from cryptography.fernet import Fernet
@@ -853,3 +853,154 @@ def test_sync_marks_job_success_when_all_reviews_fail_but_stats_succeed(db_sessi
         store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
     ).one()
     assert settlement.sales_amount == 50000  # 매출 데이터는 실제로 커밋됨
+
+
+def test_sync_isolates_non_keyerror_malformed_sales_response_from_other_three_sources(db_session, sync_setup, monkeypatch):
+    """Important #1 회귀 테스트: map_sales_by_date는 KeyError뿐 아니라
+    TypeError(예: graph.data[].y가 null이라 round(None)이 실패)도 던질 수
+    있다. 이 예외가 KeyError 전용 except에 안 잡히고 새어나가면
+    sync_reviews_for_job의 바깥쪽 안전망까지 번져 이미 저장된 리뷰와 나머지
+    세 소스(이번 달 매출/재주문율/입금)까지 전부 롤백된다 — 이번 라운드에서
+    (BaeminStatsScrapeError, KeyError)를 Exception으로 넓힌 수정의 회귀 테스트."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [_RAW_1])
+
+    # "graph" 키는 있지만 y가 null — round(None)이 TypeError를 던진다(KeyError가 아님).
+    _malformed_sales_resp = {"graph": {"data": [{"x": "2026-08-10", "y": None}]}, "orderAmount": 50000.0, "orderCount": 2}
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_shop_stats",
+        lambda page, shop_no, months: ([_malformed_sales_resp], [_CRM_RESP]),
+    )
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_current_month_orders",
+        lambda page: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+    )
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_account_settlement",
+        lambda page, start_date, end_date: [_SETTLE_RESP],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    # (a) job은 여전히 success로 끝나야 한다.
+    assert job.status == "success"
+    # (b) 이미 성공적으로 동기화된 리뷰는 롤백되지 않고 그대로 커밋돼야 한다.
+    assert job.reviews_inserted == 1
+    assert db_session.query(Review).filter_by(external_review_id=1001).one()
+    # (c) 나머지 세 소스(이번 달 매출/재주문율/입금)는 정상적으로 저장돼야 한다.
+    current_month_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-15",
+    ).one()
+    assert current_month_row.sales_amount == 12000
+
+    deposit_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert deposit_row.deposit_amount == 40000
+
+    repurchase = db_session.query(RepurchaseMetric).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, metric_date="2026-08-10",
+    ).one()
+    assert repurchase.new_orders == 1
+
+    # (d) 매출(가게통계) 실패 메시지가 error_message에 남아야 한다.
+    assert "매출" in job.error_message
+
+
+def test_sync_zeroes_stale_mock_deposit_on_gap_date_within_fetch_window(db_session, sync_setup, monkeypatch):
+    """Important #4 회귀 테스트: 배민 정산은 배치 지급 캘린더라 주말/공휴일
+    등 실제 배치가 없는 날짜(갭 날짜)는 fetch_account_settlement 응답에
+    아예 등장하지 않는다. 그런 갭 날짜에 이미 있던 Mock deposit_amount를
+    그대로 두면 실데이터와 조용히 섞인다 — 조회 범위 안의 기존 행은 실제
+    배치를 적용하기 전에 먼저 0으로 초기화돼야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    today = date.today()
+    gap_date = today - timedelta(days=5)  # 실제 배치 응답에 없는 갭 날짜(주말 등)를 흉내낸다
+    payout_date = today - timedelta(days=3)  # 실제 배치가 있는 날짜
+
+    db_session.add(DailySettlement(
+        store_id=job.store_id, platform_id=job.platform_id,
+        settle_date=gap_date, sales_amount=1000, deposit_amount=99999,  # 오래된 Mock 시드 값
+    ))
+    db_session.commit()
+
+    settle_resp = {
+        "contents": [{"depositDueDate": payout_date.isoformat(), "giveAmount": 40000, "giveStatus": "REQUEST"}],
+        "totalSize": 1,
+    }
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [settle_resp])
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    gap_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date=gap_date,
+    ).one()
+    assert gap_row.deposit_amount == 0  # 갭 날짜는 Mock이 아니라 0으로 초기화됨
+
+    payout_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date=payout_date,
+    ).one()
+    assert payout_row.deposit_amount == 40000  # 실제 배치가 있는 날짜는 실제 금액으로 채워짐
+
+
+def test_sync_leaves_deposit_amount_outside_fetch_window_untouched(db_session, sync_setup, monkeypatch):
+    """조회 범위(today-90일 ~ today) 밖 날짜의 기존 deposit_amount는 이번
+    동기화가 그 날짜를 아예 시도조차 하지 않았으므로 손대면 안 된다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    old_date = date.today() - timedelta(days=120)  # 90일 조회 범위 밖
+    db_session.add(DailySettlement(
+        store_id=job.store_id, platform_id=job.platform_id,
+        settle_date=old_date, sales_amount=1000, deposit_amount=55555,
+    ))
+    db_session.commit()
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date=old_date,
+    ).one()
+    assert row.deposit_amount == 55555  # 조회 범위 밖 날짜는 손대지 않음
+
+
+def test_sync_leaves_other_platform_deposit_amount_untouched_within_fetch_window(db_session, sync_setup, platforms, monkeypatch):
+    """배민 동기화가 같은 날짜 범위 안의 요기요 행까지 건드리면 안 된다 —
+    zero-out은 platform_id로 엄격히 스코프돼야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    gap_date = date.today() - timedelta(days=5)
+    db_session.add(DailySettlement(
+        store_id=job.store_id, platform_id=platforms["yogiyo"].id,
+        settle_date=gap_date, sales_amount=1000, deposit_amount=22222,
+    ))
+    db_session.commit()
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=platforms["yogiyo"].id, settle_date=gap_date,
+    ).one()
+    assert row.deposit_amount == 22222  # 다른 플랫폼 행은 손대지 않음

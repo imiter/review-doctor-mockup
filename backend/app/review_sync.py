@@ -8,7 +8,7 @@
 
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.credential_crypto import CredentialCryptoError, decrypt_credential
@@ -243,7 +243,7 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                         db, job.store_id, job.platform_id, settle_date, sales_amount=amount,
                     )
                 stats_succeeded_any = True
-            except (BaeminStatsScrapeError, KeyError) as e:
+            except Exception as e:
                 stats_errors.append(f"매출(가게통계) 동기화 실패: {e}")
 
         # 가게통계의 월별 조회는 완료된 3개월만 준다(실측 확인 — 진행 중인 이번
@@ -262,7 +262,7 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
             # 커밋된 행이 있을 때만 stats_succeeded_any를 True로 세운다.
             if current_month_sales:
                 stats_succeeded_any = True
-        except (BaeminStatsScrapeError, KeyError) as e:
+        except Exception as e:
             stats_errors.append(f"이번 달 매출(주문내역) 동기화 실패: {e}")
 
         if crm_responses:
@@ -275,13 +275,33 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                         rate_raw=r["rate_raw"], rate_adjusted=r["rate_adjusted"],
                     )
                 stats_succeeded_any = True
-            except (BaeminStatsScrapeError, KeyError) as e:
+            except Exception as e:
                 stats_errors.append(f"재주문율 동기화 실패: {e}")
 
         today = date.today()
         try:
+            window_start = today - timedelta(days=90)
             settlement_responses = fetch_account_settlement(
-                session.page, (today - timedelta(days=90)).isoformat(), today.isoformat(),
+                session.page, window_start.isoformat(), today.isoformat(),
+            )
+            # 배민 정산은 배치 지급 캘린더라 주말/공휴일 등 실제 배치가 없는
+            # 날짜는 fetch 응답에 아예 등장하지 않는다. 그런 갭 날짜의 기존
+            # daily_settlements 행을 그대로 두면 시드 때 넣어둔 Mock
+            # deposit_amount가 영원히 남아 실데이터와 조용히 섞인다. 그래서
+            # 실제 배치를 적용하기 전에, 이번에 조회를 시도한 날짜 범위
+            # (store_id+platform_id로 엄격히 스코프, 다른 플랫폼/범위 밖
+            # 날짜는 절대 건드리지 않음) 안의 기존 행부터 0으로 초기화한다 —
+            # 갭 날짜는 결과적으로 0(입금 없음)으로 남고, 실제 배치가 있는
+            # 날짜만 아래 루프가 다시 실제 금액으로 채운다.
+            db.execute(
+                update(DailySettlement)
+                .where(
+                    DailySettlement.store_id == job.store_id,
+                    DailySettlement.platform_id == job.platform_id,
+                    DailySettlement.settle_date >= window_start,
+                    DailySettlement.settle_date <= today,
+                )
+                .values(deposit_amount=0)
             )
             daily_deposits = map_deposits_by_date(settlement_responses)
             for settle_date, amount in daily_deposits.items():
@@ -290,7 +310,7 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 )
             if daily_deposits:
                 stats_succeeded_any = True
-        except (BaeminStatsScrapeError, KeyError) as e:
+        except Exception as e:
             stats_errors.append(f"정산(입금) 동기화 실패: {e}")
     finally:
         session.close()
