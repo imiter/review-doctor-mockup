@@ -15,6 +15,7 @@ from app.credential_crypto import CredentialCryptoError, decrypt_credential
 from app.db import SessionLocal
 from app.models import (
     BaeminShopBrand,
+    BrandAdClickMetric,
     DailySettlement,
     RepurchaseMetric,
     Review,
@@ -22,6 +23,7 @@ from app.models import (
     ReviewSyncJob,
     StorePlatformConnection,
 )
+from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics, map_click_metrics_by_date
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 from scrapers.baemin_reviews import BaeminScrapeError, extract_owner_reply, fetch_all_reviews, map_review
 from scrapers.baemin_stats import (
@@ -120,6 +122,43 @@ def upsert_repurchase_metric(
     existing.repeat_orders = repeat_orders
     existing.rate_raw = rate_raw
     existing.rate_adjusted = rate_adjusted
+
+
+def upsert_brand_ad_click_metric(
+    db: Session, store_id: int, platform_id: int, shop_no: str, metric_date: str,
+    *, ad_spend: int, impressions: int, clicks: int, ad_orders: int, ad_revenue: int,
+) -> None:
+    """`(store_id, platform_id, shop_no, metric_date)` 기준 upsert. 계정
+    전체 합산인 `upsert_daily_settlement`와 달리 브랜드(shop_no)까지
+    키에 포함한다 — 우리가게클릭은 애초에 브랜드 단위로만 조회되는
+    화면이라 계정 전체로 합산할 이유가 없다(설계 문서 스코프 결정 참고)."""
+    d = date.fromisoformat(metric_date)
+    existing = db.scalar(
+        select(BrandAdClickMetric).where(
+            BrandAdClickMetric.store_id == store_id,
+            BrandAdClickMetric.platform_id == platform_id,
+            BrandAdClickMetric.shop_no == shop_no,
+            BrandAdClickMetric.metric_date == d,
+        )
+    )
+    if existing is None:
+        db.add(BrandAdClickMetric(
+            store_id=store_id, platform_id=platform_id, shop_no=shop_no, metric_date=d,
+            ad_spend=ad_spend, impressions=impressions, clicks=clicks,
+            ad_orders=ad_orders, ad_revenue=ad_revenue,
+        ))
+        # upsert_daily_settlement와 같은 이유(autoflush=False인
+        # app.db.SessionLocal) — 같은 브랜드의 여러 달 응답을 한 세션 안에서
+        # 연달아 upsert하므로 flush 없이는 두 번째 호출부터 select()가 방금
+        # add()한 행을 못 봐서 중복 INSERT를 시도한다(오늘 매출/입금
+        # upsert에서 실제로 겪은 UniqueViolation과 같은 버그 클래스).
+        db.flush()
+        return
+    existing.ad_spend = ad_spend
+    existing.impressions = impressions
+    existing.clicks = clicks
+    existing.ad_orders = ad_orders
+    existing.ad_revenue = ad_revenue
 
 
 def sync_reviews_for_job(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) -> None:
@@ -323,6 +362,26 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 stats_succeeded_any = True
         except Exception as e:
             stats_errors.append(f"정산(입금) 동기화 실패: {e}")
+
+        # 우리가게클릭은 매출/입금/재주문율과 달리 계정 전체로 합산하지
+        # 않는다 — 애초에 브랜드(shop_no) 단위로만 조회되는 화면이라
+        # 브랜드별로 완전히 분리해서 저장한다(설계 문서 스코프 결정).
+        # 그래서 fetch_shop_stats처럼 매장 루프 안에서 브랜드마다 upsert도
+        # 그 자리에서 바로 한다 — 나중에 합치는 단계가 없다.
+        for shop_no, shop_name in session.shops:
+            try:
+                click_responses = fetch_brand_click_metrics(session.page, shop_no, months)
+                click_by_date = map_click_metrics_by_date(click_responses)
+                for metric_date, m in click_by_date.items():
+                    upsert_brand_ad_click_metric(
+                        db, job.store_id, job.platform_id, str(shop_no), metric_date,
+                        ad_spend=m["ad_spend"], impressions=m["impressions"], clicks=m["clicks"],
+                        ad_orders=m["ad_orders"], ad_revenue=m["ad_revenue"],
+                    )
+                if click_by_date:
+                    stats_succeeded_any = True
+            except Exception as e:
+                stats_errors.append(f"{shop_name} 우리가게클릭 동기화 실패: {e}")
     finally:
         session.close()
 

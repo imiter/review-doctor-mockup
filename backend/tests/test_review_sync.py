@@ -4,8 +4,9 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.credential_crypto import CredentialCryptoError, encrypt_credential
-from app.models import BaeminShopBrand, DailySettlement, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
-from app.review_sync import sync_reviews_for_job, upsert_daily_settlement, upsert_repurchase_metric
+from app.models import BaeminShopBrand, BrandAdClickMetric, DailySettlement, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
+from app.review_sync import sync_reviews_for_job, upsert_brand_ad_click_metric, upsert_daily_settlement, upsert_repurchase_metric
+from scrapers.baemin_ads import BaeminAdsScrapeError
 from scrapers.baemin_auth import BaeminLoginError
 from scrapers.baemin_reviews import BaeminScrapeError
 from scrapers.baemin_stats import BaeminStatsScrapeError
@@ -71,6 +72,7 @@ def sync_setup(db_session, seeded_user, platforms, monkeypatch):
     monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", lambda page, shop_no, months: ([], []))
     monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
     monkeypatch.setattr(review_sync_mod, "fetch_current_month_orders", lambda page: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_brand_click_metrics", lambda page, shop_no, months: [])
 
     return job, conn
 
@@ -1039,3 +1041,166 @@ def test_sync_leaves_other_platform_deposit_amount_untouched_within_fetch_window
         store_id=job.store_id, platform_id=platforms["yogiyo"].id, settle_date=gap_date,
     ).one()
     assert row.deposit_amount == 22222  # 다른 플랫폼 행은 손대지 않음
+
+
+def test_upsert_brand_ad_click_metric_creates_new_row(db_session, seeded_user, platforms):
+    upsert_brand_ad_click_metric(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "14804912", "2026-08-01",
+        ad_spend=95, impressions=40, clicks=1, ad_orders=0, ad_revenue=0,
+    )
+    db_session.commit()
+
+    row = db_session.query(BrandAdClickMetric).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        shop_no="14804912", metric_date="2026-08-01",
+    ).one()
+    assert row.ad_spend == 95
+    assert row.impressions == 40
+
+
+def test_upsert_brand_ad_click_metric_updates_existing_row_without_duplicate(db_session, seeded_user, platforms):
+    from datetime import date
+    existing = BrandAdClickMetric(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        shop_no="14804912", metric_date=date.fromisoformat("2026-08-01"),
+        ad_spend=999, impressions=999, clicks=9, ad_orders=9, ad_revenue=9000,
+    )
+    db_session.add(existing)
+    db_session.commit()
+
+    upsert_brand_ad_click_metric(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "14804912", "2026-08-01",
+        ad_spend=95, impressions=40, clicks=1, ad_orders=0, ad_revenue=0,
+    )
+    db_session.commit()
+
+    rows = db_session.query(BrandAdClickMetric).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        shop_no="14804912", metric_date="2026-08-01",
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].ad_spend == 95
+
+
+def test_upsert_brand_ad_click_metric_leaves_other_brand_rows_untouched(db_session, seeded_user, platforms):
+    from datetime import date
+    other_brand = BrandAdClickMetric(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        shop_no="14804914", metric_date=date.fromisoformat("2026-08-01"),
+        ad_spend=285, impressions=40, clicks=3, ad_orders=1, ad_revenue=19900,
+    )
+    db_session.add(other_brand)
+    db_session.commit()
+
+    upsert_brand_ad_click_metric(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "14804912", "2026-08-01",
+        ad_spend=95, impressions=40, clicks=1, ad_orders=0, ad_revenue=0,
+    )
+    db_session.commit()
+
+    untouched = db_session.query(BrandAdClickMetric).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        shop_no="14804914", metric_date="2026-08-01",
+    ).one()
+    assert untouched.ad_spend == 285  # 안 건드림
+
+
+_CLICK_RESP_AUGUST = {
+    "summary": {"displayCount": 201, "clickCount": 6, "orderCount": 0, "orderAmounts": 0,
+                "clickRate": 2.985, "orderRate": 0.0, "spentBudget": 570, "returnOnAdSpend": 0.0},
+    "metrics": {},
+    "dailyMetrics": [
+        {"date": "2026-08-01", "spentBudget": 95, "displayCount": 40, "clickCount": 1,
+         "orderCount": 0, "orderAmounts": 0, "returnOnAdSpend": 0.0},
+    ],
+}
+
+
+def test_sync_upserts_brand_click_metrics_per_shop(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()  # shop_no=99999001
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_brand_click_metrics",
+        lambda page, shop_no, months: [_CLICK_RESP_AUGUST],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    row = db_session.query(BrandAdClickMetric).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, shop_no="99999001", metric_date="2026-08-01",
+    ).one()
+    assert row.ad_spend == 95
+    assert row.clicks == 1
+
+
+def test_sync_sums_nothing_across_brands_for_click_metrics(db_session, sync_setup, monkeypatch):
+    """매출/재주문율과 달리 브랜드별로 완전히 분리 저장돼야 한다 — 서로 다른
+    shop_no는 서로 다른 행이지 합산 대상이 아니다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeMultiShopSession()  # shops = [(11111, "브랜드A"), (22222, "브랜드B")]
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    click_a = {"summary": {}, "metrics": {}, "dailyMetrics": [
+        {"date": "2026-08-01", "spentBudget": 100, "displayCount": 10, "clickCount": 1, "orderCount": 0, "orderAmounts": 0},
+    ]}
+    click_b = {"summary": {}, "metrics": {}, "dailyMetrics": [
+        {"date": "2026-08-01", "spentBudget": 200, "displayCount": 20, "clickCount": 2, "orderCount": 0, "orderAmounts": 0},
+    ]}
+
+    def _fetch_click(page, shop_no, months):
+        return [click_a] if shop_no == 11111 else [click_b]
+
+    monkeypatch.setattr(review_sync_mod, "fetch_brand_click_metrics", _fetch_click)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    row_a = db_session.query(BrandAdClickMetric).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, shop_no="11111", metric_date="2026-08-01",
+    ).one()
+    row_b = db_session.query(BrandAdClickMetric).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, shop_no="22222", metric_date="2026-08-01",
+    ).one()
+    assert row_a.ad_spend == 100  # 합산 안 됨, 각자 따로
+    assert row_b.ad_spend == 200
+
+
+def test_sync_isolates_one_brand_click_metrics_failure_from_other_brands(db_session, sync_setup, monkeypatch):
+    """한 브랜드의 우리가게클릭 조회 실패(예: 캠페인이 없는 브랜드)가 다른
+    브랜드의 정상 수집을 막지 않아야 한다 — 리뷰/매출과 같은 브랜드별 독립
+    실패 격리 원칙."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeMultiShopSession()  # shops = [(11111, "브랜드A"), (22222, "브랜드B")]
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    click_b = {"summary": {}, "metrics": {}, "dailyMetrics": [
+        {"date": "2026-08-01", "spentBudget": 200, "displayCount": 20, "clickCount": 2, "orderCount": 0, "orderAmounts": 0},
+    ]}
+
+    def _fetch_click(page, shop_no, months):
+        if shop_no == 11111:
+            raise BaeminAdsScrapeError("우리가게클릭 캠페인을 찾을 수 없습니다")
+        return [click_b]
+
+    monkeypatch.setattr(review_sync_mod, "fetch_brand_click_metrics", _fetch_click)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert db_session.query(BrandAdClickMetric).filter_by(shop_no="11111").count() == 0
+    row_b = db_session.query(BrandAdClickMetric).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, shop_no="22222", metric_date="2026-08-01",
+    ).one()
+    assert row_b.ad_spend == 200
+    assert "우리가게클릭" in job.error_message
