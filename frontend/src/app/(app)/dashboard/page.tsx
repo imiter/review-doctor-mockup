@@ -63,6 +63,13 @@ function UgacleModal({ storeId, shopNo }: { storeId: number; shopNo: string }) {
     apiGet<ClickPerformance>(`/ads/click-performance?store_id=${storeId}&shop_no=${shopNo}&days=14`).then(setPerf);
   }, [storeId, shopNo]);
 
+  if (!shopNo) {
+    return (
+      <p className="text-sm text-muted">
+        연결된 배민 브랜드가 없습니다. &quot;가게 연결&quot;에서 배민 계정을 연결한 뒤 데이터 동기화를 실행하세요.
+      </p>
+    );
+  }
   if (perf === null) return <p className="text-sm text-muted">불러오는 중...</p>;
   return (
     <div>
