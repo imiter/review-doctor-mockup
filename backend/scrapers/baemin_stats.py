@@ -306,6 +306,26 @@ def _select_month_dropdown(page, month: str) -> bool:
     return True
 
 
+def _should_count_sales_response(path: str, collecting: bool) -> bool:
+    """`/v3/statistics/orders/summary` 응답 하나가 "매출 엔드포인트를
+    관측했다"는 신호(`observed_sales_endpoint`)와 실제 데이터 수집 대상으로
+    인정될 수 있는지 판정하는 순수 함수(Playwright 없이 테스트 가능).
+
+    `collecting=False`면(아직 `months` 루프를 시작하기 전, 첫 로드 시점에
+    뜨는 예측 불가능한 달의 응답 — 모듈 docstring의 discrepancy 절 참고)
+    무조건 False다. 이 게이트가 없으면 (코드 리뷰 지적, 2026-08-11) `months`에
+    담긴 모든 달이 배민의 실제 선택 가능 목록과 안 맞아
+    `_select_month_dropdown`이 매번 False를 반환해 전부 건너뛰어지는
+    상황에서도, discard됐어야 할 그 첫 응답 하나만으로
+    `observed_sales_endpoint`가 참이 되어 `fetch_shop_stats`가 에러 없이
+    `([], crm_responses)`를 조용히 반환해버리는 은폐된 전체 실패 경로가
+    생긴다 — Task 3은 이걸 "이 매장은 매출 이력이 진짜 0건"이라는 정상
+    케이스와 구분할 방법이 없었다. `observed_sales_endpoint`와 실제 데이터
+    수집 둘 다 같은 게이트(`months` 루프가 실제로 시작된 뒤라는 조건)를
+    써야 이 실패 모드가 막힌다."""
+    return path == "/v3/statistics/orders/summary" and collecting
+
+
 def fetch_shop_stats(page, shop_no: int, months: list[str]) -> tuple[list[dict], list[dict]]:
     """가게통계 화면(`/shops/{shop_no}/stat`)에서 매출(statistics/orders/summary)과
     재주문율(crmInfo) organic 응답을 가로챈다. `months`에 담긴 각 달마다 월
@@ -332,8 +352,11 @@ def fetch_shop_stats(page, shop_no: int, months: list[str]) -> tuple[list[dict],
         # 그 응답이 어느 달 데이터인지 예측할 수 없다(계정에 persist된 마지막
         # 조회 상태일 뿐, "이번 달"이라는 보장이 없다 — 모듈 docstring 참고).
         # 예측 불가능한 달을 `months`의 명시적 선택과 섞으면 같은 달이
-        # 중복으로 합산될 위험이 있어, 명시적으로 월을 선택하기 시작한
-        # 뒤부터만 수집한다.
+        # 중복으로 합산될 위험이 있어, 명시적으로 월을 선택하기 시작한 뒤부터만
+        # 수집한다 — `observed_sales_endpoint`도 이 게이트를 함께 쓴다
+        # (`_should_count_sales_response` 참고, 코드 리뷰로 발견된 버그 수정:
+        # 예전에는 관측 플래그만 게이트 없이 서서 discard된 첫 응답 하나로도
+        # 참이 될 수 있었다).
         "collect_sales": False,
     }
 
@@ -342,9 +365,9 @@ def fetch_shop_stats(page, shop_no: int, months: list[str]) -> tuple[list[dict],
         path = urlparse(url).path
         if "self-api.baemin.com" not in url:
             return
-        if path == "/v3/statistics/orders/summary":
+        if _should_count_sales_response(path, state["collect_sales"]):
             state["observed_sales_endpoint"] = True
-            if response.status == 200 and state["collect_sales"]:
+            if response.status == 200:
                 try:
                     sales_responses.append(response.json())
                 except Exception:

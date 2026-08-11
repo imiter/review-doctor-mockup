@@ -1,4 +1,5 @@
 from scrapers.baemin_stats import (
+    _should_count_sales_response,
     compute_repurchase_rates,
     map_deposits_by_date,
     map_orders_to_daily_sales,
@@ -199,3 +200,27 @@ def test_compute_repurchase_rates_adjusted_window_shrinks_near_start_of_data():
     }
     result = compute_repurchase_rates(by_date)
     assert result["2026-08-03"]["rate_adjusted"] == round(1 / 3, 4)  # 3일 전체: new=2, repeat=1
+
+
+# 코드 리뷰 지적사항(2026-08-11) 회귀 테스트: discard된 첫 로드 응답만으로
+# observed_sales_endpoint가 거짓 True가 되던 버그. `fetch_shop_stats`
+# 자체는 Playwright가 필요해 pytest로 못 덮지만(이 파일의 Global Constraints),
+# 실제 버그였던 판정 로직은 이 순수 함수로 뽑아내 직접 테스트할 수 있다.
+def test_should_count_sales_response_false_before_collecting_starts():
+    # months 루프를 시작하기 전(첫 로드 시점, 예측 불가능한 달) 응답은
+    # 매출 엔드포인트를 "관측했다"는 신호로도 인정하면 안 된다 — 그래야
+    # months 전체가 배민의 실제 선택 가능 목록과 하나도 안 맞아 전부
+    # 건너뛰어지는 상황에서 fetch_shop_stats가 조용히 성공한 것처럼
+    # ([], crm_responses)를 반환하지 않고 제대로 에러를 낸다.
+    assert _should_count_sales_response("/v3/statistics/orders/summary", collecting=False) is False
+
+
+def test_should_count_sales_response_true_once_collecting_started():
+    # months 루프가 실제로 시작된 뒤(collect_sales=True)의 응답은 정상적으로
+    # 관측 신호이자 수집 대상이다.
+    assert _should_count_sales_response("/v3/statistics/orders/summary", collecting=True) is True
+
+
+def test_should_count_sales_response_false_for_unrelated_path_even_while_collecting():
+    # 경로 자체가 매출 엔드포인트가 아니면 collecting 여부와 무관하게 False.
+    assert _should_count_sales_response("/v3/dashboard/crmInfo", collecting=True) is False
