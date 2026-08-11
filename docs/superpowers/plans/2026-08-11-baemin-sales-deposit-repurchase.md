@@ -538,8 +538,22 @@ git commit -m "feat: 가게통계/정산내역 화면의 organic 응답을 가�
 - Modify: `backend/app/review_sync.py`
 - Test: `backend/tests/test_review_sync.py`
 
+> **Task 2 실 계정 조사 후 범위 추가(2026-08-11, 사용자 확인 후 반영):** 가게통계
+> 화면의 월별 조회는 실측 결과 진행 중인 이번 달을 아예 제공하지 않는다("최근
+> 3개월 동안의 내역만 볼 수 있어요" — 완료된 3개월만). 사용자가 실제 배민
+> "주문내역" 화면에서 일자별 매출이 조회되는 걸 직접 확인해서, Task 2에
+> `fetch_current_month_orders(page) -> list[dict]`(계정 전체, `shop_no` 인자
+> 없음 — 이 화면은 브랜드 구분 없이 전체를 한 번에 반환한다. 이번 달 1일~오늘
+> 범위의 `/v4/orders` organic 응답을 페이지네이션까지 포함해 가로채 `contents`
+> 항목 리스트를 반환하고, 관측 실패 시 `BaeminStatsScrapeError`)와 그 짝인
+> `map_orders_to_daily_sales(order_contents: list[dict]) -> dict[str, int]`(Task 1과
+> 같은 순수 함수 스타일, `order.orderDateTime[:10]`별로 `order.payAmount` 합산)이
+> 추가됐다. 이 태스크는 두 함수를 완료된 3개월분(`fetch_shop_stats`)과 합쳐
+> "완료된 3개월 + 이번 달 진행분"으로 매출을 채운다. 아래 Interfaces와 코드
+> 템플릿은 이미 이 변경을 반영했다.
+
 **Interfaces:**
-- Consumes: Task 1의 `map_sales_by_date`/`map_deposits_by_date`/`map_repurchase_by_date`/`compute_repurchase_rates`. Task 2의 `fetch_shop_stats`/`fetch_account_settlement`/`BaeminStatsScrapeError`/`recent_months`.
+- Consumes: Task 1의 `map_sales_by_date`/`map_deposits_by_date`/`map_repurchase_by_date`/`compute_repurchase_rates`. Task 2의 `fetch_shop_stats`/`fetch_account_settlement`/`fetch_current_month_orders`/`map_orders_to_daily_sales`/`BaeminStatsScrapeError`/`recent_months`.
 - Produces: `upsert_daily_settlement(db: Session, store_id: int, platform_id: int, settle_date: str, *, sales_amount: int | None = None, deposit_amount: int | None = None) -> None`, `upsert_repurchase_metric(db: Session, store_id: int, platform_id: int, metric_date: str, new_orders: int, repeat_orders: int, rate_raw: float, rate_adjusted: float) -> None`. `_run_sync`가 내부적으로 이 둘을 호출한다 — 다른 태스크가 소비하지는 않는다(엔드포인트/프론트는 그대로).
 
 - [ ] **Step 1: `upsert_daily_settlement`/`upsert_repurchase_metric`에 대한 실패하는 테스트 작성**
@@ -704,8 +718,10 @@ from scrapers.baemin_stats import (
     BaeminStatsScrapeError,
     compute_repurchase_rates,
     fetch_account_settlement,
+    fetch_current_month_orders,
     fetch_shop_stats,
     map_deposits_by_date,
+    map_orders_to_daily_sales,
     map_repurchase_by_date,
     map_sales_by_date,
     recent_months,
@@ -834,6 +850,70 @@ def test_sync_upserts_sales_deposit_repurchase_when_all_succeed(db_session, sync
     assert repurchase.repeat_orders == 1
 
 
+def test_sync_merges_current_month_orders_into_sales_for_a_different_date(db_session, sync_setup, monkeypatch):
+    """가게통계(완료된 3개월)와 주문내역(이번 달 진행분)은 서로 다른 날짜를
+    다루므로, 두 소스의 매출이 각자의 날짜에 정확히 반영돼야 한다 — 완료된
+    달 데이터를 이번 달 데이터가 덮어쓰면 안 된다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_shop_stats",
+        lambda page, shop_no, months: ([_SALES_RESP], []),  # 2026-08-10에 50000원 (완료된 달분)
+    )
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_current_month_orders",
+        lambda page: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    completed_month_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert completed_month_row.sales_amount == 50000  # 가게통계분, 안 건드려짐
+
+    current_month_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-15",
+    ).one()
+    assert current_month_row.sales_amount == 12000  # 주문내역분
+
+
+def test_sync_isolates_current_month_orders_failure_from_completed_months_sales(db_session, sync_setup, monkeypatch):
+    """이번 달(주문내역) 보완 조회만 실패해도 완료된 3개월분 매출은 정상
+    저장돼야 한다 — 항목별 독립 실패 격리 원칙이 이 소스에도 적용된다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_shop_stats",
+        lambda page, shop_no, months: ([_SALES_RESP], []),
+    )
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
+
+    def _raise_current_month(page):
+        raise BaeminStatsScrapeError("주문내역 조회 실패")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_current_month_orders", _raise_current_month)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    completed_month_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert completed_month_row.sales_amount == 50000
+    assert "주문내역" in job.error_message
+
+
 def test_sync_sums_stats_across_multiple_shops(db_session, sync_setup, monkeypatch):
     import app.review_sync as review_sync_mod
 
@@ -949,8 +1029,43 @@ def test_sync_isolates_one_shop_stats_failure_from_other_shops(db_session, sync_
 
 - [ ] **Step 6: 테스트 실패 확인**
 
-Run: `cd backend && .venv/bin/pytest tests/test_review_sync.py -v -k sync_upserts_sales or sync_sums_stats or stats_fail or isolates`
-Expected: FAIL — `fetch_shop_stats`/`fetch_account_settlement`가 아직 `review_sync` 모듈 네임스페이스에 없어 `monkeypatch.setattr`가 `AttributeError`를 던진다.
+Run: `cd backend && .venv/bin/pytest tests/test_review_sync.py -v -k sync_upserts_sales or sync_sums_stats or stats_fail or isolates or merges_current_month`
+Expected: FAIL — `fetch_shop_stats`/`fetch_account_settlement`/`fetch_current_month_orders`가 아직 `review_sync` 모듈 네임스페이스에 없어 `monkeypatch.setattr`가 `AttributeError`를 던진다.
+
+**⚠️ 중요 — Step 7 적용 전에 먼저 처리할 것: 기존(이 플랜 이전부터 있던) 테스트 회귀 방지**
+
+Step 7의 `_run_sync`는 `fetch_shop_stats`/`fetch_account_settlement`/`fetch_current_month_orders`를
+무조건 호출한다. `test_review_sync.py`에는 이 플랜이 시작되기 전부터 있던,
+리뷰 동기화만 검증하는 기존 테스트들(`test_sync_inserts_new_reviews_and_skips_duplicates_and_hidden`
+등)이 이미 여러 개 있고, 이들은 `_FakeSession`/`_FakeMultiShopSession`의
+`page = object()`(진짜 Playwright 페이지가 아닌 자리표시자)를 쓴다. 이 세
+함수를 개별 테스트마다 일일이 monkeypatch하지 않으면, `_run_sync`가 그
+가짜 `page`로 실제 함수를 호출하려다 `AttributeError`가 나고, 그 예외는
+`sync_reviews_for_job`의 바깥쪽 안전망(`except Exception`)에 잡혀 `job.status`가
+`"failed"`가 돼버린다 — 리뷰 관련 기존 테스트들이 전부 `job.status == "success"`를
+기대하므로 대량 회귀가 발생한다.
+
+**이 파일 상단의 `sync_setup` 픽스처(Task 1/2/3 이전부터 이미 있던 공용 픽스처)를
+수정해서**, 픽스처 자체에서 이 세 함수에 안전한 기본값을 monkeypatch하도록
+만든다 — 개별 테스트는 필요할 때만 자신의 `monkeypatch.setattr`로 덮어쓴다
+(pytest monkeypatch는 나중 호출이 이긴다). `sync_setup` 함수 본문(현재
+`conn.credential_ciphertext = ...` 이후, `return job, conn` 이전)에 추가:
+
+```python
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", lambda page, shop_no, months: ([], []))
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_current_month_orders", lambda page: [])
+```
+
+`sync_setup`은 현재 `import app.review_sync as review_sync_mod`를 함수 안에서
+하지 않으므로, 픽스처 맨 위에 `import app.review_sync as review_sync_mod`를
+추가한다(각 테스트 함수가 이미 개별적으로 이 import를 반복하고 있는 것과
+동일한 패턴 — 픽스처도 똑같이 필요하다).
+
+이렇게 해두면 이 플랜의 Step 1(upsert 함수 테스트)과 Step 5(통합 테스트)가
+이미 하고 있는 개별 `monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", ...)` 호출은
+그대로 픽스처의 기본값을 덮어써서 정상 동작하고, 리뷰만 다루는 기존 테스트들은
+빈 통계/정산 데이터로 조용히 통과한다.
 
 - [ ] **Step 7: `_run_sync`에 매출/입금/재주문율 동기화 통합**
 
@@ -1040,6 +1155,19 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 upsert_daily_settlement(
                     db, job.store_id, job.platform_id, settle_date, sales_amount=amount,
                 )
+
+        # 가게통계의 월별 조회는 완료된 3개월만 준다(실측 확인 — 진행 중인 이번
+        # 달은 그 목록에 아예 없음). 이번 달 진행분은 주문내역 화면에서 별도로
+        # 보완한다 — 계정 전체를 한 번에 반환하므로 매장 루프 밖에서 한 번만
+        # 호출한다(fetch_shop_stats처럼 매장별로 반복하지 않는다).
+        try:
+            current_month_orders = fetch_current_month_orders(session.page)
+            for settle_date, amount in map_orders_to_daily_sales(current_month_orders).items():
+                upsert_daily_settlement(
+                    db, job.store_id, job.platform_id, settle_date, sales_amount=amount,
+                )
+        except (BaeminStatsScrapeError, KeyError) as e:
+            stats_errors.append(f"이번 달 매출(주문내역) 동기화 실패: {e}")
 
         if crm_responses:
             rates = compute_repurchase_rates(map_repurchase_by_date(crm_responses))
