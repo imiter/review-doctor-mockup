@@ -28,12 +28,6 @@ const ICONS = {
       <path d="M10 6v4l3 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   ),
-  secondary: (
-    <svg viewBox="0 0 20 20" fill="none" className="h-4.5 w-4.5">
-      <path d="M3 6a2 2 0 012-2h6a2 2 0 012 2v5a2 2 0 01-2 2H8l-3 2v-2H5a2 2 0 01-2-2V6z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
-      <path d="M8 3h6a2 2 0 012 2v5a2 2 0 01-1 1.73" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  ),
   style: (
     <svg viewBox="0 0 20 20" fill="none" className="h-4.5 w-4.5">
       <path d="M4 15l2.5-.5L15 6a1.5 1.5 0 00-2-2l-8.5 8.5L4 15z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
@@ -74,7 +68,6 @@ const NAV: NavSection[] = [
     items: [
       { href: "/reviews", label: "리뷰 관리", icon: "reviews" },
       { href: "/reviews/rules", label: "답글 규칙 설정", icon: "rules" },
-      { href: "/reviews/secondary", label: "2차 답글 등록", icon: "secondary" },
       { href: "/reviews/styles", label: "답글 스타일 설정", icon: "style" },
     ],
   },

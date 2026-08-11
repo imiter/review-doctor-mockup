@@ -7,6 +7,7 @@ import { useStoreContext } from "@/lib/store-context";
 
 type ReplyStyle = { id: number; name: string; description: string };
 type ReplyRef = { content: string; style_id: number } | null;
+type SecondaryReply = { id: number; content: string; created_at: string };
 type Review = {
   id: number;
   platform_name: string;
@@ -20,6 +21,7 @@ type Review = {
   created_at: string;
   final_reply: ReplyRef;
   draft_reply: ReplyRef;
+  secondary_replies: SecondaryReply[];
 };
 type Brand = { shop_no: string; shop_name: string };
 
@@ -106,6 +108,8 @@ function ReviewCard({
   const [draft, setDraft] = useState(review.draft_reply?.content ?? "");
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [secondaryText, setSecondaryText] = useState("");
+  const [savingSecondary, setSavingSecondary] = useState(false);
 
   useEffect(() => {
     if (styles.length > 0 && styleId === 0) setStyleId(styles[0].id);
@@ -135,6 +139,18 @@ function ReviewCard({
     }
   };
 
+  const saveSecondary = async () => {
+    if (!secondaryText.trim()) return;
+    setSavingSecondary(true);
+    try {
+      await apiPost(`/reviews/${review.id}/secondary-reply`, { content: secondaryText });
+      setSecondaryText("");
+      onSaved();
+    } finally {
+      setSavingSecondary(false);
+    }
+  };
+
   return (
     <div className="rounded-xl border border-border-subtle bg-surface-2 p-4">
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
@@ -151,9 +167,32 @@ function ReviewCard({
       <p className="mt-1 text-sm text-foreground">{review.content}</p>
 
       {review.final_reply ? (
-        <div className="mt-3 rounded-lg border border-border-subtle bg-surface p-3">
-          <p className="mb-1 text-xs font-medium text-success">등록된 답글</p>
-          <p className="text-sm text-foreground">{review.final_reply.content}</p>
+        <div className="mt-3 space-y-2">
+          <div className="rounded-lg border border-border-subtle bg-surface p-3">
+            <p className="mb-1 text-xs font-medium text-success">등록된 답글</p>
+            <p className="text-sm text-foreground">{review.final_reply.content}</p>
+          </div>
+          {review.secondary_replies.map((r) => (
+            <div key={r.id} className="rounded-lg border border-accent/30 bg-accent-soft p-3">
+              <p className="mb-1 text-xs font-medium text-accent">2차 답글</p>
+              <p className="text-sm text-foreground">{r.content}</p>
+            </div>
+          ))}
+          <div className="flex gap-2">
+            <input
+              value={secondaryText}
+              onChange={(e) => setSecondaryText(e.target.value)}
+              placeholder="추가로 안내할 내용을 입력하세요"
+              className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
+            />
+            <button
+              onClick={saveSecondary}
+              disabled={savingSecondary || !secondaryText.trim()}
+              className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+            >
+              {savingSecondary ? "등록 중..." : "2차 답글 등록"}
+            </button>
+          </div>
         </div>
       ) : (
         <div className="mt-3 space-y-2">
@@ -231,13 +270,18 @@ export default function ReviewsPage() {
     setActivePreset(null);
   };
 
+  const isDateRangeActive = Boolean(dateFrom || dateTo);
+
   const load = useCallback(async () => {
     if (!storeId) return;
-    const qs = filter ? `&status=${filter}` : "";
+    // 기간을 지정했을 때는 답글 대기/완료 탭과 무관하게 그 기간의 리뷰를 전부
+    // 보여준다 — 이미 답글 단 것도 같이 봐야 기간 안에서 한눈에 확인 가능하다.
+    const effectiveStatus = isDateRangeActive ? "" : filter;
+    const qs = effectiveStatus ? `&status=${effectiveStatus}` : "";
     const brandQs = selectedShopNo ? `&platform_shop_no=${selectedShopNo}` : "";
     const dateQs = `${dateFrom ? `&date_from=${dateFrom}` : ""}${dateTo ? `&date_to=${dateTo}` : ""}`;
     setReviews(await apiGet<Review[]>(`/reviews?store_id=${storeId}${qs}${brandQs}${dateQs}`));
-  }, [storeId, filter, selectedShopNo, dateFrom, dateTo]);
+  }, [storeId, filter, isDateRangeActive, selectedShopNo, dateFrom, dateTo]);
 
   useEffect(() => {
     apiGet<ReplyStyle[]>("/reply-styles").then(setStyles);
@@ -336,18 +380,27 @@ export default function ReviewsPage() {
         </div>
       </Card>
 
-      <div className="flex gap-2">
-        {FILTERS.map((f) => (
-          <button
-            key={f.key}
-            onClick={() => setFilter(f.key)}
-            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-              filter === f.key ? "bg-accent text-white" : "border border-border-subtle text-muted hover:text-foreground"
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
+      <div>
+        <div className="flex gap-2">
+          {FILTERS.map((f) => (
+            <button
+              key={f.key}
+              onClick={() => setFilter(f.key)}
+              disabled={isDateRangeActive}
+              title={isDateRangeActive ? "기간 선택 중에는 모든 상태의 리뷰를 함께 보여줍니다" : undefined}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                !isDateRangeActive && filter === f.key
+                  ? "bg-accent text-white"
+                  : "border border-border-subtle text-muted hover:text-foreground"
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        {isDateRangeActive && (
+          <p className="mt-2 text-xs text-muted">기간 선택 중에는 답글 대기/완료 상태와 무관하게 해당 기간의 모든 리뷰를 보여줍니다.</p>
+        )}
       </div>
 
       <Card>
