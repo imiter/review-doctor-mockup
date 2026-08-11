@@ -134,7 +134,7 @@ def test_rank_by_distance_ignores_time_series_mock_rows(client, db_session, seed
 def test_click_performance_computes_acos_from_real_formula(client, db_session, seeded_user, platforms, auth_headers):
     db_session.add(BrandAdClickMetric(
         store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
-        shop_no="14804914", metric_date=date(2026, 8, 1),
+        shop_no="14804914", metric_date=date.today(),
         ad_spend=34730, impressions=4632, clicks=106, ad_orders=16, ad_revenue=427000,
     ))
     db_session.commit()
@@ -160,12 +160,12 @@ def test_click_performance_scopes_to_requested_shop_no_only(client, db_session, 
     db_session.add_all([
         BrandAdClickMetric(
             store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
-            shop_no="14804912", metric_date=date(2026, 8, 1),
+            shop_no="14804912", metric_date=date.today(),
             ad_spend=95, impressions=40, clicks=1, ad_orders=0, ad_revenue=0,
         ),
         BrandAdClickMetric(
             store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
-            shop_no="14804914", metric_date=date(2026, 8, 1),
+            shop_no="14804914", metric_date=date.today(),
             ad_spend=34730, impressions=4632, clicks=106, ad_orders=16, ad_revenue=427000,
         ),
     ])
