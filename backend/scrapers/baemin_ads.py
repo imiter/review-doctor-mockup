@@ -105,12 +105,17 @@ def fetch_brand_click_metrics(page, shop_no: int, months: list[str]) -> list[dic
     무시한다 — 그 응답이 어느 달인지 예측할 수 없어 `months`에 없는 달을
     끼워 넣을 위험이 있다(`_should_count_click_metrics_response` 참고,
     `baemin_stats.py`의 `_should_count_sales_response`와 동일한 게이트
-    패턴). 그래서 반환되는 리스트는 정확히 `len(months)`개다."""
+    패턴). 그래서 반환되는 리스트는 성공한 달 수만큼(최대 `len(months)`개)이다
+    — 응답이 200이 아니거나 JSON 파싱에 실패하는 등 개별 달 조회가 실패하면
+    그보다 적을 수 있다."""
     responses: list[dict] = []
     state = {"observed_any": False, "collecting": False}
 
     def _on_response(response) -> None:
-        path = urlparse(response.url).path
+        url = response.url
+        path = urlparse(url).path
+        if "self-api.baemin.com" not in url:
+            return
         if not _should_count_click_metrics_response(path, shop_no, state["collecting"]):
             return
         state["observed_any"] = True
