@@ -93,9 +93,30 @@ baemin_reviews.py`)은 직접 HTTP 호출이 아니다 — 로그인된 페이�
 (`--disable-blink-features=AutomationControlled`, `navigator.webdriver` 오버라이드,
 데스크톱 Chrome User-Agent/뷰포트/로케일 위장으로 우회, 상세는 `baemin_auth.py`
 모듈 docstring 참고) — 이 봇 탐지 우회는 사용자 본인 계정에 한해 명시적으로
-승인받았다. 쿠팡이츠/요기요는 아직 미승인이라 "절대 금지" 그대로 유지, 배민의
-주문/정산 실데이터 연동과 리뷰 답글 실제 자동 등록도 여전히 범위 밖이다. 설계
-상세는 `docs/superpowers/specs/2026-08-09-baemin-review-scraping-design.md` 참고.
+승인받았다. 쿠팡이츠/요기요는 아직 미승인이라 "절대 금지" 그대로 유지, 리뷰
+답글 실제 자동 등록도 여전히 범위 밖이다(매출·입금·재주문율 실데이터 연동은
+아래 "배민 매출·입금·재주문율 연동" 절 참고). 설계 상세는
+`docs/superpowers/specs/2026-08-09-baemin-review-scraping-design.md` 참고.
+
+### 배민 매출·입금·재주문율 연동 (예외 허용)
+원래 "배민의 주문/정산 실데이터 연동은 여전히 범위 밖"이었으나, 리뷰 연동에
+이어 실 SaaS 전환 로드맵 3번의 다음 단계로 대시보드의 매출/입금/재주문율도
+실제 배민 데이터로 교체하기로 결정했다(2026-08-11). 사장님광장의 "가게통계"
+화면(`GET /v3/statistics/orders/summary`로 매장별 일별 매출, `GET
+/v3/dashboard/crmInfo`로 매장별 일별 신규/재주문 건수)과 "정산내역" 화면
+(`GET /v3/settle/history/summary`)의 organic 응답을 리뷰와 동일한 방식으로
+가로챈다. 조사 결과 입금은 매장(브랜드)별 필터가 API에 없어 계정(사업자)
+전체 합산으로만 나오는 것을 확인했고, 그래서 매출·재주문율도 브랜드별로
+나누지 않고 계정 전체 합산 하나로만 저장하기로 결정했다 — `daily_settlements`/
+`repurchase_metrics` 스키마 변경 없이 기존 구조를 그대로 upsert 대상으로
+쓴다. 매출/입금은 이번 달 포함 최근 3개월을 백필하고, 재주문율은 배민
+API 자체가 고정 최근 7일 창만 줘서 소급이 안 되며 동기화할 때마다 최근
+7일 스냅샷만 갱신된다. "가게 연결" 화면의 버튼은 "리뷰 동기화"에서 "데이터
+동기화"로 이름을 바꿨다 — 같은 로그인 세션 안에서 리뷰와 매출/입금/재주문율을
+한 번에 가져온다. 쿠팡이츠/요기요는 아직 미승인이라 "절대 금지" 그대로
+유지. 설계 상세는
+`docs/superpowers/specs/2026-08-11-baemin-sales-deposit-repurchase-design.md`
+참고.
 
 ### 모바일 앱 (예외 허용)
 원래 "Flutter 앱 구현 금지"로 모바일 앱 자체를 범위 밖으로 뒀으나, 웹과 같은
@@ -149,8 +170,9 @@ signup_verifications, review_sync_jobs.
   참조하지 않는다 — 인증이 끝난 뒤에만 계정이 생성되기 때문. purpose 컬럼은
   'phone' 값도 허용하지만 현재 코드 경로에서는 만들지 않는다(휴대폰 인증 단계를
   가입 위자드에서 뺐기 때문 — 위 "이메일 인증" 절 참고).
-- review_sync_jobs: 배민 리뷰 동기화 작업 상태(pending/running/success/failed).
-  "가게 연결" 화면의 "리뷰 동기화" 버튼 → 백그라운드 작업 → 폴링에 쓰인다.
+- review_sync_jobs: 배민 데이터 동기화 작업 상태(pending/running/success/failed).
+  리뷰뿐 아니라 매출/입금/재주문율도 같은 작업 안에서 함께 동기화한다.
+  "가게 연결" 화면의 "데이터 동기화" 버튼 → 백그라운드 작업 → 폴링에 쓰인다.
 
 ### 핵심 관계 (모든 관계에 외래키와 삭제 정책 명시)
 - users 1:N stores
