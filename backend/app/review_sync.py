@@ -6,16 +6,36 @@
 세션은 이미 닫혀 있기 때문이다.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.credential_crypto import CredentialCryptoError, decrypt_credential
 from app.db import SessionLocal
-from app.models import BaeminShopBrand, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
+from app.models import (
+    BaeminShopBrand,
+    DailySettlement,
+    RepurchaseMetric,
+    Review,
+    ReviewReply,
+    ReviewSyncJob,
+    StorePlatformConnection,
+)
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 from scrapers.baemin_reviews import BaeminScrapeError, extract_owner_reply, fetch_all_reviews, map_review
+from scrapers.baemin_stats import (
+    BaeminStatsScrapeError,
+    compute_repurchase_rates,
+    fetch_account_settlement,
+    fetch_current_month_orders,
+    fetch_shop_stats,
+    map_deposits_by_date,
+    map_orders_to_daily_sales,
+    map_repurchase_by_date,
+    map_sales_by_date,
+    recent_months,
+)
 
 
 def upsert_shop_brand(db: Session, connection_id: int, shop_no: int, shop_name: str) -> None:
@@ -33,6 +53,62 @@ def upsert_shop_brand(db: Session, connection_id: int, shop_no: int, shop_name: 
         db.add(BaeminShopBrand(connection_id=connection_id, shop_no=str(shop_no), shop_name=shop_name))
     else:
         existing.shop_name = shop_name
+
+
+def upsert_daily_settlement(
+    db: Session, store_id: int, platform_id: int, settle_date: str,
+    *, sales_amount: int | None = None, deposit_amount: int | None = None,
+) -> None:
+    """`(store_id, platform_id, settle_date)` 기준 upsert. sales_amount와
+    deposit_amount는 각각 None이면 기존 값을 건드리지 않는다 — 매출 API는
+    성공했는데 정산 API만 실패한 부분 성공 시나리오를 지원하기 위해서다.
+    기존 Mock 시드 행이 있으면 갱신하고, 다른 플랫폼(요기요/쿠팡이츠) 행은
+    이 함수가 절대 건드리지 않는다(platform_id로 이미 스코프됨)."""
+    d = date.fromisoformat(settle_date)
+    existing = db.scalar(
+        select(DailySettlement).where(
+            DailySettlement.store_id == store_id,
+            DailySettlement.platform_id == platform_id,
+            DailySettlement.settle_date == d,
+        )
+    )
+    if existing is None:
+        db.add(DailySettlement(
+            store_id=store_id, platform_id=platform_id, settle_date=d,
+            sales_amount=sales_amount or 0, deposit_amount=deposit_amount or 0,
+        ))
+        return
+    if sales_amount is not None:
+        existing.sales_amount = sales_amount
+    if deposit_amount is not None:
+        existing.deposit_amount = deposit_amount
+
+
+def upsert_repurchase_metric(
+    db: Session, store_id: int, platform_id: int, metric_date: str,
+    new_orders: int, repeat_orders: int, rate_raw: float, rate_adjusted: float,
+) -> None:
+    """`(store_id, platform_id, metric_date)` 기준 upsert. Task 1의
+    `compute_repurchase_rates` 반환값을 그대로 이 함수에 넘기는 용도다."""
+    d = date.fromisoformat(metric_date)
+    existing = db.scalar(
+        select(RepurchaseMetric).where(
+            RepurchaseMetric.store_id == store_id,
+            RepurchaseMetric.platform_id == platform_id,
+            RepurchaseMetric.metric_date == d,
+        )
+    )
+    if existing is None:
+        db.add(RepurchaseMetric(
+            store_id=store_id, platform_id=platform_id, metric_date=d,
+            new_orders=new_orders, repeat_orders=repeat_orders,
+            rate_raw=rate_raw, rate_adjusted=rate_adjusted,
+        ))
+        return
+    existing.new_orders = new_orders
+    existing.repeat_orders = repeat_orders
+    existing.rate_raw = rate_raw
+    existing.rate_adjusted = rate_adjusted
 
 
 def sync_reviews_for_job(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) -> None:
@@ -133,6 +209,65 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                     ))
                 existing_ids.add(m["external_review_id"])
                 total_inserted += 1
+
+        # 리뷰 동기화 성공 여부와 무관하게 매출/재주문율/입금은 별도로
+        # 시도한다 — 리뷰가 전부 실패해도(예: 매장 목록이 비정상) 매출은
+        # 여전히 유효할 수 있고, 반대로 리뷰만 성공하고 이쪽이 실패해도
+        # job 전체를 실패로 만들지 않는다(설계 문서 에러 처리 표).
+        # stats_errors는 매장별 실패만 기록한다 — sales_responses/crm_responses가
+        # 비어 있는지는 아래에서 각각 따로 확인하므로 여기서 별도로 재해석하지
+        # 않는다(하나의 원인을 두 곳에서 서로 다르게 판단하면 불일치가 생긴다).
+        stats_errors: list[str] = []
+        months = recent_months(3)
+        sales_responses: list[dict] = []
+        crm_responses: list[dict] = []
+        for shop_no, shop_name in session.shops:
+            try:
+                s, c = fetch_shop_stats(session.page, shop_no, months)
+                sales_responses.extend(s)
+                crm_responses.extend(c)
+            except (BaeminStatsScrapeError, KeyError) as e:
+                stats_errors.append(f"{shop_name}: {e}")
+
+        if sales_responses:
+            for settle_date, amount in map_sales_by_date(sales_responses).items():
+                upsert_daily_settlement(
+                    db, job.store_id, job.platform_id, settle_date, sales_amount=amount,
+                )
+
+        # 가게통계의 월별 조회는 완료된 3개월만 준다(실측 확인 — 진행 중인 이번
+        # 달은 그 목록에 아예 없음). 이번 달 진행분은 주문내역 화면에서 별도로
+        # 보완한다 — 계정 전체를 한 번에 반환하므로 매장 루프 밖에서 한 번만
+        # 호출한다(fetch_shop_stats처럼 매장별로 반복하지 않는다).
+        try:
+            current_month_orders = fetch_current_month_orders(session.page)
+            for settle_date, amount in map_orders_to_daily_sales(current_month_orders).items():
+                upsert_daily_settlement(
+                    db, job.store_id, job.platform_id, settle_date, sales_amount=amount,
+                )
+        except (BaeminStatsScrapeError, KeyError) as e:
+            stats_errors.append(f"이번 달 매출(주문내역) 동기화 실패: {e}")
+
+        if crm_responses:
+            rates = compute_repurchase_rates(map_repurchase_by_date(crm_responses))
+            for metric_date, r in rates.items():
+                upsert_repurchase_metric(
+                    db, job.store_id, job.platform_id, metric_date,
+                    new_orders=r["new_orders"], repeat_orders=r["repeat_orders"],
+                    rate_raw=r["rate_raw"], rate_adjusted=r["rate_adjusted"],
+                )
+
+        today = date.today()
+        try:
+            settlement_responses = fetch_account_settlement(
+                session.page, (today - timedelta(days=90)).isoformat(), today.isoformat(),
+            )
+            for settle_date, amount in map_deposits_by_date(settlement_responses).items():
+                upsert_daily_settlement(
+                    db, job.store_id, job.platform_id, settle_date, deposit_amount=amount,
+                )
+        except (BaeminStatsScrapeError, KeyError) as e:
+            stats_errors.append(f"정산(입금) 동기화 실패: {e}")
     finally:
         session.close()
 
@@ -155,11 +290,15 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
     job.status = "success"
     job.reviews_fetched = total_fetched
     job.reviews_inserted = total_inserted
+    messages = []
     if failed_shops:
-        job.error_message = (
-            f"{len(session.shops)}개 중 {len(failed_shops)}개 매장 동기화 실패: "
-            f"{'; '.join(failed_shops)}"
+        messages.append(
+            f"{len(session.shops)}개 중 {len(failed_shops)}개 매장 리뷰 동기화 실패: {'; '.join(failed_shops)}"
         )
+    if stats_errors:
+        messages.append(f"매출/재주문율/입금 동기화 실패: {'; '.join(stats_errors)}")
+    if messages:
+        job.error_message = " / ".join(messages)
     job.finished_at = datetime.now(timezone.utc)
     db.commit()
 

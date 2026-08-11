@@ -1,13 +1,14 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 from cryptography.fernet import Fernet
 
 from app.credential_crypto import CredentialCryptoError, encrypt_credential
-from app.models import BaeminShopBrand, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
-from app.review_sync import sync_reviews_for_job
+from app.models import BaeminShopBrand, DailySettlement, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
+from app.review_sync import sync_reviews_for_job, upsert_daily_settlement, upsert_repurchase_metric
 from scrapers.baemin_auth import BaeminLoginError
 from scrapers.baemin_reviews import BaeminScrapeError
+from scrapers.baemin_stats import BaeminStatsScrapeError
 
 _RAW_1 = {
     "id": 1001, "rating": 5.0, "contents": "이미 있는 리뷰", "memberNickname": "기존고객",
@@ -50,6 +51,8 @@ class _FakeSession:
 
 @pytest.fixture()
 def sync_setup(db_session, seeded_user, platforms, monkeypatch):
+    import app.review_sync as review_sync_mod
+
     monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
     conn = db_session.query(StorePlatformConnection).filter_by(
@@ -64,6 +67,11 @@ def sync_setup(db_session, seeded_user, platforms, monkeypatch):
     )
     db_session.add(job)
     db_session.commit()
+
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", lambda page, shop_no, months: ([], []))
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_current_month_orders", lambda page: [])
+
     return job, conn
 
 
@@ -361,7 +369,7 @@ def test_sync_partial_shop_failure_still_succeeds_with_only_successful_shop_coun
     # 실패했는지가 error_message에 남아야 한다(이게 없으면 sync-status
     # 엔드포인트가 매번 "깨끗한 성공"만 보여주게 된다).
     assert job.error_message is not None
-    assert "2개 중 1개 매장 동기화 실패" in job.error_message
+    assert "2개 중 1개 매장 리뷰 동기화 실패" in job.error_message
     assert "브랜드A" in job.error_message
     assert "일시적 오류" in job.error_message
 
@@ -414,3 +422,346 @@ def test_sync_upserts_shop_brand_name_change_without_duplicate(db_session, sync_
     rows = db_session.query(BaeminShopBrand).filter_by(connection_id=conn.id, shop_no="11111").all()
     assert len(rows) == 1
     assert rows[0].shop_name == "브랜드A"  # 갱신됨, 중복 생성 안 됨
+
+
+def test_upsert_daily_settlement_creates_new_row(db_session, seeded_user, platforms):
+    upsert_daily_settlement(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "2026-08-10",
+        sales_amount=50000, deposit_amount=30000,
+    )
+    db_session.commit()
+
+    row = db_session.query(DailySettlement).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, settle_date="2026-08-10",
+    ).one()
+    assert row.sales_amount == 50000
+    assert row.deposit_amount == 30000
+
+
+def test_upsert_daily_settlement_updates_existing_mock_row_for_same_platform(db_session, seeded_user, platforms):
+    existing = DailySettlement(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        settle_date=date.fromisoformat("2026-08-10"), sales_amount=999, deposit_amount=888,
+    )
+    db_session.add(existing)
+    db_session.commit()
+
+    upsert_daily_settlement(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "2026-08-10",
+        sales_amount=50000, deposit_amount=30000,
+    )
+    db_session.commit()
+
+    rows = db_session.query(DailySettlement).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, settle_date="2026-08-10",
+    ).all()
+    assert len(rows) == 1  # 중복 행이 아니라 갱신
+    assert rows[0].sales_amount == 50000
+    assert rows[0].deposit_amount == 30000
+
+
+def test_upsert_daily_settlement_leaves_other_platform_rows_untouched(db_session, seeded_user, platforms):
+    # 요기요 Mock 행은 배민 동기화와 무관하게 그대로 남아야 한다.
+    yogiyo_row = DailySettlement(
+        store_id=seeded_user["store"].id, platform_id=platforms["yogiyo"].id,
+        settle_date=date.fromisoformat("2026-08-10"), sales_amount=12345, deposit_amount=11111,
+    )
+    db_session.add(yogiyo_row)
+    db_session.commit()
+
+    upsert_daily_settlement(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "2026-08-10",
+        sales_amount=50000, deposit_amount=30000,
+    )
+    db_session.commit()
+
+    untouched = db_session.query(DailySettlement).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["yogiyo"].id, settle_date="2026-08-10",
+    ).one()
+    assert untouched.sales_amount == 12345
+    assert untouched.deposit_amount == 11111
+
+
+def test_upsert_daily_settlement_only_sales_leaves_deposit_untouched_on_existing_row(db_session, seeded_user, platforms):
+    # 매출만 갱신하고 입금은 건드리지 않아야 하는 경우(예: 정산 API가 실패해도
+    # 매출은 저장 가능해야 하는 부분 성공 시나리오)를 대비한다.
+    existing = DailySettlement(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        settle_date=date.fromisoformat("2026-08-10"), sales_amount=999, deposit_amount=777,
+    )
+    db_session.add(existing)
+    db_session.commit()
+
+    upsert_daily_settlement(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "2026-08-10",
+        sales_amount=50000,
+    )
+    db_session.commit()
+
+    row = db_session.query(DailySettlement).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, settle_date="2026-08-10",
+    ).one()
+    assert row.sales_amount == 50000
+    assert row.deposit_amount == 777  # 안 건드림
+
+
+def test_upsert_repurchase_metric_creates_new_row(db_session, seeded_user, platforms):
+    upsert_repurchase_metric(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "2026-08-10",
+        new_orders=3, repeat_orders=2, rate_raw=0.4, rate_adjusted=0.35,
+    )
+    db_session.commit()
+
+    row = db_session.query(RepurchaseMetric).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, metric_date="2026-08-10",
+    ).one()
+    assert row.new_orders == 3
+    assert row.repeat_orders == 2
+    assert float(row.rate_raw) == 0.4
+    assert float(row.rate_adjusted) == 0.35
+
+
+def test_upsert_repurchase_metric_updates_existing_row_without_duplicate(db_session, seeded_user, platforms):
+    existing = RepurchaseMetric(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        metric_date=date.fromisoformat("2026-08-10"),
+        new_orders=1, repeat_orders=1, rate_raw="0.5", rate_adjusted="0.5",
+    )
+    db_session.add(existing)
+    db_session.commit()
+
+    upsert_repurchase_metric(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "2026-08-10",
+        new_orders=3, repeat_orders=2, rate_raw=0.4, rate_adjusted=0.35,
+    )
+    db_session.commit()
+
+    rows = db_session.query(RepurchaseMetric).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, metric_date="2026-08-10",
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].new_orders == 3
+
+
+_SALES_RESP = {"graph": {"data": [{"x": "2026-08-10", "y": 50000.0}]}, "orderAmount": 50000.0, "orderCount": 2}
+_CRM_RESP = {
+    "orderSummary": {"orderCount": 2, "orderPrice": 50000.0},
+    "newReorderSummary": {
+        "newOrderCount": 1, "reorderOrderCount": 1,
+        "timeNewGraph": {"data": [{"x": "2026-08-10", "y": 1}]},
+        "timeReorderGraph": {"data": [{"x": "2026-08-10", "y": 1}]},
+    },
+}
+_SETTLE_RESP = {
+    "contents": [{"depositDueDate": "2026-08-10", "giveAmount": 40000, "giveStatus": "REQUEST"}],
+    "totalSize": 1,
+}
+
+
+def test_sync_upserts_sales_deposit_repurchase_when_all_succeed(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_shop_stats",
+        lambda page, shop_no, months: ([_SALES_RESP], [_CRM_RESP]),
+    )
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_account_settlement",
+        lambda page, start_date, end_date: [_SETTLE_RESP],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    settlement = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert settlement.sales_amount == 50000
+    assert settlement.deposit_amount == 40000
+
+    repurchase = db_session.query(RepurchaseMetric).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, metric_date="2026-08-10",
+    ).one()
+    assert repurchase.new_orders == 1
+    assert repurchase.repeat_orders == 1
+
+
+def test_sync_merges_current_month_orders_into_sales_for_a_different_date(db_session, sync_setup, monkeypatch):
+    """가게통계(완료된 3개월)와 주문내역(이번 달 진행분)은 서로 다른 날짜를
+    다루므로, 두 소스의 매출이 각자의 날짜에 정확히 반영돼야 한다 — 완료된
+    달 데이터를 이번 달 데이터가 덮어쓰면 안 된다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_shop_stats",
+        lambda page, shop_no, months: ([_SALES_RESP], []),  # 2026-08-10에 50000원 (완료된 달분)
+    )
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_current_month_orders",
+        lambda page: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    completed_month_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert completed_month_row.sales_amount == 50000  # 가게통계분, 안 건드려짐
+
+    current_month_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-15",
+    ).one()
+    assert current_month_row.sales_amount == 12000  # 주문내역분
+
+
+def test_sync_isolates_current_month_orders_failure_from_completed_months_sales(db_session, sync_setup, monkeypatch):
+    """이번 달(주문내역) 보완 조회만 실패해도 완료된 3개월분 매출은 정상
+    저장돼야 한다 — 항목별 독립 실패 격리 원칙이 이 소스에도 적용된다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_shop_stats",
+        lambda page, shop_no, months: ([_SALES_RESP], []),
+    )
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
+
+    def _raise_current_month(page):
+        raise BaeminStatsScrapeError("주문내역 조회 실패")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_current_month_orders", _raise_current_month)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    completed_month_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert completed_month_row.sales_amount == 50000
+    assert "주문내역" in job.error_message
+
+
+def test_sync_sums_stats_across_multiple_shops(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeMultiShopSession()  # shops = [(11111, "브랜드A"), (22222, "브랜드B")]
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    sales_a = {"graph": {"data": [{"x": "2026-08-10", "y": 30000.0}]}, "orderAmount": 30000.0, "orderCount": 1}
+    sales_b = {"graph": {"data": [{"x": "2026-08-10", "y": 20000.0}]}, "orderAmount": 20000.0, "orderCount": 1}
+
+    def _fetch_stats(page, shop_no, months):
+        return ([sales_a], [_CRM_RESP]) if shop_no == 11111 else ([sales_b], [_CRM_RESP])
+
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _fetch_stats)
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [_SETTLE_RESP])
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    settlement = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert settlement.sales_amount == 50000  # 30000 + 20000
+
+
+def test_sync_reports_success_with_error_message_when_stats_fail_but_reviews_succeed(db_session, sync_setup, monkeypatch):
+    """리뷰는 성공했는데 매출/재주문율/입금 수집이 전부 실패해도 job 자체는
+    success로 남고 error_message에 어떤 부분이 실패했는지 남아야 한다(설계
+    문서 에러 처리 표 참고)."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [_RAW_1])
+
+    def _raise_stats(page, shop_no, months):
+        raise BaeminStatsScrapeError("매출 통계 API 응답을 한 번도 확인하지 못했습니다")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _raise_stats)
+
+    def _raise_settlement(page, start_date, end_date):
+        raise BaeminStatsScrapeError("정산내역 API 응답을 한 번도 확인하지 못했습니다")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", _raise_settlement)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"  # 리뷰는 성공했으므로 전체 실패 아님
+    assert job.reviews_inserted == 1
+    assert "매출" in job.error_message or "정산" in job.error_message
+    assert db_session.query(DailySettlement).count() == 0  # 저장된 게 없어야 함
+
+
+def test_sync_isolates_settlement_failure_from_stats_success(db_session, sync_setup, monkeypatch):
+    """매출/재주문율은 성공했는데 입금(정산내역)만 실패해도 매출/재주문율은
+    정상 저장돼야 한다 — 항목별 독립 실패 격리."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_shop_stats",
+        lambda page, shop_no, months: ([_SALES_RESP], [_CRM_RESP]),
+    )
+
+    def _raise_settlement(page, start_date, end_date):
+        raise BaeminStatsScrapeError("정산내역 조회 실패")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", _raise_settlement)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    settlement = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert settlement.sales_amount == 50000
+    assert settlement.deposit_amount == 0  # 정산 실패라 갱신 안 됨(신규 행 기본값)
+    assert "정산" in job.error_message
+
+
+def test_sync_isolates_one_shop_stats_failure_from_other_shops(db_session, sync_setup, monkeypatch):
+    """4개 브랜드 중 한 브랜드의 매출/재주문율 조회만 실패해도 나머지
+    브랜드분은 정상 합산돼야 한다(리뷰의 매장별 실패 격리와 동일 원칙)."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeMultiShopSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    def _fetch_stats(page, shop_no, months):
+        if shop_no == 11111:
+            raise BaeminStatsScrapeError("일시적 오류")
+        return [_SALES_RESP], [_CRM_RESP]
+
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _fetch_stats)
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [_SETTLE_RESP])
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    settlement = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert settlement.sales_amount == 50000  # 22222분만 반영, 11111은 실패라 제외
+    assert "브랜드A" in job.error_message or "11111" in job.error_message
