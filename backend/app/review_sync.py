@@ -154,6 +154,11 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
     total_fetched = 0
     total_inserted = 0
     succeeded_any = False
+    # 리뷰가 전부 실패해도(succeeded_any == False) 매출/재주문율/입금 중
+    # 하나라도 성공해 실제로 DB에 커밋된 데이터가 있다면 job을 failed로
+    # 끝내면 안 된다 — 아래 네 블록(매출/이번달 매출/재주문율/입금) 각각의
+    # upsert가 끝날 때마다 이 플래그를 True로 세운다.
+    stats_succeeded_any = False
     # 실패한 매장을 전부 모은다(마지막 것만이 아니라) — 일부만 실패해도 그
     # 사실이 눈에 보여야 하고, 전부 실패했을 때도 어느 매장이 왜 실패했는지
     # 전부 알 수 있어야 한다.
@@ -214,9 +219,11 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         # 시도한다 — 리뷰가 전부 실패해도(예: 매장 목록이 비정상) 매출은
         # 여전히 유효할 수 있고, 반대로 리뷰만 성공하고 이쪽이 실패해도
         # job 전체를 실패로 만들지 않는다(설계 문서 에러 처리 표).
-        # stats_errors는 매장별 실패만 기록한다 — sales_responses/crm_responses가
-        # 비어 있는지는 아래에서 각각 따로 확인하므로 여기서 별도로 재해석하지
-        # 않는다(하나의 원인을 두 곳에서 서로 다르게 판단하면 불일치가 생긴다).
+        # stats_errors는 매장별 실패(가게통계 루프)뿐 아니라 계정 단위
+        # 실패(이번 달 매출/재주문율/정산)도 함께 담는다 — sales_responses/
+        # crm_responses가 비어 있는지는 아래에서 각각 따로 확인하므로 여기서
+        # 별도로 재해석하지 않는다(하나의 원인을 두 곳에서 서로 다르게
+        # 판단하면 불일치가 생긴다).
         stats_errors: list[str] = []
         months = recent_months(3)
         sales_responses: list[dict] = []
@@ -230,10 +237,14 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 stats_errors.append(f"{shop_name}: {e}")
 
         if sales_responses:
-            for settle_date, amount in map_sales_by_date(sales_responses).items():
-                upsert_daily_settlement(
-                    db, job.store_id, job.platform_id, settle_date, sales_amount=amount,
-                )
+            try:
+                for settle_date, amount in map_sales_by_date(sales_responses).items():
+                    upsert_daily_settlement(
+                        db, job.store_id, job.platform_id, settle_date, sales_amount=amount,
+                    )
+                stats_succeeded_any = True
+            except (BaeminStatsScrapeError, KeyError) as e:
+                stats_errors.append(f"매출(가게통계) 동기화 실패: {e}")
 
         # 가게통계의 월별 조회는 완료된 3개월만 준다(실측 확인 — 진행 중인 이번
         # 달은 그 목록에 아예 없음). 이번 달 진행분은 주문내역 화면에서 별도로
@@ -241,37 +252,54 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         # 호출한다(fetch_shop_stats처럼 매장별로 반복하지 않는다).
         try:
             current_month_orders = fetch_current_month_orders(session.page)
-            for settle_date, amount in map_orders_to_daily_sales(current_month_orders).items():
+            current_month_sales = map_orders_to_daily_sales(current_month_orders)
+            for settle_date, amount in current_month_sales.items():
                 upsert_daily_settlement(
                     db, job.store_id, job.platform_id, settle_date, sales_amount=amount,
                 )
+            # 조회 자체는 성공했지만 데이터가 없는 흔한 정상 케이스(예: 이번
+            # 달 주문이 아직 없음)까지 "성공"으로 잡으면 안 된다 — 실제로
+            # 커밋된 행이 있을 때만 stats_succeeded_any를 True로 세운다.
+            if current_month_sales:
+                stats_succeeded_any = True
         except (BaeminStatsScrapeError, KeyError) as e:
             stats_errors.append(f"이번 달 매출(주문내역) 동기화 실패: {e}")
 
         if crm_responses:
-            rates = compute_repurchase_rates(map_repurchase_by_date(crm_responses))
-            for metric_date, r in rates.items():
-                upsert_repurchase_metric(
-                    db, job.store_id, job.platform_id, metric_date,
-                    new_orders=r["new_orders"], repeat_orders=r["repeat_orders"],
-                    rate_raw=r["rate_raw"], rate_adjusted=r["rate_adjusted"],
-                )
+            try:
+                rates = compute_repurchase_rates(map_repurchase_by_date(crm_responses))
+                for metric_date, r in rates.items():
+                    upsert_repurchase_metric(
+                        db, job.store_id, job.platform_id, metric_date,
+                        new_orders=r["new_orders"], repeat_orders=r["repeat_orders"],
+                        rate_raw=r["rate_raw"], rate_adjusted=r["rate_adjusted"],
+                    )
+                stats_succeeded_any = True
+            except (BaeminStatsScrapeError, KeyError) as e:
+                stats_errors.append(f"재주문율 동기화 실패: {e}")
 
         today = date.today()
         try:
             settlement_responses = fetch_account_settlement(
                 session.page, (today - timedelta(days=90)).isoformat(), today.isoformat(),
             )
-            for settle_date, amount in map_deposits_by_date(settlement_responses).items():
+            daily_deposits = map_deposits_by_date(settlement_responses)
+            for settle_date, amount in daily_deposits.items():
                 upsert_daily_settlement(
                     db, job.store_id, job.platform_id, settle_date, deposit_amount=amount,
                 )
+            if daily_deposits:
+                stats_succeeded_any = True
         except (BaeminStatsScrapeError, KeyError) as e:
             stats_errors.append(f"정산(입금) 동기화 실패: {e}")
     finally:
         session.close()
 
-    if not succeeded_any:
+    if not succeeded_any and not stats_succeeded_any:
+        # 리뷰도 전부 실패하고 매출/재주문율/입금 중 실제로 커밋된 것도
+        # 하나도 없을 때만 job을 failed로 끝낸다 — 리뷰는 전부 실패했더라도
+        # 매출 등 다른 소스 중 하나라도 실제로 DB에 커밋됐다면(stats_succeeded_any)
+        # "실패"로 보고하면 안 된다(운영자가 아무것도 저장 안 된 줄 오해함).
         # session.shops가 비어 있던 경우(사실상 불가능하지만 방어적으로)에도
         # failed_shops가 비어 있을 수 있으므로 기본 메시지를 둔다.
         job.status = "failed"
@@ -280,7 +308,8 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         db.commit()
         return
 
-    # 일부 매장만 실패한 경우는 job 실패로 보지 않는다 — 예: 4개 브랜드 중
+    # 일부 매장만 실패한 경우(또는 리뷰는 전부 실패했지만 매출/재주문율/입금
+    # 중 하나라도 성공한 경우)는 job 실패로 보지 않는다 — 예: 4개 브랜드 중
     # 3개가 정상 동기화되고 1개만 일시적 오류라면 이는 대체로 성공한
     # 동기화이지 전체 실패가 아니다. 다만 부분 실패 자체는 조용히 묻히면 안
     # 되므로, success 상태를 유지한 채 error_message에 요약을 남긴다 — 이

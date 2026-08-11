@@ -765,3 +765,91 @@ def test_sync_isolates_one_shop_stats_failure_from_other_shops(db_session, sync_
     ).one()
     assert settlement.sales_amount == 50000  # 22222분만 반영, 11111은 실패라 제외
     assert "브랜드A" in job.error_message or "11111" in job.error_message
+
+
+def test_sync_isolates_malformed_sales_response_from_other_three_sources(db_session, sync_setup, monkeypatch):
+    """fetch_shop_stats가 200으로 성공했지만 응답 모양이 바뀌어(예: "graph" 키
+    누락) map_sales_by_date가 KeyError를 던지는 현실적인 상황을 흉내낸다.
+    이 매핑 단계 예외가 upsert 루프까지 감싸는 try/except 없이 새어나가면
+    sync_reviews_for_job의 바깥쪽 안전망까지 번져 이미 저장된 리뷰까지
+    롤백되고 나머지 세 소스(이번 달 매출/재주문율/입금)도 전혀 실행되지
+    않는다 — 이번 라운드에서 고친 Critical 버그의 회귀 테스트."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [_RAW_1])
+
+    _malformed_sales_resp = {"orderAmount": 50000.0, "orderCount": 2}  # "graph" 키 누락
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_shop_stats",
+        lambda page, shop_no, months: ([_malformed_sales_resp], [_CRM_RESP]),
+    )
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_current_month_orders",
+        lambda page: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+    )
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_account_settlement",
+        lambda page, start_date, end_date: [_SETTLE_RESP],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    # (a) job은 여전히 success로 끝나야 한다 — 리뷰와 나머지 세 소스가 성공했으므로.
+    assert job.status == "success"
+    # (b) 이미 성공적으로 동기화된 리뷰는 롤백되지 않고 그대로 커밋돼야 한다.
+    assert job.reviews_inserted == 1
+    assert db_session.query(Review).filter_by(external_review_id=1001).one()
+    # (c) 나머지 세 소스(이번 달 매출/재주문율/입금)는 정상적으로 저장돼야 한다.
+    current_month_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-15",
+    ).one()
+    assert current_month_row.sales_amount == 12000  # 이번 달(주문내역)분
+
+    deposit_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert deposit_row.deposit_amount == 40000  # 입금(정산내역)분, _SETTLE_RESP는 08-10 날짜
+
+    repurchase = db_session.query(RepurchaseMetric).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, metric_date="2026-08-10",
+    ).one()
+    assert repurchase.new_orders == 1
+
+    # (d) 매출(가게통계) 실패 메시지가 error_message에 남아야 한다.
+    assert "매출" in job.error_message
+
+
+def test_sync_marks_job_success_when_all_reviews_fail_but_stats_succeed(db_session, sync_setup, monkeypatch):
+    """모든 매장의 리뷰 조회가 실패해도(succeeded_any == False), 매출 등 네
+    소스 중 하나라도 성공해 실제로 DailySettlement 행이 커밋됐다면 job은
+    "failed"가 아니라 "success"로 끝나야 한다 — 안 그러면 운영자가 job
+    상태만 보고 실제로는 저장된 데이터가 있는데도 "아무것도 안 됐다"고
+    오해하게 된다. 이번 라운드에서 고친 Important 버그의 회귀 테스트."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+
+    def _raise_reviews(page, shop_no):
+        raise BaeminScrapeError("리뷰 조회 실패: HTTP 500")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _raise_reviews)
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_shop_stats",
+        lambda page, shop_no, months: ([_SALES_RESP], []),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"  # 이전에는 "failed"였던 회귀 지점
+    assert "HTTP 500" in job.error_message  # 리뷰 실패 요약은 그대로 남아야 한다
+    assert job.reviews_inserted == 0
+
+    settlement = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).one()
+    assert settlement.sales_amount == 50000  # 매출 데이터는 실제로 커밋됨
