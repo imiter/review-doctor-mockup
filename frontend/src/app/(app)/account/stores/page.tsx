@@ -192,7 +192,7 @@ export default function StoreConnectionsPage() {
                   disabled={syncingId === c.id}
                   className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
                 >
-                  {syncingId === c.id ? "동기화 중..." : "리뷰 동기화"}
+                  {syncingId === c.id ? "동기화 중..." : "데이터 동기화"}
                 </button>
                 {syncStatus && (
                   <p className="mt-2 text-xs text-muted">
