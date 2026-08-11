@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, Order
+from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order
 
 
 def make_campaign(db_session, store, current_cpc=400, target_rank=3):
@@ -129,3 +129,63 @@ def test_rank_by_distance_ignores_time_series_mock_rows(client, db_session, seed
 
     row = client.get("/ads/rank-by-distance", headers=auth_headers).json()[0]
     assert row["points"] == []
+
+
+def test_click_performance_computes_acos_from_real_formula(client, db_session, seeded_user, platforms, auth_headers):
+    db_session.add(BrandAdClickMetric(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        shop_no="14804914", metric_date=date(2026, 8, 1),
+        ad_spend=34730, impressions=4632, clicks=106, ad_orders=16, ad_revenue=427000,
+    ))
+    db_session.commit()
+
+    resp = client.get(
+        f"/ads/click-performance?store_id={seeded_user['store'].id}&shop_no=14804914&days=30",
+        headers=auth_headers,
+    )
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["shop_no"] == "14804914"
+    assert body["ad_spend"] == 34730
+    assert body["clicks"] == 106
+    # CPC = 34730 / 106 ≈ 327.64
+    assert body["cpc"] == round(34730 / 106, 2)
+    # CVR = 16 / 106 ≈ 0.1509
+    assert body["cvr"] == round(16 / 106, 4)
+    assert body["acos"] is not None
+    assert body["score"] is not None
+
+
+def test_click_performance_scopes_to_requested_shop_no_only(client, db_session, seeded_user, platforms, auth_headers):
+    db_session.add_all([
+        BrandAdClickMetric(
+            store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+            shop_no="14804912", metric_date=date(2026, 8, 1),
+            ad_spend=95, impressions=40, clicks=1, ad_orders=0, ad_revenue=0,
+        ),
+        BrandAdClickMetric(
+            store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+            shop_no="14804914", metric_date=date(2026, 8, 1),
+            ad_spend=34730, impressions=4632, clicks=106, ad_orders=16, ad_revenue=427000,
+        ),
+    ])
+    db_session.commit()
+
+    resp = client.get(
+        f"/ads/click-performance?store_id={seeded_user['store'].id}&shop_no=14804912&days=30",
+        headers=auth_headers,
+    )
+    body = resp.json()
+    assert body["ad_spend"] == 95  # 14804914분이 섞이면 안 됨
+
+
+def test_click_performance_no_data_returns_zeroed_response(client, db_session, seeded_user, platforms, auth_headers):
+    resp = client.get(
+        f"/ads/click-performance?store_id={seeded_user['store'].id}&shop_no=99999999&days=30",
+        headers=auth_headers,
+    )
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["ad_spend"] == 0
+    assert body["acos"] is None  # 분모 0 — 계산 불가
+    assert body["score"] is None

@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.acos import calculate_performance
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
-from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, Order, Store, User
+from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order, Store, User
 from scripts.ingest_rank_snapshots import ingest as ingest_csv
 
 router = APIRouter(tags=["ads"])
@@ -122,6 +122,52 @@ def ads_performance(
             "order_share": order_share,
         })
     return result
+
+
+@router.get("/ads/click-performance")
+def ads_click_performance(
+    shop_no: str,
+    store_id: int | None = None,
+    days: int = Query(14, ge=1, le=90),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """브랜드(shop_no) 단위 우리가게클릭 실데이터 성과. 기존 `/ads/performance`
+    (카테고리 기반 `ad_campaigns`, Mock)와 완전히 별개 — `ad_campaigns`를
+    전혀 참조하지 않는다."""
+    sid = store_id or get_user_default_store_id(user, db)
+    since = date.today() - timedelta(days=days)
+
+    agg = db.execute(
+        select(
+            func.coalesce(func.sum(BrandAdClickMetric.ad_spend), 0),
+            func.coalesce(func.sum(BrandAdClickMetric.impressions), 0),
+            func.coalesce(func.sum(BrandAdClickMetric.clicks), 0),
+            func.coalesce(func.sum(BrandAdClickMetric.ad_orders), 0),
+            func.coalesce(func.sum(BrandAdClickMetric.ad_revenue), 0),
+        ).where(
+            BrandAdClickMetric.store_id == sid,
+            BrandAdClickMetric.shop_no == shop_no,
+            BrandAdClickMetric.metric_date >= since,
+        )
+    ).one()
+    ad_spend, impressions, clicks, ad_orders, ad_revenue = agg
+    perf = calculate_performance(ad_spend, clicks, ad_orders, ad_revenue)
+
+    return {
+        "shop_no": shop_no,
+        "period_days": days,
+        "ad_spend": perf.ad_spend,
+        "impressions": impressions,
+        "clicks": perf.clicks,
+        "ad_orders": perf.ad_orders,
+        "ad_revenue": perf.ad_revenue,
+        "cpc": perf.cpc,
+        "cvr": perf.cvr,
+        "aov": perf.aov,
+        "acos": perf.acos,
+        "score": perf.score,
+    }
 
 
 @router.get("/ads/rank-by-distance")
