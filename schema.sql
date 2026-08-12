@@ -187,14 +187,23 @@ CREATE INDEX idx_review_replies_review ON review_replies(review_id);
 -- ----------------------------------------------------------------------------
 -- 11. daily_settlements — 일별 매출과 입금을 함께 저장 (정산 지연 반영)
 --     매출 요약 테이블은 따로 두지 않는다. 기간 요약은 이 테이블을 집계한다.
+--     commission_amount~ad_cost_amount는 배민 정산 상세(실측)로 채워지는
+--     nullable 컬럼이다 — 요기요/쿠팡이츠 행과, 아직 정산 상세 동기화가
+--     안 된 배민 과거 날짜는 NULL로 남는다("데이터 없음"과 "차감액 0원"을
+--     구분하기 위해 NOT NULL DEFAULT 0을 쓰지 않는다). "기타" 항목은
+--     컬럼을 두지 않고 조회 시점에 잔차로 계산한다(정규화 원칙).
 -- ----------------------------------------------------------------------------
 CREATE TABLE daily_settlements (
-    id             BIGSERIAL PRIMARY KEY,
-    store_id       BIGINT NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
-    platform_id    INT    NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
-    settle_date    DATE   NOT NULL,
-    sales_amount   INT    NOT NULL DEFAULT 0 CHECK (sales_amount >= 0),   -- 그날 발생한 매출액 (원)
-    deposit_amount INT    NOT NULL DEFAULT 0 CHECK (deposit_amount >= 0), -- 그날 실제 입금된 금액 (원)
+    id                        BIGSERIAL PRIMARY KEY,
+    store_id                  BIGINT NOT NULL REFERENCES stores(id)    ON DELETE CASCADE,
+    platform_id               INT    NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
+    settle_date               DATE   NOT NULL,
+    sales_amount              INT    NOT NULL DEFAULT 0 CHECK (sales_amount >= 0),   -- 그날 발생한 매출액 (원)
+    deposit_amount            INT    NOT NULL DEFAULT 0 CHECK (deposit_amount >= 0), -- 그날 실제 입금된 금액 (원)
+    commission_amount         INT    CHECK (commission_amount >= 0),         -- 중개수수료+결제수수료 (배민 실측, 양수)
+    delivery_fee_amount       INT    CHECK (delivery_fee_amount >= 0),       -- 배달비 (배민 실측, 양수)
+    customer_discount_amount  INT    CHECK (customer_discount_amount >= 0),  -- 고객 즉시할인 (배민 실측, 양수)
+    ad_cost_amount            INT    CHECK (ad_cost_amount >= 0),            -- 우가클(CPC) 광고비 (배민 실측, 양수)
     UNIQUE (store_id, platform_id, settle_date)
 );
 

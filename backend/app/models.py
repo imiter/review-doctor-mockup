@@ -214,6 +214,10 @@ class DailySettlement(Base):
     settle_date: Mapped[date]
     sales_amount: Mapped[int] = mapped_column(default=0)
     deposit_amount: Mapped[int] = mapped_column(default=0)
+    commission_amount: Mapped[int | None] = mapped_column(default=None)
+    delivery_fee_amount: Mapped[int | None] = mapped_column(default=None)
+    customer_discount_amount: Mapped[int | None] = mapped_column(default=None)
+    ad_cost_amount: Mapped[int | None] = mapped_column(default=None)
 
     platform: Mapped[Platform] = relationship()
 

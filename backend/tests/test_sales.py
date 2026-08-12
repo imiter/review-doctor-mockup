@@ -97,3 +97,35 @@ def test_sales_breakdown_computes_commission_from_platform_rate(client, db_sessi
     assert row["payment_fee_estimate"] == 3_000  # 100,000 * 0.03
     assert row["net_estimate"] == 90_200
     assert row["actual_deposit"] == 89_200       # 추정치와 실제 입금이 정산 주기 차이로 다를 수 있음
+
+
+def test_daily_settlement_breakdown_columns_default_to_null(db_session, seeded_user, platforms):
+    store, platform = seeded_user["store"], platforms["baemin"]
+    row = DailySettlement(
+        store_id=store.id, platform_id=platform.id, settle_date=date.today(),
+        sales_amount=1_000, deposit_amount=900,
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+    assert row.commission_amount is None
+    assert row.delivery_fee_amount is None
+    assert row.customer_discount_amount is None
+    assert row.ad_cost_amount is None
+
+
+def test_daily_settlement_breakdown_columns_store_explicit_values(db_session, seeded_user, platforms):
+    store, platform = seeded_user["store"], platforms["baemin"]
+    row = DailySettlement(
+        store_id=store.id, platform_id=platform.id, settle_date=date.today(),
+        sales_amount=1_000, deposit_amount=900,
+        commission_amount=100, delivery_fee_amount=50,
+        customer_discount_amount=30, ad_cost_amount=20,
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+    assert row.commission_amount == 100
+    assert row.delivery_fee_amount == 50
+    assert row.customer_discount_amount == 30
+    assert row.ad_cost_amount == 20
