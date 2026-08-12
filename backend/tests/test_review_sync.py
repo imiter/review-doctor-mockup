@@ -555,7 +555,7 @@ _CRM_RESP = {
     },
 }
 _SETTLE_RESP = {
-    "contents": [{"depositDueDate": "2026-08-10", "giveAmount": 40000, "giveStatus": "REQUEST"}],
+    "contents": [{"giveId": 900001, "depositDueDate": "2026-08-10", "giveAmount": 40000, "giveStatus": "REQUEST"}],
     "totalSize": 1,
 }
 
@@ -677,7 +677,7 @@ def test_sync_merges_current_month_sales_and_settlement_deposit_on_the_same_date
     monkeypatch.setattr(
         review_sync_mod, "fetch_account_settlement",
         lambda page, start_date, end_date: [
-            {"contents": [{"depositDueDate": "2026-08-15", "giveAmount": 9000, "giveStatus": "REQUEST"}], "totalSize": 1},
+            {"contents": [{"giveId": 900002, "depositDueDate": "2026-08-15", "giveAmount": 9000, "giveStatus": "REQUEST"}], "totalSize": 1},
         ],
     )
 
@@ -972,7 +972,7 @@ def test_sync_zeroes_stale_mock_deposit_on_gap_date_within_fetch_window(db_sessi
     db_session.commit()
 
     settle_resp = {
-        "contents": [{"depositDueDate": payout_date.isoformat(), "giveAmount": 40000, "giveStatus": "REQUEST"}],
+        "contents": [{"giveId": 900003, "depositDueDate": payout_date.isoformat(), "giveAmount": 40000, "giveStatus": "REQUEST"}],
         "totalSize": 1,
     }
     monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [settle_resp])

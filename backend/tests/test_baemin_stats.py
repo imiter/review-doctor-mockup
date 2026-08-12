@@ -124,6 +124,21 @@ def test_map_deposits_by_date_empty_contents_returns_empty_dict():
     assert map_deposits_by_date([{"contents": [], "totalSize": 0}]) == {}
 
 
+def test_map_deposits_by_date_dedupes_same_give_id_across_pages():
+    # 실 계정으로 재현된 실제 버그: 숫자 페이지네이션 경계에서 같은 배치
+    # (giveId)가 두 페이지 응답 모두에 나타날 수 있다 — 중복으로 두 번
+    # 합산되면 안 되고 한 번만 반영돼야 한다.
+    page_a = {"contents": [
+        {"giveId": 531969790, "depositDueDate": "2026-08-11", "giveAmount": 168431},
+    ], "totalSize": 13}
+    page_b = {"contents": [
+        {"giveId": 531969790, "depositDueDate": "2026-08-11", "giveAmount": 168431},
+        {"giveId": 531748522, "depositDueDate": "2026-08-10", "giveAmount": 293063},
+    ], "totalSize": 13}
+    result = map_deposits_by_date([page_a, page_b])
+    assert result == {"2026-08-11": 168431, "2026-08-10": 293063}  # 168431이 두 번 더해지면 안 됨
+
+
 # 실 계정에서 확인한 실제 crmInfo 응답의 newReorderSummary 형태(브랜드 2개).
 _CRM_RESPONSE_BRAND_A = {
     "orderSummary": {"orderCount": 2, "orderPrice": 40200.0},

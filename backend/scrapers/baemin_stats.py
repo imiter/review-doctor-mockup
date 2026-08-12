@@ -53,12 +53,21 @@ persist된 마지막으로 조회했던 달이었다(실측 시점엔 우연히 
 다이얼로그로 scope하지 않으면 아래쪽 다이얼로그의 버튼을 잘못 클릭해
 포인터 이벤트가 가로채이는 것으로 확인됐다.
 
-**정산내역 페이지네이션**: 좁은 기본 범위에서는 안 보이지만, 범위를 넓히면
-(90일) 리스트 하단에 리뷰 리스트와 동일한 "더보기" 텍스트 버튼이 나타난다
-(실측 확인: 마우스 휠 스크롤만으로는 추가 페이지가 로드되지 않았다 —
-"더보기" 클릭이 필요하다). `_click_load_more_until_done`이
-`baemin_reviews.py`의 "더보기" 반복 클릭 + 연속 무진행 카운터 패턴을 공유
-헬퍼로 재사용하며, `fetch_account_settlement`는 이걸 쓴다.
+**정산내역 페이지네이션 (정정, 2026-08-11 세션 중 재현·수정)**: 원래 "리뷰
+리스트와 동일한 '더보기' 패턴"이라고 서술했었으나 틀렸다 — `_click_load_more_until_done`이
+찾는 "더보기" 텍스트가 정산 목록 자체가 아니라 화면 하단의 무관한 "전문가
+Q&A" 섹션의 "더보기 ›" 링크와 우연히 매칭돼, 그 링크를 계속 클릭하면서도
+정산 목록에는 새 요청이 전혀 발생하지 않았다(재현: `totalSize=20`인데
+매번 첫 페이지 10건만 수집됨). 실제로는 주문내역과 마찬가지로 숫자
+페이지네이션(`1 2 3 ...` + 접근성 이름 `"다음"`인 다음-페이지 버튼)이라
+`fetch_account_settlement`는 `_click_next_page_until_done`을 쓴다(아래
+"정정 (2026-08-12)" 절의 주문내역 발견과 같은 종류의 문제 — 이 모듈
+안에서 화면마다 페이지네이션 방식이 다르다는 걸 매번 실측으로 확인해야
+한다는 교훈이 두 번째로 나온 셈이다). 페이지 경계에서 같은 배치(`giveId`)가
+두 페이지에 겹쳐 나타날 수 있어 `map_deposits_by_date`가 `giveId` 기준
+dedupe를 한다. 날짜 범위를 지정하기 전 페이지 최초 로드 시점에도 화면이
+스스로 기본 필터에 대한 organic 응답을 한 번 발생시키므로(`fetch_shop_stats`의
+`collect_sales`와 동일한 문제), `collecting` 플래그로 걸러낸다.
 
 **주문내역(`/orders/history`)은 정산내역과 완전히 같은 날짜 범위 다이얼로그
 컴포넌트를 쓴다**(실측 확인, 2026-08-11 fix round) — "날짜 직접 선택" 버튼
@@ -204,16 +213,23 @@ def map_orders_to_daily_sales(order_contents: list[dict]) -> dict[str, int]:
 
 
 def map_deposits_by_date(responses: list[dict]) -> dict[str, int]:
-    """`GET /v3/settle/history/summary` 응답들의 `contents[].{depositDueDate,
-    giveAmount}`를 날짜별로 합산한다. 같은 depositDueDate에 배치가 여러 건
-    겹치면 합산한다. `giveStatus`(예정/확정)는 구분하지 않는다(설계 결정) —
-    상태와 무관하게 금액을 그대로 더한다. 페이지네이션이 있으면 여러 페이지
-    응답을 전부 이 리스트에 담아 넘긴다."""
-    totals: dict[str, int] = {}
+    """`GET /v3/settle/history/summary` 응답들의 `contents[].{giveId,
+    depositDueDate, giveAmount}`를 날짜별로 합산한다. `giveStatus`(예정/확정)는
+    구분하지 않는다(설계 결정) — 상태와 무관하게 금액을 그대로 더한다.
+    페이지네이션이 있으면 여러 페이지 응답을 전부 이 리스트에 담아 넘긴다 —
+    페이지 경계에 걸친 배치가 두 페이지에 중복으로 나타날 수 있어(실측
+    확인: 페이지네이션 중 목록이 갱신되며 겹침 발생) `giveId` 기준으로
+    먼저 dedupe한 뒤에 날짜별로 합산한다(리뷰의 `external_review_id`,
+    주문내역의 `orderNumber` dedup과 동일한 방어 패턴)."""
+    batches_by_id: dict[object, dict] = {}
     for resp in responses:
         for batch in resp["contents"]:
-            date_str = batch["depositDueDate"]
-            totals[date_str] = totals.get(date_str, 0) + batch["giveAmount"]
+            batches_by_id[batch["giveId"]] = batch
+
+    totals: dict[str, int] = {}
+    for batch in batches_by_id.values():
+        date_str = batch["depositDueDate"]
+        totals[date_str] = totals.get(date_str, 0) + batch["giveAmount"]
     return totals
 
 
@@ -634,17 +650,38 @@ def _click_next_page_until_done(page, progress_fn) -> None:
 
 def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]:
     """정산내역 화면(`/orders/billing`)에서 계정 전체 입금 배치
-    (settle/history/summary) organic 응답을 가로챈다. 날짜 범위를 지정한 뒤
-    페이지네이션 컨트롤("더보기" 버튼, 실측 확인 — 리뷰 리스트와 동일한
-    패턴)이 있으면 끝까지 반복한다."""
+    (settle/history/summary) organic 응답을 가로챈다.
+
+    **정정 (2026-08-11 세션 중 재현·수정) — "더보기"가 아니라 숫자
+    페이지네이션이다.** 원래 서술("더보기" 버튼, 리뷰 리스트와 동일한
+    패턴)은 틀렸다 — 실 계정으로 재현해보니 정산내역 리스트 자체에는
+    "더보기" 텍스트가 없고, `page.get_by_text("더보기", exact=True)`가
+    실제로 클릭하고 있던 건 화면 하단의 무관한 "전문가 Q&A" 섹션의
+    "더보기 ›" 링크였다 — 그래서 아무리 클릭해도 정산 목록에 새 요청이
+    전혀 발생하지 않고 항상 첫 페이지(10건)만 수집됐다(`totalSize=20`인데
+    10건만 잡히는 것으로 재현 확인). 주문내역(`_click_next_page_until_done`
+    도입 절 참고)과 마찬가지로 숫자 페이지네이션(`1 2 3 ...` + 접근성 이름
+    `"다음"`인 다음-페이지 버튼)이라 그 헬퍼를 그대로 재사용한다.
+
+    날짜 범위를 지정하기 **전**(페이지 최초 로드 시점)에도 화면이 스스로
+    기본 필터(짧은 미정산 예정 구간)에 대한 organic 응답을 한 번
+    발생시킨다(실측 확인 — `startDate`가 우리가 지정한 범위가 아닌 것으로
+    구분됨). 이 응답이 결과에 섞이면 우리가 요청한 범위 밖 날짜가
+    끼어들거나, 겹치는 날짜의 배치가 이중 집계될 위험이 있다 — 그래서
+    `fetch_shop_stats`/`fetch_brand_click_metrics`와 동일한 `collecting`
+    플래그 게이트로 걸러낸다."""
     responses: list[dict] = []
-    observed = {"any": False}
+    state = {"observed_any": False, "collecting": False}
+
+    def _should_count(url: str, collecting: bool) -> bool:
+        if "self-api.baemin.com" not in url:
+            return False
+        return urlparse(url).path == "/v3/settle/history/summary" and collecting
 
     def _on_response(response) -> None:
-        url = response.url
-        if urlparse(url).path != "/v3/settle/history/summary":
+        if not _should_count(response.url, state["collecting"]):
             return
-        observed["any"] = True
+        state["observed_any"] = True
         if response.status == 200:
             try:
                 responses.append(response.json())
@@ -660,6 +697,8 @@ def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]
 
         page.wait_for_timeout(2_000)
         _dismiss_backdrop_if_present(page)
+
+        state["collecting"] = True
         try:
             _open_date_range_picker(page)
             _set_date_range(page, start_date, end_date)
@@ -667,13 +706,11 @@ def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]
             raise BaeminStatsScrapeError(f"정산내역 날짜 범위 지정에 실패했습니다: {e}") from e
         page.wait_for_timeout(2_000)
 
-        # 90일처럼 넓은 범위에서는 페이지당 10건으로 잘려 "더보기" 버튼이
-        # 나타난다(모듈 docstring 참고).
-        _click_load_more_until_done(page, lambda: len(responses))
+        _click_next_page_until_done(page, lambda: len(responses))
     finally:
         page.remove_listener("response", _on_response)
 
-    if not observed["any"]:
+    if not state["observed_any"]:
         raise BaeminStatsScrapeError("정산내역 API 응답을 한 번도 확인하지 못했습니다")
 
     return responses
