@@ -145,7 +145,16 @@ function SalesBreakdownModal({ storeId, period }: { storeId: number; period: Per
                 <div className="flex justify-between text-danger"><dt>− 배달비</dt><dd>−{won(p.delivery_fee_amount)}</dd></div>
                 <div className="flex justify-between text-danger"><dt>− 고객할인</dt><dd>−{won(p.customer_discount_amount)}</dd></div>
                 <div className="flex justify-between text-danger"><dt>− 우가클비용(광고비)</dt><dd>−{won(p.ad_cost_amount)}</dd></div>
-                <div className="flex justify-between text-muted"><dt>− 기타</dt><dd>−{won(p.misc_amount)}</dd></div>
+                {/* misc_amount는 sales_amount − 4개 실측 카테고리 − actual_deposit로 계산된
+                    잔차라 매출/입금이 서로 다른 배민 화면에서 독립적으로 온 값인 만큼 음수가
+                    될 수 있다(설계 문서 참고). 항상 "−" 접두를 붙이면 음수일 때
+                    "− -1,234원" 같은 이중 음수로 보이므로, 부호에 따라 표시를 분기한다 —
+                    양수(차감)면 기존처럼 "− 기타", 음수(초과 입금/보정)면 "+ 기타"로 뒤집어
+                    보여준다. */}
+                <div className={`flex justify-between ${p.misc_amount >= 0 ? "text-muted" : "text-success"}`}>
+                  <dt>{p.misc_amount >= 0 ? "− 기타" : "+ 기타"}</dt>
+                  <dd>{p.misc_amount >= 0 ? `−${won(p.misc_amount)}` : `+${won(Math.abs(p.misc_amount))}`}</dd>
+                </div>
               </>
             )}
             <div className="flex justify-between text-success"><dt>실제 입금액</dt><dd>{won(p.actual_deposit)}</dd></div>
