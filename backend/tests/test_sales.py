@@ -156,9 +156,43 @@ def test_sales_breakdown_uses_real_values_when_columns_filled(client, db_session
     assert "commission_estimate" not in row  # 추정치 필드는 실측 응답에 안 섞임
 
 
-def test_sales_breakdown_partial_period_data_still_falls_back_to_estimate(client, db_session, seeded_user, platforms, auth_headers):
-    """기간 안에 신규 컬럼이 채워진 날짜가 하나도 없으면(예: 30일 상세
-    수집 범위 밖) 전체 기간을 추정치로 폴백한다."""
+def test_sales_breakdown_any_not_all_rows_with_real_data_flips_is_estimate(client, db_session, seeded_user, platforms, auth_headers):
+    """기간 내 일부 행만 신규 컬럼이 채워져도 is_estimate는 False가 된다.
+    (func.count()는 ANY 의미지 ALL이 아니다.)
+    """
+    store, platform = seeded_user["store"], platforms["baemin"]
+    db_session.add_all([
+        # 첫 번째 행: 신규 컬럼 채워짐
+        DailySettlement(
+            store_id=store.id, platform_id=platform.id, settle_date=date.today(),
+            sales_amount=150_000, deposit_amount=100_000,
+            commission_amount=15_000, delivery_fee_amount=8_000,
+            customer_discount_amount=10_000, ad_cost_amount=2_000,
+        ),
+        # 두 번째 행: 신규 컬럼 NULL (같은 기간, 다른 날짜)
+        DailySettlement(
+            store_id=store.id, platform_id=platform.id, settle_date=date.today() - timedelta(days=2),
+            sales_amount=100_000, deposit_amount=80_000,
+        ),
+    ])
+    db_session.commit()
+
+    res = client.get("/sales/breakdown?period=week", headers=auth_headers).json()
+    row = res["platforms"][0]
+    assert row["is_estimate"] is False  # 일부 행이라도 실측값이 있으면 False
+    assert row["sales_amount"] == 250_000  # 150 + 100
+    assert row["commission_amount"] == 15_000  # 15 + 0 (NULL 행은 coalesce로 0)
+    assert row["delivery_fee_amount"] == 8_000
+    assert row["customer_discount_amount"] == 10_000
+    assert row["ad_cost_amount"] == 2_000
+    # misc = 250000 - 15000 - 8000 - 10000 - 2000 - 180000 = 35000
+    assert row["misc_amount"] == 35_000
+    assert row["actual_deposit"] == 180_000
+
+
+def test_sales_breakdown_all_rows_without_real_data_in_period_falls_back_to_estimate(client, db_session, seeded_user, platforms, auth_headers):
+    """기간 안에 신규 컬럼이 채워진 행이 하나도 없으면 전체 기간을 추정치로 폴백한다.
+    (모든 행의 commission_amount, 등이 NULL인 경우)"""
     store, platform = seeded_user["store"], platforms["baemin"]
     db_session.add(DailySettlement(
         store_id=store.id, platform_id=platform.id,
