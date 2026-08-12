@@ -377,6 +377,16 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         except Exception as e:
             stats_errors.append(f"정산(입금) 동기화 실패: {e}")
 
+        # 위 deposit_amount 블록과 달리 이 블록은 시작 전에 기존 값을 0으로
+        # 초기화하지 않는다 — deposit_amount는 배치 지급 캘린더의 갭 날짜를
+        # Mock 시드 오염 없이 0으로 남기기 위해 일괄 리셋이 필요했지만, 이
+        # 신규 컬럼 4개는 그런 갭 개념이 없고(부분 캡처 실패는 이미
+        # `fetch_settlement_breakdown_details`의 하드 에러가 걸러준다), 여기서
+        # 일괄 리셋을 하면 이번 동기화가 부분적으로만 성공했을 때 이전에
+        # 이미 확보돼 있던 좋은 데이터까지 지워버리는 위험이 생긴다 —
+        # 그래서 의도적으로 리셋 없이 upsert만 한다(2026-08-13, 최종 리뷰에서
+        # 확인된 결정 — 실제 블랭킷 리셋 구현은 별도 설계 논의가 필요해
+        # 범위 밖으로 남긴다).
         try:
             detail_window_start = today - timedelta(days=30)
             breakdown_details = fetch_settlement_breakdown_details(

@@ -161,6 +161,17 @@ def sales_breakdown(
          real_commission, real_delivery, real_discount, real_ad_cost, real_rows_count) in rows:
         sales = int(sales)
         actual_deposit = int(actual_deposit)
+        # is_estimate는 "이 기간에 실측 컬럼이 하나라도 있으면 전부 실측"으로
+        # 판정한다 — 기간이 review_sync.py의 정산 상세 동기화 창(최근
+        # 30일, `detail_window_start = today - timedelta(days=30)`)보다
+        # 넓어지면, 그 창 밖 날짜는 commission_amount 등이 NULL인 채로
+        # coalesce(sum(...), 0)이 조용히 0을 더해 실측인 척하는 결과가 나올
+        # 수 있다. 현재는 가장 넓은 period 옵션인 "month"가 아래
+        # `_period_range`에서 29일(오늘 포함 30일)이라 그 창 안에 정확히
+        # 들어와 무해하지만, 두 창 크기는 서로 맞물려 있다는 게 코드로는
+        # 안 드러난다 — 둘 중 하나만 나중에 넓히면 이 불변조건이 조용히
+        # 깨진다(2026-08-13, 최종 리뷰에서 문서화만 하기로 결정, 창 크기
+        # 자체는 바꾸지 않음).
         is_estimate = real_rows_count == 0
         if is_estimate:
             rate = float(commission_rate or 0)
