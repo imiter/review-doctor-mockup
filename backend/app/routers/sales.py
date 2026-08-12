@@ -126,12 +126,15 @@ def sales_breakdown(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """매출분석 카드. 플랫폼별 매출 → 중개수수료·결제수수료 추정 → 순정산액.
+    """매출분석 카드. 플랫폼별 매출 → 차감 항목 → 순정산액.
 
-    중개수수료는 platforms.default_commission_rate(실제 저장값), 결제수수료는
-    PAYMENT_FEE_RATE(seed 생성 공식과 동일)로 추정한 것이며 실제 입금액(deposit_amount)과는
-    정산 주기(D+3)만큼 시차가 있어 완전히 일치하지 않을 수 있다 — 이 차이 자체가
-    "매출과 입금이 다르다"는 현장 문제를 보여준다.
+    배민 행은 정산 상세(수수료/배달비/고객할인/우가클비용) 동기화가 된
+    기간이면 실측값(`is_estimate: False`)을 반환하고, 아직 없으면(신규 컬럼이 전부
+    NULL) 요율 기반 추정치(`is_estimate: True`)로 폴백한다. 요기요/쿠팡이츠는
+    실측 컬럼을 채우지 않으므로 항상 추정치다. "기타"(misc_amount)는
+    저장하지 않고 sales_amount − 4개 실측 카테고리 − actual_deposit로
+    계산한다(설계 문서 "데이터 모델 변경" 절 — 정규화 원칙, 서로 다른
+    배민 화면 간 오차를 그대로 드러내는 게 의도된 동작).
     """
     sid = store_id or get_user_default_store_id(user, db)
     start, end = _period_range(period)
@@ -141,6 +144,11 @@ def sales_breakdown(
             Platform.id, Platform.name, Platform.default_commission_rate,
             func.coalesce(func.sum(DailySettlement.sales_amount), 0),
             func.coalesce(func.sum(DailySettlement.deposit_amount), 0),
+            func.coalesce(func.sum(DailySettlement.commission_amount), 0),
+            func.coalesce(func.sum(DailySettlement.delivery_fee_amount), 0),
+            func.coalesce(func.sum(DailySettlement.customer_discount_amount), 0),
+            func.coalesce(func.sum(DailySettlement.ad_cost_amount), 0),
+            func.count(DailySettlement.commission_amount),
         )
         .join(DailySettlement, DailySettlement.platform_id == Platform.id)
         .where(DailySettlement.store_id == sid, DailySettlement.settle_date.between(start, end))
@@ -149,19 +157,43 @@ def sales_breakdown(
     ).all()
 
     result = []
-    for platform_id, name, commission_rate, sales, actual_deposit in rows:
-        rate = float(commission_rate or 0)
-        commission = round(sales * rate)
-        payment_fee = round(sales * PAYMENT_FEE_RATE)
-        result.append({
-            "platform_id": platform_id,
-            "platform_name": name,
-            "sales_amount": int(sales),
-            "commission_estimate": commission,
-            "payment_fee_estimate": payment_fee,
-            "net_estimate": int(sales) - commission - payment_fee,
-            "actual_deposit": int(actual_deposit),
-        })
+    for (platform_id, name, commission_rate, sales, actual_deposit,
+         real_commission, real_delivery, real_discount, real_ad_cost, real_rows_count) in rows:
+        sales = int(sales)
+        actual_deposit = int(actual_deposit)
+        is_estimate = real_rows_count == 0
+        if is_estimate:
+            rate = float(commission_rate or 0)
+            commission = round(sales * rate)
+            payment_fee = round(sales * PAYMENT_FEE_RATE)
+            result.append({
+                "platform_id": platform_id,
+                "platform_name": name,
+                "sales_amount": sales,
+                "is_estimate": True,
+                "commission_estimate": commission,
+                "payment_fee_estimate": payment_fee,
+                "net_estimate": sales - commission - payment_fee,
+                "actual_deposit": actual_deposit,
+            })
+        else:
+            commission = int(real_commission)
+            delivery = int(real_delivery)
+            discount = int(real_discount)
+            ad_cost = int(real_ad_cost)
+            misc = sales - commission - delivery - discount - ad_cost - actual_deposit
+            result.append({
+                "platform_id": platform_id,
+                "platform_name": name,
+                "sales_amount": sales,
+                "is_estimate": False,
+                "commission_amount": commission,
+                "delivery_fee_amount": delivery,
+                "customer_discount_amount": discount,
+                "ad_cost_amount": ad_cost,
+                "misc_amount": misc,
+                "actual_deposit": actual_deposit,
+            })
     return {"period": period, "from_date": start.isoformat(), "to_date": end.isoformat(), "platforms": result}
 
 

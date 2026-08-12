@@ -97,6 +97,7 @@ def test_sales_breakdown_computes_commission_from_platform_rate(client, db_sessi
     assert row["payment_fee_estimate"] == 3_000  # 100,000 * 0.03
     assert row["net_estimate"] == 90_200
     assert row["actual_deposit"] == 89_200       # 추정치와 실제 입금이 정산 주기 차이로 다를 수 있음
+    assert row["is_estimate"] is True  # 신규 컬럼이 전부 NULL이라 추정치로 폴백
 
 
 def test_daily_settlement_breakdown_columns_default_to_null(db_session, seeded_user, platforms):
@@ -129,3 +130,43 @@ def test_daily_settlement_breakdown_columns_store_explicit_values(db_session, se
     assert row.delivery_fee_amount == 50
     assert row.customer_discount_amount == 30
     assert row.ad_cost_amount == 20
+
+
+def test_sales_breakdown_uses_real_values_when_columns_filled(client, db_session, seeded_user, platforms, auth_headers):
+    store, platform = seeded_user["store"], platforms["baemin"]
+    db_session.add(DailySettlement(
+        store_id=store.id, platform_id=platform.id, settle_date=date.today(),
+        sales_amount=200_000, deposit_amount=150_000,
+        commission_amount=20_000, delivery_fee_amount=10_000,
+        customer_discount_amount=15_000, ad_cost_amount=3_000,
+    ))
+    db_session.commit()
+
+    res = client.get("/sales/breakdown?period=day", headers=auth_headers).json()
+    row = res["platforms"][0]
+    assert row["is_estimate"] is False
+    assert row["sales_amount"] == 200_000
+    assert row["commission_amount"] == 20_000
+    assert row["delivery_fee_amount"] == 10_000
+    assert row["customer_discount_amount"] == 15_000
+    assert row["ad_cost_amount"] == 3_000
+    # misc = 200000 - 20000 - 10000 - 15000 - 3000 - 150000
+    assert row["misc_amount"] == 2_000
+    assert row["actual_deposit"] == 150_000
+    assert "commission_estimate" not in row  # 추정치 필드는 실측 응답에 안 섞임
+
+
+def test_sales_breakdown_partial_period_data_still_falls_back_to_estimate(client, db_session, seeded_user, platforms, auth_headers):
+    """기간 안에 신규 컬럼이 채워진 날짜가 하나도 없으면(예: 30일 상세
+    수집 범위 밖) 전체 기간을 추정치로 폴백한다."""
+    store, platform = seeded_user["store"], platforms["baemin"]
+    db_session.add(DailySettlement(
+        store_id=store.id, platform_id=platform.id,
+        settle_date=date.today() - timedelta(days=15),
+        sales_amount=100_000, deposit_amount=89_200,
+    ))
+    db_session.commit()
+
+    res = client.get("/sales/breakdown?period=month", headers=auth_headers).json()
+    row = res["platforms"][0]
+    assert row["is_estimate"] is True
