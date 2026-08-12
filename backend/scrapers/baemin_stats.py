@@ -69,6 +69,23 @@ dedupe를 한다. 날짜 범위를 지정하기 전 페이지 최초 로드 시�
 스스로 기본 필터에 대한 organic 응답을 한 번 발생시키므로(`fetch_shop_stats`의
 `collect_sales`와 동일한 문제), `collecting` 플래그로 걸러낸다.
 
+**정산 상세 카드 클릭(`fetch_settlement_breakdown_details`) — 정정,
+2026-08-12 Task 3 실 계정 검증 중 발견**: 브리프의 스타팅 코드는 카드
+"하나" 클릭만 검증됐고 여러 카드 연속 클릭 + 페이지네이션은 미검증이었는데,
+실제로 돌려보니 순서대로 세 가지 버그가 나왔다 — (1) 상태 배지
+`has_text=re.compile(r"^입금(완료|예정)$")` 필터가 앵커 때문에 상수적으로
+빈 로케이터였던 것(카드 컨테이너 텍스트가 배지 하나만으로 이루어진 적이
+없어서), (2) 카드 클릭이 인라인 펼치기가 아니라 별도 모달을 열어 안 닫고
+다음 카드를 클릭하면 그 클릭이 모달 backdrop에 흡수되는 것, (3) 로그인
+기본 뷰포트(1280×800)로는 8번째 카드부터 화면 밖이라 클릭이 무효고,
+`scroll_into_view_if_needed`로 보완하면 화면 우하단 고정 AI 챗봇 플로팅
+버튼과 카드 "오른쪽 끝" 클릭 좌표가 겹쳐 그 챗봇이 열리며 이후 클릭이
+전부 막히는 것. 세 가지 모두 `_click_all_settlement_cards_on_page`
+docstring의 "정정"/"정정 2" 절에 상세 재현 경위가 있다. 최종적으로는
+모달을 매 클릭 뒤 Escape로 닫고, 카드 클릭 루프 동안만 뷰포트를 3000px로
+늘려 스크롤 자체를 없애는 방식으로 해결했다 — 실 계정 30일 창에서 카드
+20개(2페이지) 전부 캡처하는 것까지 확인했다.
+
 **주문내역(`/orders/history`)은 정산내역과 완전히 같은 날짜 범위 다이얼로그
 컴포넌트를 쓴다**(실측 확인, 2026-08-11 fix round) — "날짜 직접 선택" 버튼
 텍스트, "기간" 다이얼로그 구조, 두 달짜리 캘린더 그리드까지 전부 동일해서
@@ -997,6 +1014,14 @@ def fetch_settlement_breakdown_details(page, start_date: str, end_date: str) -> 
                 except Exception:
                     return
                 give_id = int(path.rsplit("/", 1)[-1])
+                # `**body`를 마지막에 두면 body가 만약 top-level `giveId`/
+                # `depositDueDate` 키를 갖고 있을 경우 위에서 명시한 값을
+                # 조용히 덮어쓸 수 있다 — 하지만 Task 2에서 실측한 원본
+                # 상세 응답의 실제 top-level 키는 `giveAmount`/
+                # `baemin1Details`/`baeminDetails`/`etcDetails`/`cpcDetails`
+                # 뿐이라(`_SETTLE_DETAIL_531969790` fixture 참고) 오늘
+                # 기준으로는 충돌이 없다 — 배민이 나중에 응답 스키마를
+                # 바꿔 이 키들을 추가하면 재검토가 필요하다.
                 details.append({
                     "giveId": give_id,
                     "depositDueDate": give_id_to_date.get(give_id),
@@ -1026,7 +1051,13 @@ def fetch_settlement_breakdown_details(page, start_date: str, end_date: str) -> 
         # 끝나면 반드시 원래 크기로 되돌린다(같은 `page`가 로그인 세션
         # 전체에서 재사용되므로, 다른 화면 조작 로직이 기본 뷰포트 크기를
         # 가정하고 있을 수 있다).
-        original_viewport = page.viewport_size
+        # `page.viewport_size`가 None일 수 있는 경우(예: 뷰포트 없이 붙은
+        # CDP 세션)를 대비해 이 모듈이 로그인 시 실제로 쓰는 기본값
+        # (`baemin_auth.py`, 1280x800)으로 방어적으로 대체한다 — 이 리포지토리의
+        # 실제 사용 경로(항상 `baemin_auth.login()`이 만든 세션)에서는
+        # 재현되지 않았지만, 그 경로를 벗어나면 `original_viewport["width"]`가
+        # `NoneType`에 인덱싱을 시도해 크래시할 수 있었다.
+        original_viewport = page.viewport_size or {"width": 1280, "height": 800}
         page.set_viewport_size({"width": original_viewport["width"], "height": _CARD_CLICK_VIEWPORT_HEIGHT})
         try:
             for _ in range(_MAX_LOAD_MORE_CLICKS):
@@ -1050,5 +1081,23 @@ def fetch_settlement_breakdown_details(page, start_date: str, end_date: str) -> 
 
     if not state["observed_any"]:
         raise BaeminStatsScrapeError("정산 상세 API 응답을 한 번도 확인하지 못했습니다")
+
+    # `observed_any`는 summary 엔드포인트(그리고 날짜 범위 다이얼로그)가
+    # 정상 동작했다는 것만 증명한다 — 카드 클릭이 실제로 상세 응답을
+    # 끌어냈는지는 별개다. `fetch_shop_stats`의 `_should_count_sales_response`
+    # 도입 배경(코드 리뷰로 발견된 은폐 실패 경로, 모듈 내 해당 함수
+    # docstring 참고)과 같은 종류의 문제 — 카드 클릭 선택자가 다른 계정/DOM
+    # 변형/배민 UI 변경으로 깨지면 `details`가 조용히 빈 리스트로 남는데,
+    # 이건 호출자 입장에서 "이번 창에는 정산 배치가 진짜 0건"이라는 정상
+    # 케이스와 구분이 안 된다. `give_id_to_date`(summary에서 만든 배치
+    # 목록)가 비어있지 않은데도 `details`가 비어있다면 배치는 실제로
+    # 있었는데 카드 클릭 루프가 하나도 못 끌어낸 것 — 이건 진짜 실패이므로
+    # "summary 자체가 안 왔다"는 위 에러와 구분되는 메시지로 하드 에러
+    # 처리한다. 일부만 성공한 경우(예: 20건 중 15건만 캡처)는 여기서 걸러내지
+    # 않는다 — 부분 성공은 저하됐지만 유효한 결과로 취급한다(설계 결정).
+    if give_id_to_date and not details:
+        raise BaeminStatsScrapeError(
+            "정산 배치는 있었지만 카드 클릭으로 상세 응답을 하나도 받지 못했습니다"
+        )
 
     return details
