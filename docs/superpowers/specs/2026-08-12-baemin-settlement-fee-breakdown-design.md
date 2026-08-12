@@ -139,11 +139,18 @@ ad_cost_amount(배치)         = -cpcDetails.total
 흐름 안에 상세 수집을 끼워 넣는다:
 
 1. (기존) 정산내역 화면에서 날짜 범위 지정 후 페이지네이션을 돌며
-   `settle/history/summary` 응답들을 모은다(현재도 최근 30일치 기준,
-   배치 10건 안팎).
-2. (신규) 각 페이지에서 카드를 순서대로 클릭해 `settle/history/details/
-   {giveId}` 응답을 모은다 — 목록 페이지 하나당 카드 개수만큼 클릭.
-   범위는 기존과 동일하게 30일치 전부(배치 10건 안팎) — 사용자 확인 완료.
+   `settle/history/summary` 응답들을 모은다 — **실제 기존 코드는 90일치
+   기준**(`review_sync.py`의 `window_start = today - timedelta(days=90)`,
+   배치 20~30건 안팎 추정)이다. 이 90일 범위와 `deposit_amount` upsert는
+   이번 작업으로 건드리지 않는다.
+2. (신규) 상세(`settle/history/details/{giveId}`)는 summary와 별도로 **최근
+   30일치 배치만** 클릭해서 수집한다(배치 10건 안팎 추정) — 90일 전부를
+   상세까지 클릭하면 로그인 세션 하나 안에서 카드 클릭이 20~30번 필요해
+   "데이터 동기화" 전체 소요 시간이 체감상 꽤 늘어난다는 트레이드오프를
+   사용자와 확인한 뒤 범위를 좁히기로 결정했다(2026-08-12). 대시보드가
+   기본으로 보여주는 기간(오늘/1주/1개월/이번달)은 전부 30일 안에 들어오므로
+   실용상 충분하다. 그 결과 신규 컬럼 4개는 최근 30일보다 오래된 날짜에는
+   항상 NULL로 남는다(위 "데이터 모델 변경"의 NULL 처리와 일치).
 3. `map_deposits_by_date`(기존)와 나란히 새 순수 함수
    `map_settlement_breakdown_by_date(detail_responses) -> dict[str, dict]`가
    위 매핑 공식으로 날짜별 4개 카테고리 딕셔너리를 만든다.
