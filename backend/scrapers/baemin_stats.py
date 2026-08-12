@@ -168,6 +168,15 @@ _MAX_CONSECUTIVE_NO_PROGRESS = 2
 _LOAD_MORE_WAIT_MS = 1_500
 _MAX_CALENDAR_NAV_CLICKS = 36
 _MONTH_CAPTION_RE = re.compile(r"(\d{4})년 (\d{1,2})월")
+_CARD_DATE_RE = re.compile(r"^\d{1,2}월 \d{1,2}일$")
+# 정산 상세 카드 클릭 루프 동안만 쓰는 임시 뷰포트 높이. 기본 로그인 뷰포트
+# (1280x800, baemin_auth.py)로는 카드 8번째부터 화면 밖으로 밀려나 클릭이
+# 무효화되고, 스크롤로 보완하면 화면 우하단에 고정된 AI 챗봇 플로팅 버튼과
+# 카드의 "오른쪽 끝" 클릭 좌표가 겹쳐버린다(실측 확인,
+# `_click_all_settlement_cards_on_page` docstring "정정 2" 참고) — 카드를
+# 전부 스크롤 없이 한 화면에 담을 만큼 넉넉하게 키워 두 문제를 동시에
+# 피한다.
+_CARD_CLICK_VIEWPORT_HEIGHT = 3000
 
 
 class BaeminStatsScrapeError(Exception):
@@ -840,3 +849,206 @@ def fetch_current_month_orders(page) -> list[dict]:
         raise BaeminStatsScrapeError("주문내역 API 응답을 한 번도 확인하지 못했습니다")
 
     return list(collected.values())
+
+
+def _click_all_settlement_cards_on_page(page) -> None:
+    """현재 페이지에 보이는 정산 배치 카드 전부를 순서대로 클릭해 각각의
+    상세(`settle/history/details/{giveId}`) 응답을 끌어낸다. 카드는 "N월
+    N일" 날짜 헤딩 텍스트를 포함하는 가장 안쪽 div로 특정한다(`has_text`
+    필터는 조상 div까지 전부 매칭시키므로 `.last`로 가장 안쪽=카드 컨테이너를
+    고른다) — 이 방식(카드 컨테이너 bounding box의 오른쪽 끝 클릭)이 실제
+    상세 API 호출을 끌어내는 걸 실 계정으로 확인했다(2026-08-12, giveId
+    531969790로 재현).
+
+    **정정 (2026-08-12, Step 2 실 계정 검증 중 발견) — 상태 배지
+    `.filter(has_text=re.compile(r"^입금(완료|예정)$"))`를 걷어냈다.** 원래
+    브리프의 스타팅 코드는 날짜 헤딩으로 좁힌 뒤 이 정규식으로 한 번 더
+    필터링했는데, 실 계정으로 돌려보니 카드 30개 중 단 하나도 클릭되지
+    않고 `bounding_box()`가 전부 30초 타임아웃 났다. 원인은 정규식 자체 —
+    Playwright의 `has_text=<regex>`는 그 정규식을 요소의 **전체
+    텍스트 콘텐츠**에 대해 매칭하는데, `^...$` 앵커(re.MULTILINE 없음)는
+    "요소 텍스트가 정확히 그 배지 문자열 하나뿐"인 경우에만 매칭된다. 그런데
+    카드 컨테이너의 텍스트는 항상 날짜 헤딩·"음식배달"·정산기간·입금금액이
+    함께 붙어있어 배지 텍스트 단독으로 존재하는 div가 애초에 없다 — 그래서
+    이 필터는 계정 상태와 무관하게 상수적으로 빈 로케이터가 되고,
+    `.last`가 영원히 리졸브되지 않았다. 진단 스크립트로 격리 재현해
+    (`page.locator("div", has_text="8월 12일").filter(has_text=re.compile(...))`가
+    7개 중 0개로 줄어드는 것을 직접 확인) 이 필터가 항상 0건이라는 걸
+    확증했다. 날짜 헤딩 텍스트 자체가(이번 조사 계정 기준 30일 창 안에서는)
+    유일했기 때문에 `has_text=heading_text` 필터 하나만으로 이미 카드
+    컨테이너를 정확히 가장 안쪽 div로 좁힐 수 있었다(실측: 헤딩 10개 전부
+    dedupe 후에도 10개, 중복 없음) — 그래서 배지 필터는 걷어내고 날짜 헤딩
+    필터 + `.last`만 남겼다. 이 수정 뒤 여러 페이지에 걸친 카드 전부를
+    빠짐없이 클릭해 상세 응답을 받는 것까지 실측 확인했다(정확한 건수는
+    `fetch_settlement_breakdown_details` 아래 실측 결과 참고).
+
+    같은 날짜에 배치가 2건 이상이면 날짜 헤딩 텍스트가 중복돼 이 방식(텍스트
+    기반 `has_text` + `.last`)으로 정확히 구분되지 않는다 — 두 카드 모두
+    독립적으로 그 날짜 텍스트를 포함하므로 `.last`가 매번 두 카드 중 DOM상
+    더 뒤에 있는 쪽만 골라, 앞 카드는 아예 클릭되지 않고 뒤 카드만 중복
+    클릭될 수 있다. 이번 조사에 쓴 실 계정의 최근 30일 데이터에는 같은
+    날짜 중복 배치가 없어 이 경로 자체를 재현할 수는 없었다 — 알려진
+    미해결 한계로 남긴다(발생 시 카드 순번 기반 포지셔널 선택자로
+    다시 설계해야 한다).
+
+    **정정 2 (2026-08-12, 같은 검증에서 발견) — 카드 클릭이 "인라인 펼치기"가
+    아니라 모달을 연다는 것과, 뷰포트 밖 카드는 아예 클릭되지 않는다는
+    것.** 브리프의 스타팅 코드가 가정한 "카드 하나 클릭 → 즉시 정산상세
+    모달이 뜬다"까지는 맞았지만, 리스트 전체가 "인라인으로 펼쳐지며 뒤 카드
+    위치가 밀린다"는 위 docstring 첫 문단의 우려와 달리 실제로는 리스트
+    자체는 전혀 움직이지 않고 화면 중앙에 완전히 별개의 `role="dialog"`
+    모달(+ 풀스크린 backdrop)이 뜬다("정산내역 상세" 헤더, X 닫기 버튼,
+    스크린샷으로 확인). 이 모달을 닫지 않고 바로 다음 카드 좌표를 클릭하면
+    그 클릭은 리스트가 아니라 모달의 backdrop에 떨어져 아무 API 호출도
+    일으키지 않는다(실측: 카드 0·1은 상세를 받았지만 2번째 카드부터 계속
+    0건 — 모달이 열린 채로 이후 클릭이 전부 무효화됨). 그래서 각 카드
+    클릭 뒤 `role="dialog"`가 남아있으면 Escape로 닫고 다음 카드로 넘어가야
+    한다.
+
+    모달을 닫아도 두 번째 문제가 남는다 — 로그인 세션의 뷰포트는
+    1280×800(`baemin_auth.py`)인데 카드 한 장의 높이가 약 164px라 8번째
+    카드부터는 y좌표가 800을 넘어 뷰포트 밖에 있다. `page.mouse.click`은
+    뷰포트 좌표계를 쓰므로 뷰포트 밖 좌표를 클릭해도 아무 일도 일어나지
+    않는다(실측: 스크롤 없이는 카드 0·1만 성공, 2번째부터는 dialog조차 안
+    뜸). 그렇다고 카드마다 `scroll_into_view_if_needed()`로 스크롤하는 것도
+    새 문제를 만든다 — 화면 우하단에는 스크롤과 무관하게 항상 고정 위치인
+    "저에게 물어보세요" AI 챗봇 플로팅 버튼이 떠 있는데, 스크롤 후 특정
+    카드의 "오른쪽 끝" 클릭 좌표가 뷰포트 우하단 근처로 오면 이 플로팅
+    버튼과 겹쳐 그 챗봇이 열려버린다(스크린샷으로 확인 — "무엇이든
+    물어보세요" AI 챗봇 다이얼로그가 뜸). 이 챗봇 다이얼로그는 Escape로
+    닫히지 않아 그 뒤로는 영구적으로 클릭이 막힌다(실측: 카드 2부터 끝까지
+    전부 dialog count가 1로 고정, 새 상세 응답 0건).
+
+    두 문제를 한 번에 해결하는 방법으로 스크롤 자체를 없앴다 —
+    `fetch_settlement_breakdown_details`가 카드 클릭 루프에 들어가기 전에
+    `page.set_viewport_size`로 뷰포트를 세로로 넉넉하게(3000px) 키운다.
+    카드가 전부 한 화면 안에 이미 렌더링돼 있으므로 스크롤이 아예 필요
+    없어지고, 고정 위치 챗봇 버튼도 그만큼 커진 뷰포트의 맨 아래(카드
+    리스트보다 한참 아래)로 밀려나 더 이상 카드 클릭 좌표와 겹치지 않는다.
+    이 방식으로 실 계정 30일 창(2026-08-12 기준)의 카드 20개 전부(페이지당
+    10개씩 2페이지)를 빠짐없이 클릭해 상세 응답 20건을 받는 것을 실측
+    확인했다(`fetch_settlement_breakdown_details` 아래 정확한 실측 결과
+    참고)."""
+    date_headings = page.get_by_text(_CARD_DATE_RE, exact=True).all_inner_texts()
+    for heading_text in date_headings:
+        card = page.locator("div", has_text=heading_text).last
+        box = card.bounding_box()
+        if box is None:
+            continue
+        page.mouse.click(box["x"] + box["width"] - 20, box["y"] + box["height"] / 2)
+        page.wait_for_timeout(1_200)
+        # 카드 클릭은 인라인 펼치기가 아니라 별도 모달을 연다(위 "정정 2"
+        # 참고) — 다음 카드 클릭이 이 모달의 backdrop에 흡수되지 않도록
+        # 반드시 닫고 넘어간다.
+        if page.get_by_role("dialog").count() > 0:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+
+
+def fetch_settlement_breakdown_details(page, start_date: str, end_date: str) -> list[dict]:
+    """정산내역 화면(`/orders/billing`)에서 `start_date`~`end_date` 범위의
+    각 정산 배치 카드를 클릭해 상세(`settle/history/details/{giveId}`)
+    응답을 모은다. `fetch_account_settlement`(입금액용 summary, 90일 창)와는
+    완전히 별도의 호출이다 — 상세 수집은 카드 클릭 비용이 커서 더 좁은
+    창(설계 문서 "동기화 흐름" 절, 30일)만 쓰기로 결정했기 때문에 날짜
+    범위가 다르다. 같은 화면을 다시 열어 summary 응답을 한 번 더 받는 약간의
+    중복 호출이 있지만(그 응답의 `contents`로 giveId → depositDueDate
+    매핑만 만드는 용도), 이미 안정적으로 동작하는 `fetch_account_settlement`를
+    건드리지 않고 완전히 독립적으로 두는 게 더 안전하다.
+
+    각 상세 응답은 URL 자체에서 파싱한 `giveId`와, 같은 세션에서 받은
+    summary 응답의 `contents[].{giveId, depositDueDate}`로 만든 매핑에서
+    찾은 `depositDueDate`를 붙여 반환한다 — 카드의 DOM 순서가 summary
+    JSON의 `contents` 순서와 반드시 일치한다고 가정하지 않아도 되는 방식이다
+    (URL에 giveId가 그대로 노출되는 걸 이용). summary에서 못 찾은
+    giveId(정상 흐름에서는 발생하지 않아야 함)는 `depositDueDate: None`으로
+    반환하고, `map_settlement_breakdown_by_date`가 그런 항목을 건너뛴다.
+
+    **실 계정 검증 결과 (2026-08-12, Step 2)**: `today - 30일` ~ `today`
+    범위로 호출해 상세 응답 20건(2026-07-13 ~ 2026-08-12, 페이지당 10개씩
+    2페이지)을 전부 받았고, `depositDueDate` 매핑도 20/20 전부 성공했다
+    (미매핑 0건). `giveId` 기준으로도 20개 전부 유일해 페이지 경계 중복도
+    없었다. 날짜별 4개 카테고리 합산 값도 전부 0 이상의 합리적인 금액으로
+    나왔다(예: 2026-08-12 커미션 131,402원 — Task 2의 giveId 531969790
+    fixture와 정확히 일치, 같은 배치를 이번엔 화면 클릭 경로로 재확인한
+    셈)."""
+    give_id_to_date: dict[int, str] = {}
+    details: list[dict] = []
+    state = {"collecting": False, "observed_any": False}
+
+    def _on_response(response) -> None:
+        url = response.url
+        if "self-api.baemin.com" not in url or not state["collecting"]:
+            return
+        path = urlparse(url).path
+        if path == "/v3/settle/history/summary":
+            state["observed_any"] = True
+            if response.status == 200:
+                try:
+                    body = response.json()
+                except Exception:
+                    return
+                for batch in body["contents"]:
+                    give_id_to_date[batch["giveId"]] = batch["depositDueDate"]
+        elif path.startswith("/v3/settle/history/details/"):
+            if response.status == 200:
+                try:
+                    body = response.json()
+                except Exception:
+                    return
+                give_id = int(path.rsplit("/", 1)[-1])
+                details.append({
+                    "giveId": give_id,
+                    "depositDueDate": give_id_to_date.get(give_id),
+                    **body,
+                })
+
+    page.on("response", _on_response)
+    try:
+        try:
+            page.goto("https://self.baemin.com/orders/billing")
+        except Exception as e:
+            raise BaeminStatsScrapeError(f"정산 상세 조회를 위한 페이지 이동에 실패했습니다: {e}") from e
+
+        page.wait_for_timeout(2_000)
+        _dismiss_backdrop_if_present(page)
+
+        state["collecting"] = True
+        try:
+            _open_date_range_picker(page)
+            _set_date_range(page, start_date, end_date)
+        except PlaywrightTimeoutError as e:
+            raise BaeminStatsScrapeError(f"정산 상세 조회 날짜 범위 지정에 실패했습니다: {e}") from e
+        page.wait_for_timeout(2_000)
+
+        # 카드 클릭 루프 동안만 뷰포트를 늘린다(모듈 상단 상수 주석,
+        # `_click_all_settlement_cards_on_page` docstring "정정 2" 참고) —
+        # 끝나면 반드시 원래 크기로 되돌린다(같은 `page`가 로그인 세션
+        # 전체에서 재사용되므로, 다른 화면 조작 로직이 기본 뷰포트 크기를
+        # 가정하고 있을 수 있다).
+        original_viewport = page.viewport_size
+        page.set_viewport_size({"width": original_viewport["width"], "height": _CARD_CLICK_VIEWPORT_HEIGHT})
+        try:
+            for _ in range(_MAX_LOAD_MORE_CLICKS):
+                _click_all_settlement_cards_on_page(page)
+                next_button = page.get_by_role("button", name="다음")
+                if next_button.count() == 0:
+                    break
+                try:
+                    next_button.first.scroll_into_view_if_needed()
+                    next_button.first.click(timeout=5_000)
+                except PlaywrightTimeoutError:
+                    # 마지막 페이지에서는 "다음" 버튼이 비활성화돼 클릭이
+                    # 타임아웃 난다(_click_next_page_until_done과 동일한 실측
+                    # 확인된 종료 신호) — 정상 종료로 취급한다.
+                    break
+                page.wait_for_timeout(_LOAD_MORE_WAIT_MS)
+        finally:
+            page.set_viewport_size(original_viewport)
+    finally:
+        page.remove_listener("response", _on_response)
+
+    if not state["observed_any"]:
+        raise BaeminStatsScrapeError("정산 상세 API 응답을 한 번도 확인하지 못했습니다")
+
+    return details
