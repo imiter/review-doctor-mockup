@@ -125,6 +125,40 @@ API에 없어 계정(사업자) 전체 합산으로만 나오는 것을 확인�
 `docs/superpowers/specs/2026-08-11-baemin-sales-deposit-repurchase-design.md`
 참고.
 
+### 배민 정산 상세(수수료/배달비/고객할인/우가클비용) 연동 (예외 허용)
+원래 "매출 분석" 카드의 배민 행은 `platforms.default_commission_rate`(요율)
+기반 추정치(중개수수료·결제수수료)만 보여줬으나, 실 SaaS 전환 로드맵 3번의
+다음 단계로 배민 정산내역 화면의 실제 차감 내역을 가져와 그 추정치를
+대체하기로 결정했다(2026-08-12). 매출·입금 실데이터 연동에서 "매출과
+입금이 다르다"를 D+3 시차로만 설명했던 것을, 실제로 무엇 때문에 깎이는지
+보여주는 단계다. 사장님광장의 "정산내역"(`/orders/billing`) 화면에서 각
+정산 배치 카드를 클릭할 때 발생하는 `GET
+/v3/settle/history/details/{giveId}` organic 응답을 리뷰·매출과 동일한
+방식(`page.on("response")`)으로 가로챈다(`fetch_settlement_breakdown_details`).
+이 응답의 `baemin1Details`/`baeminDetails`/`cpcDetails` 블록에서 수수료
+(중개이용료+결제수수료), 배달비, 고객 즉시할인, 우가클(CPC) 광고비 네
+카테고리를 계산해(`map_settlement_breakdown_by_date`) `daily_settlements`에
+신규 컬럼 4개(`commission_amount`/`delivery_fee_amount`/
+`customer_discount_amount`/`ad_cost_amount`)로 upsert한다. 네 컬럼 모두
+nullable이다 — 요기요/쿠팡이츠 행(실측 안 함)과, 아직 정산 상세 동기화가
+안 된 배민 과거 날짜(백필 범위 밖) 둘 다 NULL로 남겨 "데이터 없음"과
+"차감액 0원"을 구분한다. 기존 `deposit_amount`(입금액) 조회는 90일 창을
+그대로 유지하지만, 정산 상세는 카드 클릭 비용이 커서 별도로 최근 30일
+창만 수집한다 — 대시보드 기본 조회 기간(오늘/1주/1개월/이번달)이 전부
+30일 안에 들어와 실용상 충분하다고 판단해 범위를 좁혔다. "기타"
+(misc_amount) 항목은 컬럼을 두지 않고 `GET /sales/breakdown` 조회
+시점에 `sales_amount − 4개 실측 카테고리 − deposit_amount`로 잔차 계산한다
+(정규화 원칙) — 매출액과 입금액이 서로 다른 배민 화면에서 독립적으로 오는
+값이라 완전히 안 맞을 수 있는데, 그 오차까지 "기타"로 그대로 드러내는 걸
+의도된 동작으로 판단했다(음수가 나올 수도 있다 — UI는 부호에 따라 표시를
+분기한다). `/sales/breakdown` 응답은 신규 컬럼이 채워진 기간이면
+`is_estimate: false`와 함께 5개 실측값(수수료/배달비/고객할인/우가클비용/
+기타)을 반환하고, 아직 없으면 기존처럼 `is_estimate: true`와 요율 기반
+추정치로 폴백한다 — 이 분기는 배민 행에만 적용되고 요기요/쿠팡이츠는
+계속 추정치다. 설계 상세는
+`docs/superpowers/specs/2026-08-12-baemin-settlement-fee-breakdown-design.md`
+참고.
+
 ### 배민 우리가게클릭(우가클) 브랜드별 실데이터 연동 (예외 허용)
 원래 "우가클 점수"는 카테고리 기반 `ad_campaigns`/`ad_performance_metrics`의
 Mock 데이터로만 계산됐으나, 실 SaaS 전환 로드맵 3번의 다음 단계로 브랜드별
@@ -186,7 +220,9 @@ brand_ad_click_metrics.
 - review_replies: AI 추천 답글 Mock과 사장 최종 답글.
 - reply_styles: 답글 말투 스타일 마스터(발랄 이모지 파티, 진중맨, 무난 요정, 진지한 하이개그).
 - reply_settings: 가게별 답글 설정(홍보문구, 닉네임/메뉴/가게명 포함 여부, 부정 리뷰 홍보문구 포함 여부).
-- daily_settlements: 일별 매출과 입금을 함께 저장(정산 지연 반영).
+- daily_settlements: 일별 매출과 입금을 함께 저장(정산 지연 반영). 배민
+  행에는 정산 상세 실측 컬럼 4개(수수료/배달비/고객할인/우가클비용, 전부
+  nullable)도 같이 담는다(위 "배민 정산 상세..." 절 참고).
 - repurchase_metrics: 날짜별 재주문율, 신규 주문 수, 재주문 수, 보정 전/후.
 - ad_campaigns: 광고 캠페인(카테고리, 현재 CPC, 목표 순위).
 - ad_performance_metrics: CPC, CVR, AOV, ACoS, 광고 성과 점수.
@@ -221,7 +257,8 @@ brand_ad_click_metrics.
 - reviews N:1 stores, reviews N:1 platforms (직접 참조, 주문 조인 없이 조회)
 - reviews 1:N review_replies
 - stores 1:1 reply_settings, reply_settings는 reply_styles 참조
-- daily_settlements는 store와 platform 참조, 매출액과 입금액을 함께 가진다
+- daily_settlements는 store와 platform 참조, 매출액과 입금액에 더해 배민
+  정산 상세 실측 컬럼 4개(nullable)도 함께 가진다
 - ad_campaigns는 store 참조
 - ad_performance_metrics와 ad_rank_snapshots는 ad_campaigns 참조
 - alerts는 store 참조
