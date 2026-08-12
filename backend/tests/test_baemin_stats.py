@@ -5,6 +5,7 @@ from scrapers.baemin_stats import (
     map_orders_to_daily_sales,
     map_repurchase_by_date,
     map_sales_by_date,
+    map_settlement_breakdown_by_date,
 )
 
 # 실 계정(치밥대장, 곱도리탕 등)에서 확인한 실제 statistics/orders/summary 응답 형태.
@@ -239,3 +240,97 @@ def test_should_count_sales_response_true_once_collecting_started():
 def test_should_count_sales_response_false_for_unrelated_path_even_while_collecting():
     # 경로 자체가 매출 엔드포인트가 아니면 collecting 여부와 무관하게 False.
     assert _should_count_sales_response("/v3/dashboard/crmInfo", collecting=True) is False
+
+
+# 실 계정(2026-08-12 조사)에서 직접 캡처한 GET
+# /v3/settle/history/details/{giveId} 응답(giveId=531969790, 정산기간
+# 26.08.07~26.08.09, 입금일 26-08-12)을 필요한 필드만 남겨 축약한 것.
+# 검산: baemin1Details.giveAmount + baeminDetails.giveAmount +
+# etcDetails.total + cpcDetails.total == 최상위 giveAmount (904812) —
+# 실 계정으로 직접 확인 완료.
+_SETTLE_DETAIL_531969790 = {
+    "giveAmount": 904812,
+    "baemin1Details": {
+        "giveAmount": 936472,
+        "orderBrokerage": {
+            "serviceFeeAmount": {"total": -102741},
+            "benefitsAmount": {"total": -266760},
+        },
+        "delivery": {"deliverySupplyPrice": {"total": -210800}},
+        "extra": {"paymentFee": {"total": -27329}},
+    },
+    "baeminDetails": {
+        "giveAmount": 16435,
+        "orderBrokerage": {
+            "serviceFeeAmount": {"total": -1081},
+            "benefitsAmount": {"total": -5000},
+        },
+        "delivery": {"deliverySupplyPrice": {"total": 0}},
+        "extra": {"paymentFee": {"total": -251}},
+    },
+    "etcDetails": {"total": 0},
+    "cpcDetails": {"total": -48095},
+}
+_TAGGED_DETAIL = {"giveId": 531969790, "depositDueDate": "2026-08-12", **_SETTLE_DETAIL_531969790}
+
+
+def test_map_settlement_breakdown_by_date_computes_four_categories():
+    result = map_settlement_breakdown_by_date([_TAGGED_DETAIL])
+    assert result == {
+        "2026-08-12": {
+            "commission_amount": 131_402,        # (102741+27329) + (1081+251)
+            "delivery_fee_amount": 210_800,       # 210800 + 0
+            "customer_discount_amount": 271_760,  # 266760 + 5000
+            "ad_cost_amount": 48_095,             # -(-48095)
+        }
+    }
+
+
+def test_map_settlement_breakdown_by_date_reconciles_with_top_level_give_amount():
+    """검산: baemin1Details.giveAmount + baeminDetails.giveAmount +
+    etcDetails.total + cpcDetails.total == 최상위 giveAmount. 이 fixture
+    자체가 실 계정으로 검산된 값이라는 걸 보장하는 회귀 테스트."""
+    d = _SETTLE_DETAIL_531969790
+    total = (
+        d["baemin1Details"]["giveAmount"] + d["baeminDetails"]["giveAmount"]
+        + d["etcDetails"]["total"] + d["cpcDetails"]["total"]
+    )
+    assert total == d["giveAmount"] == 904_812
+
+
+def test_map_settlement_breakdown_by_date_sums_multiple_batches_same_date():
+    other = {
+        "giveId": 111_111_111, "depositDueDate": "2026-08-12",
+        "giveAmount": 10_000,
+        "baemin1Details": {
+            "giveAmount": 10_000,
+            "orderBrokerage": {
+                "serviceFeeAmount": {"total": -1_000},
+                "benefitsAmount": {"total": -500},
+            },
+            "delivery": {"deliverySupplyPrice": {"total": -2_000}},
+            "extra": {"paymentFee": {"total": -300}},
+        },
+        "baeminDetails": None,
+        "etcDetails": {"total": 0},
+        "cpcDetails": {"total": 0},
+    }
+    result = map_settlement_breakdown_by_date([_TAGGED_DETAIL, other])
+    assert result["2026-08-12"]["commission_amount"] == 131_402 + 1_300   # 1000+300
+    assert result["2026-08-12"]["delivery_fee_amount"] == 210_800 + 2_000
+    assert result["2026-08-12"]["customer_discount_amount"] == 271_760 + 500
+    assert result["2026-08-12"]["ad_cost_amount"] == 48_095
+
+
+def test_map_settlement_breakdown_by_date_dedupes_same_give_id():
+    result = map_settlement_breakdown_by_date([_TAGGED_DETAIL, _TAGGED_DETAIL])
+    assert result["2026-08-12"]["ad_cost_amount"] == 48_095  # 두 번 더해지면 안 됨
+
+
+def test_map_settlement_breakdown_by_date_skips_entries_without_deposit_due_date():
+    orphan = {**_SETTLE_DETAIL_531969790, "giveId": 999, "depositDueDate": None}
+    assert map_settlement_breakdown_by_date([orphan]) == {}
+
+
+def test_map_settlement_breakdown_by_date_empty_list_returns_empty_dict():
+    assert map_settlement_breakdown_by_date([]) == {}

@@ -233,6 +233,58 @@ def map_deposits_by_date(responses: list[dict]) -> dict[str, int]:
     return totals
 
 
+def _settlement_breakdown_amounts(detail: dict) -> dict[str, int]:
+    """정산 상세 응답 하나(`giveId` 하나)에서 4개 카테고리를 양수로 계산한다
+    (설계 문서 "API 응답 매핑" 절 공식). `baemin1Details`(한집배달·알뜰배달)와
+    `baeminDetails`(가게배달·바로결제) 두 블록을 합산하고, 우가클비용만
+    최상위 `cpcDetails`에서 가져온다. 두 블록 중 하나가 없을 수도 있어
+    (실측하지 않은 케이스지만 방어적으로) `.get()`으로 안전하게 접근한다."""
+    commission = 0
+    delivery = 0
+    discount = 0
+    for block_key in ("baemin1Details", "baeminDetails"):
+        block = detail.get(block_key)
+        if not block:
+            continue
+        commission += -block["orderBrokerage"]["serviceFeeAmount"]["total"]
+        commission += -block["extra"]["paymentFee"]["total"]
+        delivery += -block["delivery"]["deliverySupplyPrice"]["total"]
+        discount += -block["orderBrokerage"]["benefitsAmount"]["total"]
+    ad_cost = -detail["cpcDetails"]["total"]
+    return {
+        "commission_amount": commission,
+        "delivery_fee_amount": delivery,
+        "customer_discount_amount": discount,
+        "ad_cost_amount": ad_cost,
+    }
+
+
+def map_settlement_breakdown_by_date(details: list[dict]) -> dict[str, dict]:
+    """`fetch_settlement_breakdown_details`가 반환한, `depositDueDate`가
+    태그된 정산 상세 리스트를 날짜별로 합산한다. 같은 `giveId`가
+    페이지네이션 경계에서 중복 캡처될 수 있어(정산 요약/입금과 동일한
+    현상, `map_deposits_by_date` 참고) 먼저 `giveId` 기준으로 dedupe한다.
+    `depositDueDate`를 못 찾은 항목(정상 흐름에서는 발생하지 않아야 하지만
+    방어적으로)은 건너뛴다."""
+    by_id: dict[int, dict] = {}
+    for detail in details:
+        by_id[detail["giveId"]] = detail
+
+    totals: dict[str, dict] = {}
+    for detail in by_id.values():
+        d = detail.get("depositDueDate")
+        if d is None:
+            continue
+        amounts = _settlement_breakdown_amounts(detail)
+        bucket = totals.setdefault(d, {
+            "commission_amount": 0, "delivery_fee_amount": 0,
+            "customer_discount_amount": 0, "ad_cost_amount": 0,
+        })
+        for k, v in amounts.items():
+            bucket[k] += v
+    return totals
+
+
 def map_repurchase_by_date(responses: list[dict]) -> dict[str, dict[str, int]]:
     """`GET /v3/dashboard/crmInfo` 응답들의
     `newReorderSummary.timeNewGraph`/`timeReorderGraph`(각각 날짜별 신규/재주문
