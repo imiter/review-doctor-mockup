@@ -31,11 +31,13 @@ from scrapers.baemin_stats import (
     compute_repurchase_rates,
     fetch_account_settlement,
     fetch_current_month_orders,
+    fetch_settlement_breakdown_details,
     fetch_shop_stats,
     map_deposits_by_date,
     map_orders_to_daily_sales,
     map_repurchase_by_date,
     map_sales_by_date,
+    map_settlement_breakdown_by_date,
     recent_months,
 )
 
@@ -60,6 +62,8 @@ def upsert_shop_brand(db: Session, connection_id: int, shop_no: int, shop_name: 
 def upsert_daily_settlement(
     db: Session, store_id: int, platform_id: int, settle_date: str,
     *, sales_amount: int | None = None, deposit_amount: int | None = None,
+    commission_amount: int | None = None, delivery_fee_amount: int | None = None,
+    customer_discount_amount: int | None = None, ad_cost_amount: int | None = None,
 ) -> None:
     """`(store_id, platform_id, settle_date)` 기준 upsert. sales_amount와
     deposit_amount는 각각 None이면 기존 값을 건드리지 않는다 — 매출 API는
@@ -78,6 +82,8 @@ def upsert_daily_settlement(
         db.add(DailySettlement(
             store_id=store_id, platform_id=platform_id, settle_date=d,
             sales_amount=sales_amount or 0, deposit_amount=deposit_amount or 0,
+            commission_amount=commission_amount, delivery_fee_amount=delivery_fee_amount,
+            customer_discount_amount=customer_discount_amount, ad_cost_amount=ad_cost_amount,
         ))
         # autoflush=False(app.db.SessionLocal)라 flush 없이는 이 세션의 다음
         # select()가 방금 add()한 행을 못 본다 — 같은 날짜를 매출(주문내역)과
@@ -90,6 +96,14 @@ def upsert_daily_settlement(
         existing.sales_amount = sales_amount
     if deposit_amount is not None:
         existing.deposit_amount = deposit_amount
+    if commission_amount is not None:
+        existing.commission_amount = commission_amount
+    if delivery_fee_amount is not None:
+        existing.delivery_fee_amount = delivery_fee_amount
+    if customer_discount_amount is not None:
+        existing.customer_discount_amount = customer_discount_amount
+    if ad_cost_amount is not None:
+        existing.ad_cost_amount = ad_cost_amount
 
 
 def upsert_repurchase_metric(
@@ -362,6 +376,25 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 stats_succeeded_any = True
         except Exception as e:
             stats_errors.append(f"정산(입금) 동기화 실패: {e}")
+
+        try:
+            detail_window_start = today - timedelta(days=30)
+            breakdown_details = fetch_settlement_breakdown_details(
+                session.page, detail_window_start.isoformat(), today.isoformat(),
+            )
+            breakdown_by_date = map_settlement_breakdown_by_date(breakdown_details)
+            for settle_date, amounts in breakdown_by_date.items():
+                upsert_daily_settlement(
+                    db, job.store_id, job.platform_id, settle_date,
+                    commission_amount=amounts["commission_amount"],
+                    delivery_fee_amount=amounts["delivery_fee_amount"],
+                    customer_discount_amount=amounts["customer_discount_amount"],
+                    ad_cost_amount=amounts["ad_cost_amount"],
+                )
+            if breakdown_by_date:
+                stats_succeeded_any = True
+        except Exception as e:
+            stats_errors.append(f"정산 상세(수수료/배달비/고객할인/우가클비용) 동기화 실패: {e}")
 
         # 우리가게클릭은 매출/입금/재주문율과 달리 계정 전체로 합산하지
         # 않는다 — 애초에 브랜드(shop_no) 단위로만 조회되는 화면이라

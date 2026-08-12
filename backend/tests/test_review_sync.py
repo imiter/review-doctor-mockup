@@ -73,6 +73,7 @@ def sync_setup(db_session, seeded_user, platforms, monkeypatch):
     monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
     monkeypatch.setattr(review_sync_mod, "fetch_current_month_orders", lambda page: [])
     monkeypatch.setattr(review_sync_mod, "fetch_brand_click_metrics", lambda page, shop_no, months: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_settlement_breakdown_details", lambda page, start_date, end_date: [])
 
     return job, conn
 
@@ -1204,3 +1205,125 @@ def test_sync_isolates_one_brand_click_metrics_failure_from_other_brands(db_sess
     ).one()
     assert row_b.ad_spend == 200
     assert "우리가게클릭" in job.error_message
+
+
+def test_upsert_daily_settlement_sets_breakdown_columns_on_new_row(db_session, seeded_user, platforms):
+    upsert_daily_settlement(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "2026-08-12",
+        commission_amount=131_402, delivery_fee_amount=210_800,
+        customer_discount_amount=271_760, ad_cost_amount=48_095,
+    )
+    db_session.commit()
+
+    row = db_session.query(DailySettlement).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, settle_date="2026-08-12",
+    ).one()
+    assert row.commission_amount == 131_402
+    assert row.delivery_fee_amount == 210_800
+    assert row.customer_discount_amount == 271_760
+    assert row.ad_cost_amount == 48_095
+
+
+def test_upsert_daily_settlement_breakdown_none_leaves_existing_value_untouched(db_session, seeded_user, platforms):
+    existing = DailySettlement(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, settle_date=date(2026, 8, 12),
+        sales_amount=0, deposit_amount=0, commission_amount=999,
+    )
+    db_session.add(existing)
+    db_session.commit()
+
+    # sales_amount만 갱신하는 흔한 호출 — commission_amount는 안 건드려야 한다.
+    upsert_daily_settlement(
+        db_session, seeded_user["store"].id, platforms["baemin"].id, "2026-08-12", sales_amount=5_000,
+    )
+    db_session.commit()
+
+    row = db_session.query(DailySettlement).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, settle_date="2026-08-12",
+    ).one()
+    assert row.sales_amount == 5_000
+    assert row.commission_amount == 999  # 안 건드림
+
+
+_BREAKDOWN_DETAIL = {
+    "giveId": 531969790, "depositDueDate": "2026-08-12",
+    "giveAmount": 904812,
+    "baemin1Details": {
+        "giveAmount": 936472,
+        "orderBrokerage": {
+            "serviceFeeAmount": {"total": -102741},
+            "benefitsAmount": {"total": -266760},
+        },
+        "delivery": {"deliverySupplyPrice": {"total": -210800}},
+        "extra": {"paymentFee": {"total": -27329}},
+    },
+    "baeminDetails": {
+        "giveAmount": 16435,
+        "orderBrokerage": {
+            "serviceFeeAmount": {"total": -1081},
+            "benefitsAmount": {"total": -5000},
+        },
+        "delivery": {"deliverySupplyPrice": {"total": 0}},
+        "extra": {"paymentFee": {"total": -251}},
+    },
+    "etcDetails": {"total": 0},
+    "cpcDetails": {"total": -48095},
+}
+
+
+def test_sync_upserts_settlement_breakdown_columns(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_settlement_breakdown_details",
+        lambda page, start_date, end_date: [_BREAKDOWN_DETAIL],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-12",
+    ).one()
+    assert row.commission_amount == 131_402
+    assert row.delivery_fee_amount == 210_800
+    assert row.customer_discount_amount == 271_760
+    assert row.ad_cost_amount == 48_095
+
+
+def test_sync_isolates_settlement_breakdown_failure_from_deposit(db_session, sync_setup, monkeypatch):
+    """상세 수집이 실패해도(예: 카드 클릭 실패) 이미 별도로 성공한
+    deposit_amount(summary 기반)에는 영향이 없어야 한다 — 설계 문서 에러
+    처리 표."""
+    import app.review_sync as review_sync_mod
+    from scrapers.baemin_stats import BaeminStatsScrapeError
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_account_settlement",
+        lambda page, start_date, end_date: [
+            {"contents": [{"giveId": 531969790, "depositDueDate": "2026-08-12", "giveAmount": 904812}], "totalSize": 1},
+        ],
+    )
+
+    def _raise(page, start_date, end_date):
+        raise BaeminStatsScrapeError("정산 상세 API 응답을 한 번도 확인하지 못했습니다")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_settlement_breakdown_details", _raise)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-12",
+    ).one()
+    assert row.deposit_amount == 904_812  # summary 기반 입금액은 영향 없음
+    assert row.commission_amount is None  # 상세는 실패했으니 NULL 유지
+    assert "정산 상세" in job.error_message
