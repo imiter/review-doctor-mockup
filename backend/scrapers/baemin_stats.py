@@ -264,7 +264,15 @@ def _settlement_breakdown_amounts(detail: dict) -> dict[str, int]:
     (설계 문서 "API 응답 매핑" 절 공식). `baemin1Details`(한집배달·알뜰배달)와
     `baeminDetails`(가게배달·바로결제) 두 블록을 합산하고, 우가클비용만
     최상위 `cpcDetails`에서 가져온다. 두 블록 중 하나가 없을 수도 있어
-    (실측하지 않은 케이스지만 방어적으로) `.get()`으로 안전하게 접근한다."""
+    (실측하지 않은 케이스지만 방어적으로) `.get()`으로 안전하게 접근한다.
+
+    모든 중첩 키(`cpcDetails` 포함)에 `.get()`으로 접근한다(2026-08-13
+    fix, 최종 리뷰 발견) — 광고비 0원인 매장은 `cpcDetails` 블록 자체가
+    응답에 없을 수 있는데(미실측), 여기서 KeyError가 나면
+    `map_settlement_breakdown_by_date`가 전체 `details` 리스트를 순회하다
+    멈추고, `_run_sync`를 감싸는 상위 `except Exception`이 이번 동기화의
+    "정상적으로 캡처된 나머지 배치까지" 전부 버린다 — 배치 하나의 결측이
+    전체 동기화 결과를 통째로 무효화하는 위험이라 방어적으로 접근한다."""
     commission = 0
     delivery = 0
     discount = 0
@@ -272,11 +280,11 @@ def _settlement_breakdown_amounts(detail: dict) -> dict[str, int]:
         block = detail.get(block_key)
         if not block:
             continue
-        commission += -block["orderBrokerage"]["serviceFeeAmount"]["total"]
-        commission += -block["extra"]["paymentFee"]["total"]
-        delivery += -block["delivery"]["deliverySupplyPrice"]["total"]
-        discount += -block["orderBrokerage"]["benefitsAmount"]["total"]
-    ad_cost = -detail["cpcDetails"]["total"]
+        commission += -block.get("orderBrokerage", {}).get("serviceFeeAmount", {}).get("total", 0)
+        commission += -block.get("extra", {}).get("paymentFee", {}).get("total", 0)
+        delivery += -block.get("delivery", {}).get("deliverySupplyPrice", {}).get("total", 0)
+        discount += -block.get("orderBrokerage", {}).get("benefitsAmount", {}).get("total", 0)
+    ad_cost = -(detail.get("cpcDetails") or {}).get("total", 0)
     return {
         "commission_amount": commission,
         "delivery_fee_amount": delivery,
@@ -868,6 +876,24 @@ def fetch_current_month_orders(page) -> list[dict]:
     return list(collected.values())
 
 
+def _closest_ancestor_card(heading):
+    """`heading`(날짜 헤딩 하나를 가리키는 구체적 로케이터)의 조상 `div`
+    중에서, 날짜 헤딩(`_CARD_DATE_RE`) 매칭이 정확히 1개(자기 자신)인 가장
+    가까운 것을 카드 컨테이너로 반환한다. 못 찾으면 `None`.
+
+    배지("입금완료"/"입금예정") 텍스트에 의존하지 않는다(2026-08-13,
+    `_click_all_settlement_cards_on_page` docstring "정정 3" 최종 수정 절
+    참고 — 배지 문구가 없는 카드가 있다는 게 실 계정 라이브 검증에서
+    새로 발견됐다). "헤딩 하나 = 카드 하나"라는 카드 컨테이너의 정의 자체를
+    조건으로 쓰므로 배지 유무/문구와 무관하게 항상 성립한다."""
+    ancestors = heading.locator("xpath=ancestor::div")
+    for j in range(ancestors.count()):
+        candidate = ancestors.nth(j)
+        if candidate.get_by_text(_CARD_DATE_RE, exact=True).count() == 1:
+            return candidate
+    return None
+
+
 def _click_all_settlement_cards_on_page(page) -> None:
     """현재 페이지에 보이는 정산 배치 카드 전부를 순서대로 클릭해 각각의
     상세(`settle/history/details/{giveId}`) 응답을 끌어낸다. 카드는 "N월
@@ -899,14 +925,46 @@ def _click_all_settlement_cards_on_page(page) -> None:
     빠짐없이 클릭해 상세 응답을 받는 것까지 실측 확인했다(정확한 건수는
     `fetch_settlement_breakdown_details` 아래 실측 결과 참고).
 
-    같은 날짜에 배치가 2건 이상이면 날짜 헤딩 텍스트가 중복돼 이 방식(텍스트
-    기반 `has_text` + `.last`)으로 정확히 구분되지 않는다 — 두 카드 모두
-    독립적으로 그 날짜 텍스트를 포함하므로 `.last`가 매번 두 카드 중 DOM상
-    더 뒤에 있는 쪽만 골라, 앞 카드는 아예 클릭되지 않고 뒤 카드만 중복
-    클릭될 수 있다. 이번 조사에 쓴 실 계정의 최근 30일 데이터에는 같은
-    날짜 중복 배치가 없어 이 경로 자체를 재현할 수는 없었다 — 알려진
-    미해결 한계로 남긴다(발생 시 카드 순번 기반 포지셔널 선택자로
-    다시 설계해야 한다).
+    **정정 3 (2026-08-13, 최종 리뷰 발견·수정 — 위 "알려진 미해결 한계"를
+    구조적 포지셔널 선택자로 해결)**: 같은 날짜에 배치가 2건 이상이면
+    날짜 헤딩 텍스트가 중복된다. 위 정정에서 남긴 `has_text=heading_text`
+    + `.last` 방식은 텍스트 값으로 전역 검색을 하기 때문에, 헤딩이 2개면
+    두 검색 모두 정확히 같은 카드(DOM상 더 뒤에 있는 쪽)로 리졸브된다 —
+    `.last`가 "몇 번째 매칭인지"를 구분해주지 않기 때문에 앞 카드는
+    영원히 클릭되지 않고 뒤 카드만 두 번 클릭된다.
+
+    첫 시도는 "헤딩을 텍스트가 아니라 인덱스로 순회 + XPath `ancestor::`로
+    그 헤딩 자신의 조상을 찾되, 조상 판별 조건은 기존과 동일하게
+    '입금완료'/'입금예정' 배지 포함 div"였다. 이 접근은 실 계정 라이브
+    검증(2026-08-13, 아래 `fetch_settlement_breakdown_details` 실측 결과
+    참고)에서 20건 중 19건만 캡처되는 회귀를 냈다 — 원인은 리스트 맨 위
+    "8월 13일"(당일, 아직 정산 진행 중인 배치로 추정) 카드 하나가
+    "입금완료"/"입금예정" 배지 문구를 갖지 않아, 그 카드 자신을 조상으로
+    가진 가장 가까운 매칭 div가 없어서 XPath가 훨씬 바깥의 훨씬 큰
+    컨테이너(진단 스크립트로 측정한 bounding box 높이가 카드 1장의 148px가
+    아니라 1624px — 카드 여러 장을 아우르는 리스트 래퍼)까지 타고 올라갔고,
+    그 커진 박스의 "오른쪽 끝" 좌표를 클릭해도 실제 카드가 아닌 엉뚱한
+    위치라 상세 응답이 발생하지 않았다(진단 스크립트로 재현·확인:
+    `card_count=1, box={'height': 1624, ...}, clicked, details 0->0`).
+    즉 배지 텍스트에 의존하는 조상 판별 조건 자체가 배지 문구가 없는
+    카드(예: 당일 진행 중 배치)에 대해 깨지는 새로운 실패 모드였다.
+
+    최종 수정은 배지 텍스트 의존을 완전히 제거했다 — 조상 판별 조건을
+    "입금완료/입금예정 포함"이 아니라 **"날짜 헤딩(`_CARD_DATE_RE`) 매칭이
+    정확히 1개(자기 자신)인 가장 가까운 조상 `div`"**로 바꿨다. 헤딩
+    노드에서 `ancestor::div`로 모든 조상(가까운 순)을 얻은 뒤, 각 조상
+    후보 안에서 `get_by_text(_CARD_DATE_RE, exact=True).count()`가 1이 되는
+    첫 번째(=가장 가까운) 조상을 카드로 채택한다. 이 조건은 카드 안에 어떤
+    상태 배지가 있든(있든 없든, 문구가 뭐든) 전혀 상관하지 않고, 오직 "이
+    조상이 정확히 하나의 날짜 헤딩만 감싸는 가장 작은 div인가"만 본다 —
+    카드 컨테이너의 정의 자체("헤딩 하나 = 카드 하나")와 정확히 일치한다.
+    같은 날짜 중복 배치가 있어도 이 판정은 각 헤딩 노드 고유의 조상 축을
+    타고 올라가므로(형제 카드의 서브트리는 애초에 조상이 아니다) 여전히
+    서로 다른 카드로 정확히 갈라진다 — 텍스트 재검색이 아니라 heading이라는
+    구체적 DOM 노드를 시작점으로 한 상대 탐색이라는 정정 3의 핵심
+    아이디어는 유지하면서, 배지 문구 의존성만 제거한 형태다. 이 수정
+    이후 재검증에서 20/20 전부 캡처되는 것을 실측 확인했다(아래
+    `fetch_settlement_breakdown_details` 실측 결과 참고).
 
     **정정 2 (2026-08-12, 같은 검증에서 발견) — 카드 클릭이 "인라인 펼치기"가
     아니라 모달을 연다는 것과, 뷰포트 밖 카드는 아예 클릭되지 않는다는
@@ -946,9 +1004,15 @@ def _click_all_settlement_cards_on_page(page) -> None:
     10개씩 2페이지)를 빠짐없이 클릭해 상세 응답 20건을 받는 것을 실측
     확인했다(`fetch_settlement_breakdown_details` 아래 정확한 실측 결과
     참고)."""
-    date_headings = page.get_by_text(_CARD_DATE_RE, exact=True).all_inner_texts()
-    for heading_text in date_headings:
-        card = page.locator("div", has_text=heading_text).last
+    headings = page.get_by_text(_CARD_DATE_RE, exact=True)
+    for i in range(headings.count()):
+        # 인덱스로 리졸브한 heading 하나(구체적 DOM 노드 참조) — 텍스트
+        # 값으로 다시 검색하지 않으므로 다른 헤딩과 텍스트가 겹쳐도 섞이지
+        # 않는다(위 "정정 3" 참고).
+        heading = headings.nth(i)
+        card = _closest_ancestor_card(heading)
+        if card is None:
+            continue
         box = card.bounding_box()
         if box is None:
             continue
@@ -988,7 +1052,21 @@ def fetch_settlement_breakdown_details(page, start_date: str, end_date: str) -> 
     없었다. 날짜별 4개 카테고리 합산 값도 전부 0 이상의 합리적인 금액으로
     나왔다(예: 2026-08-12 커미션 131,402원 — Task 2의 giveId 531969790
     fixture와 정확히 일치, 같은 배치를 이번엔 화면 클릭 경로로 재확인한
-    셈)."""
+    셈).
+
+    **재검증 (2026-08-13, 최종 리뷰 fix round)**: 카드 선택자를 배지
+    텍스트 기반 → 인덱스 순회 XPath ancestor로 바꾼 직후 첫 라이브
+    재검증에서는 20건 중 19건만 캡처되는 회귀가 새로 나왔다(위
+    `_click_all_settlement_cards_on_page` docstring "정정 3" 참고 — 당일
+    진행 중인 배치 카드가 배지 문구를 갖지 않아 조상 선택이 엉뚱하게 큰
+    컨테이너로 튀는 문제, 아래 신규 부분-캡처 하드 에러가 실제로 이걸
+    잡아냈다). 배지 의존을 완전히 제거한 `_closest_ancestor_card`
+    (날짜 헤딩 매칭이 정확히 1개인 가장 가까운 조상)로 다시 고친 뒤
+    재검증하니 `today - 30일` ~ `today` 범위에서 20건 전부(2026-07-14 ~
+    2026-08-13, 당일 진행 중 배치 포함) 정확히 캡처됐고, 2026-08-12 값도
+    위와 동일하게 재확인됐다 — 새로 추가한 부분-캡처 하드 에러(아래)가
+    건강한 경로에서 false-trigger하지 않는 것까지 이 재검증으로 함께
+    확인했다."""
     give_id_to_date: dict[int, str] = {}
     details: list[dict] = []
     state = {"collecting": False, "observed_any": False}
@@ -1084,20 +1162,33 @@ def fetch_settlement_breakdown_details(page, start_date: str, end_date: str) -> 
 
     # `observed_any`는 summary 엔드포인트(그리고 날짜 범위 다이얼로그)가
     # 정상 동작했다는 것만 증명한다 — 카드 클릭이 실제로 상세 응답을
-    # 끌어냈는지는 별개다. `fetch_shop_stats`의 `_should_count_sales_response`
-    # 도입 배경(코드 리뷰로 발견된 은폐 실패 경로, 모듈 내 해당 함수
-    # docstring 참고)과 같은 종류의 문제 — 카드 클릭 선택자가 다른 계정/DOM
-    # 변형/배민 UI 변경으로 깨지면 `details`가 조용히 빈 리스트로 남는데,
-    # 이건 호출자 입장에서 "이번 창에는 정산 배치가 진짜 0건"이라는 정상
-    # 케이스와 구분이 안 된다. `give_id_to_date`(summary에서 만든 배치
-    # 목록)가 비어있지 않은데도 `details`가 비어있다면 배치는 실제로
-    # 있었는데 카드 클릭 루프가 하나도 못 끌어낸 것 — 이건 진짜 실패이므로
-    # "summary 자체가 안 왔다"는 위 에러와 구분되는 메시지로 하드 에러
-    # 처리한다. 일부만 성공한 경우(예: 20건 중 15건만 캡처)는 여기서 걸러내지
-    # 않는다 — 부분 성공은 저하됐지만 유효한 결과로 취급한다(설계 결정).
-    if give_id_to_date and not details:
-        raise BaeminStatsScrapeError(
-            "정산 배치는 있었지만 카드 클릭으로 상세 응답을 하나도 받지 못했습니다"
-        )
+    # 끌어냈는지, 그것도 배치 개수만큼 전부 끌어냈는지는 별개다.
+    # `fetch_shop_stats`의 `_should_count_sales_response` 도입 배경(코드
+    # 리뷰로 발견된 은폐 실패 경로, 모듈 내 해당 함수 docstring 참고)과 같은
+    # 종류의 문제 — 카드 클릭 선택자가 다른 계정/DOM 변형/배민 UI 변경으로
+    # 깨지면 `details`가 조용히 빈 리스트로 남거나 일부만 채워지는데, 둘 다
+    # 호출자 입장에서 "이번 창에는 정산 배치가 진짜 0건"이거나 "정상적으로
+    # 전부 캡처됨"과 구분이 안 된다. 그래서 `give_id_to_date`(summary에서
+    # 만든, 이 창 안의 배치 전체 목록)의 unique 개수와 `details`에서 실제로
+    # 캡처한 unique giveId 개수를 비교한다 — 완전히 0건(구 버전부터 있던
+    # 하드 에러, 아래 메시지 그대로 유지)과 일부만 캡처된 부분 실패(2026-08-13
+    # 추가, defense-in-depth — 같은 날짜에 배치가 2건 이상일 때 텍스트 기반
+    # 카드 선택자가 한쪽만 골라버리던 버그를 `_click_all_settlement_cards_on_page`
+    # 쪽에서 포지셔널 선택자로 고쳤지만, 그 수정이 나중에 다시 깨지거나
+    # 다른 원인으로 일부 카드만 클릭이 누락되는 경우까지 폭넓게 잡기 위한
+    # 게이트다) 둘 다 여기서 하드 에러로 표면화한다. 배치 자체가 0건이면
+    # (정산 이력이 진짜 없는 정상 케이스) `give_id_to_date`도 비어있어 이
+    # 블록 전체를 건너뛴다.
+    if give_id_to_date:
+        unique_captured = len({d["giveId"] for d in details})
+        total_batches = len(give_id_to_date)
+        if unique_captured == 0:
+            raise BaeminStatsScrapeError(
+                "정산 배치는 있었지만 카드 클릭으로 상세 응답을 하나도 받지 못했습니다"
+            )
+        if unique_captured < total_batches:
+            raise BaeminStatsScrapeError(
+                f"정산 배치 {total_batches}건 중 상세 응답 {unique_captured}건만 받았습니다"
+            )
 
     return details
