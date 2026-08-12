@@ -36,7 +36,16 @@ type ClickPerformance = {
 type ShopBrand = { shop_no: string; shop_name: string };
 type DailyRow = { date: string; amount: number };
 type RepurchaseRow = { metric_date: string; new_orders: number; repeat_orders: number; rate_raw: number; rate_adjusted: number };
-type BreakdownRow = { platform_name: string; sales_amount: number; commission_estimate: number; payment_fee_estimate: number; net_estimate: number; actual_deposit: number };
+type BreakdownRowEstimate = {
+  platform_id: number; platform_name: string; sales_amount: number; is_estimate: true;
+  commission_estimate: number; payment_fee_estimate: number; net_estimate: number; actual_deposit: number;
+};
+type BreakdownRowActual = {
+  platform_id: number; platform_name: string; sales_amount: number; is_estimate: false;
+  commission_amount: number; delivery_fee_amount: number; customer_discount_amount: number;
+  ad_cost_amount: number; misc_amount: number; actual_deposit: number;
+};
+type BreakdownRow = BreakdownRowEstimate | BreakdownRowActual;
 
 const ALERT_LABEL: Record<string, { label: string; color: string }> = {
   negative_review: { label: "부정 리뷰", color: "text-danger" },
@@ -116,17 +125,29 @@ function SalesBreakdownModal({ storeId, period }: { storeId: number; period: Per
   return (
     <div className="space-y-4">
       <p className="rounded-lg bg-surface-2 p-3 text-xs text-muted">
-        중개수수료·결제수수료는 플랫폼 기본 요율로 추정한 값입니다. 실제 입금액은 정산 주기(D+3)
-        차이로 추정치와 다를 수 있습니다 — 이 차이가 &quot;매출과 입금이 다르다&quot;는 현장 문제입니다.
+        배민은 정산 상세(수수료/배달비/고객할인/우가클비용)가 동기화된 기간이면 실제 차감
+        내역을 보여줍니다. 아직 없으면 플랫폼 기본 요율로 추정한 값입니다.
       </p>
       {data.platforms.map((p) => (
         <div key={p.platform_name} className="rounded-lg border border-border-subtle p-4">
           <p className="mb-2 text-sm font-medium text-accent">{p.platform_name}</p>
           <dl className="space-y-1 text-sm">
             <div className="flex justify-between"><dt className="text-muted">매출액</dt><dd>{won(p.sales_amount)}</dd></div>
-            <div className="flex justify-between text-danger"><dt>− 중개수수료(추정)</dt><dd>−{won(p.commission_estimate)}</dd></div>
-            <div className="flex justify-between text-danger"><dt>− 결제수수료(추정)</dt><dd>−{won(p.payment_fee_estimate)}</dd></div>
-            <div className="flex justify-between border-t border-border-subtle pt-1 font-semibold"><dt>추정 정산액</dt><dd>{won(p.net_estimate)}</dd></div>
+            {p.is_estimate ? (
+              <>
+                <div className="flex justify-between text-danger"><dt>− 중개수수료(추정)</dt><dd>−{won(p.commission_estimate)}</dd></div>
+                <div className="flex justify-between text-danger"><dt>− 결제수수료(추정)</dt><dd>−{won(p.payment_fee_estimate)}</dd></div>
+                <div className="flex justify-between border-t border-border-subtle pt-1 font-semibold"><dt>추정 정산액</dt><dd>{won(p.net_estimate)}</dd></div>
+              </>
+            ) : (
+              <>
+                <div className="flex justify-between text-danger"><dt>− 수수료</dt><dd>−{won(p.commission_amount)}</dd></div>
+                <div className="flex justify-between text-danger"><dt>− 배달비</dt><dd>−{won(p.delivery_fee_amount)}</dd></div>
+                <div className="flex justify-between text-danger"><dt>− 고객할인</dt><dd>−{won(p.customer_discount_amount)}</dd></div>
+                <div className="flex justify-between text-danger"><dt>− 우가클비용(광고비)</dt><dd>−{won(p.ad_cost_amount)}</dd></div>
+                <div className="flex justify-between text-muted"><dt>− 기타</dt><dd>−{won(p.misc_amount)}</dd></div>
+              </>
+            )}
             <div className="flex justify-between text-success"><dt>실제 입금액</dt><dd>{won(p.actual_deposit)}</dd></div>
           </dl>
         </div>
