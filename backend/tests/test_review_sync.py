@@ -4,8 +4,8 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.credential_crypto import CredentialCryptoError, encrypt_credential
-from app.models import BaeminShopBrand, BrandAdClickMetric, DailySettlement, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
-from app.review_sync import sync_reviews_for_job, upsert_brand_ad_click_metric, upsert_daily_settlement, upsert_repurchase_metric
+from app.models import BaeminShopBrand, BrandAdClickMetric, DailySettlement, Order, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
+from app.review_sync import sync_reviews_for_job, upsert_brand_ad_click_metric, upsert_daily_settlement, upsert_order, upsert_repurchase_metric
 from scrapers.baemin_ads import BaeminAdsScrapeError
 from scrapers.baemin_auth import BaeminLoginError
 from scrapers.baemin_reviews import BaeminScrapeError
@@ -1327,3 +1327,42 @@ def test_sync_isolates_settlement_breakdown_failure_from_deposit(db_session, syn
     assert row.deposit_amount == 904_812  # summary 기반 입금액은 영향 없음
     assert row.commission_amount is None  # 상세는 실패했으니 NULL 유지
     assert "정산 상세" in job.error_message
+
+
+def test_upsert_order_creates_new_row(db_session, seeded_user, platforms):
+    upsert_order(
+        db_session, seeded_user["store"].id, platforms["baemin"].id,
+        order_no="T2FE000020VQ", ordered_at="2026-08-13T02:19:37",
+        menu_summary="[양념조절가능]숯불양념바베큐치킨", order_type="delivery", amount=15900,
+    )
+    db_session.commit()
+
+    row = db_session.query(Order).filter_by(order_no="T2FE000020VQ").one()
+    assert row.store_id == seeded_user["store"].id
+    assert row.platform_id == platforms["baemin"].id
+    assert row.menu_summary == "[양념조절가능]숯불양념바베큐치킨"
+    assert row.order_type == "delivery"
+    assert row.amount == 15900
+
+
+def test_upsert_order_updates_existing_row_without_duplicate(db_session, seeded_user, platforms):
+    upsert_order(
+        db_session, seeded_user["store"].id, platforms["baemin"].id,
+        order_no="T2FE000020VQ", ordered_at="2026-08-13T02:19:37",
+        menu_summary="원래 메뉴", order_type="delivery", amount=15900,
+    )
+    db_session.commit()
+
+    # 같은 order_no로 다시 upsert(예: 증분 조회의 2일 여유 구간이 겹칠 때)
+    upsert_order(
+        db_session, seeded_user["store"].id, platforms["baemin"].id,
+        order_no="T2FE000020VQ", ordered_at="2026-08-13T02:19:37",
+        menu_summary="바뀐 메뉴", order_type="takeout", amount=16900,
+    )
+    db_session.commit()
+
+    rows = db_session.query(Order).filter_by(order_no="T2FE000020VQ").all()
+    assert len(rows) == 1
+    assert rows[0].menu_summary == "바뀐 메뉴"
+    assert rows[0].order_type == "takeout"
+    assert rows[0].amount == 16900

@@ -17,6 +17,7 @@ from app.models import (
     BaeminShopBrand,
     BrandAdClickMetric,
     DailySettlement,
+    Order,
     RepurchaseMetric,
     Review,
     ReviewReply,
@@ -173,6 +174,35 @@ def upsert_brand_ad_click_metric(
     existing.clicks = clicks
     existing.ad_orders = ad_orders
     existing.ad_revenue = ad_revenue
+
+
+def upsert_order(
+    db: Session, store_id: int, platform_id: int,
+    *, order_no: str, ordered_at: str, menu_summary: str, order_type: str, amount: int,
+) -> None:
+    """`order_no` 기준 upsert(`orders.order_no`는 매장과 무관하게 전역
+    유일 — schema.sql의 `UNIQUE` 제약과 동일하게 `order_no`만으로 조회한다).
+    증분 동기화(`compute_order_sync_range`)가 며칠씩 겹치는 기간을 다시
+    조회할 수 있어 같은 `order_no`가 여러 번 들어올 수 있다 — 그때마다
+    최신 값으로 덮어쓴다(주문 상태가 뒤늦게 바뀌는 경우를 반영하기 위해)."""
+    dt = datetime.fromisoformat(ordered_at)
+    existing = db.scalar(select(Order).where(Order.order_no == order_no))
+    if existing is None:
+        db.add(Order(
+            store_id=store_id, platform_id=platform_id, order_no=order_no,
+            ordered_at=dt, menu_summary=menu_summary,
+            order_type=order_type, amount=amount,
+        ))
+        # 다른 upsert_* 함수들과 같은 이유(autoflush=False인 app.db.SessionLocal)
+        # — 증분 조회 범위 안에서 같은 order_no가 여러 번 들어올 수 있어
+        # flush 없이는 두 번째부터 select()가 방금 add()한 행을 못 보고
+        # 중복 INSERT를 시도해 UniqueViolation이 난다.
+        db.flush()
+        return
+    existing.ordered_at = dt
+    existing.menu_summary = menu_summary
+    existing.order_type = order_type
+    existing.amount = amount
 
 
 def sync_reviews_for_job(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) -> None:
