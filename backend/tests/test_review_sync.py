@@ -1343,6 +1343,7 @@ def test_upsert_order_creates_new_row(db_session, seeded_user, platforms):
     assert row.menu_summary == "[양념조절가능]숯불양념바베큐치킨"
     assert row.order_type == "delivery"
     assert row.amount == 15900
+    assert row.ordered_at == datetime(2026, 8, 13, 2, 19, 37)
 
 
 def test_upsert_order_updates_existing_row_without_duplicate(db_session, seeded_user, platforms):
@@ -1366,3 +1367,54 @@ def test_upsert_order_updates_existing_row_without_duplicate(db_session, seeded_
     assert rows[0].menu_summary == "바뀐 메뉴"
     assert rows[0].order_type == "takeout"
     assert rows[0].amount == 16900
+
+
+def test_upsert_order_keyed_by_order_no_alone_not_by_store_id(db_session, seeded_user, platforms):
+    """order_no는 매장과 무관하게 전역 유일하다(schema.sql의 UNIQUE 제약과 동일).
+    같은 order_no를 다른 store_id로 upsert하면 기존 행을 갱신해야지 새 행을 만들면 안 된다
+    — upsert_daily_settlement 등과 달리 (store_id, platform_id, settle_date) 복합키가 아니라
+    order_no 단독으로 식별한다."""
+    from app.models import Store, User
+    from app.auth import hash_password
+
+    # 두 번째 매장 생성
+    user2 = User(
+        email="demo2@dris.kr", password_hash=hash_password("demo1234!"), nickname="김사장2",
+        phone_hash="b" * 64, marketing_agreed=True, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(user2)
+    db_session.flush()
+
+    store2 = Store(user_id=user2.id, name="피자천국", category="피자", created_at=datetime.now(timezone.utc))
+    db_session.add(store2)
+    db_session.commit()
+
+    # 첫 번째 매장으로 order_no="T2FE000020VQ" 생성
+    upsert_order(
+        db_session, seeded_user["store"].id, platforms["baemin"].id,
+        order_no="T2FE000020VQ", ordered_at="2026-08-13T02:19:37",
+        menu_summary="원래 메뉴", order_type="delivery", amount=15900,
+    )
+    db_session.commit()
+
+    # 두 번째 매장으로 같은 order_no 다시 upsert
+    # 새 행이 만들어지지 않고 기존 행이 갱신되어야 한다 (order_no만 키)
+    upsert_order(
+        db_session, store2.id, platforms["baemin"].id,
+        order_no="T2FE000020VQ", ordered_at="2026-08-13T03:45:00",
+        menu_summary="바뀐 메뉴 (다른 매장)", order_type="takeout", amount=22000,
+    )
+    db_session.commit()
+
+    # 같은 order_no로 조회했을 때 정확히 1행만 있어야 한다 — 두 번째 upsert가 새 행을
+    # 만들지 않고 기존 행을 갱신했다는 뜻이다 (order_no가 전역 유일 키임을 증명)
+    rows = db_session.query(Order).filter_by(order_no="T2FE000020VQ").all()
+    assert len(rows) == 1, f"Expected 1 row with order_no=T2FE000020VQ, got {len(rows)} — order_no는 전역 유일이어야 함"
+
+    # 그 행은 두 번째 upsert의 데이터 필드로 갱신되어야 한다
+    # (store_id/platform_id는 기존 값 유지 — 다른 upsert_* 함수들처럼 키 필드는 안 건드림)
+    row = rows[0]
+    assert row.store_id == seeded_user["store"].id, "order_no가 전역 유일이라도 첫 upsert의 store_id는 유지"
+    assert row.menu_summary == "바뀐 메뉴 (다른 매장)", "데이터 필드는 최신값으로 갱신"
+    assert row.order_type == "takeout", "데이터 필드는 최신값으로 갱신"
+    assert row.amount == 22000, "데이터 필드는 최신값으로 갱신"
