@@ -1,7 +1,7 @@
 """배민 사장님광장의 가게통계(매출/재주문율)·정산내역(입금)·주문내역(이번
 달 보완 매출) API 응답을 날짜별로 집계하는 순수 함수와, 그 organic 응답을
 실제로 캡처하는 `fetch_shop_stats`/`fetch_account_settlement`/
-`fetch_current_month_orders`.
+`fetch_orders`.
 
 브랜드(치밥대장 등)별로 분리하지 않고 전부 날짜 단위로 합산한다 — 설계
 결정(계정 전체 합산만 지원, 입금이 애초에 브랜드별로 안 나뉘어 나오기
@@ -110,7 +110,7 @@ exact=True).count() == 0`, 스크롤을 여러 번 반복해도 추가 요청이
 버튼이 비활성화돼 클릭이 타임아웃 난다(실측: 20페이지·196건을 이 방식으로
 끝까지 수집해 8/1~8/11 전 구간이 채워지는 것까지 확인). `_click_load_more_until_done`은
 계속 `fetch_account_settlement`(정산내역, 실제로 "더보기"를 쓰는 화면)
-전용으로 남겨두고, `fetch_current_month_orders`는 별도의
+전용으로 남겨두고, `fetch_orders`는 별도의
 `_click_next_page_until_done`(숫자 페이지네이션 + 타임아웃 기반 종료)을
 쓰도록 고쳤다.
 
@@ -226,7 +226,7 @@ def map_sales_by_date(responses: list[dict]) -> dict[str, int]:
 def map_orders_to_daily_sales(order_contents: list[dict]) -> dict[str, int]:
     """`GET /v4/orders` 응답의 `contents[].order.{orderDateTime,payAmount}`를
     날짜별로 합산한다. `orderDateTime`은 `"2026-08-10T22:19:10"` 형태라
-    앞 10글자(`YYYY-MM-DD`)만 날짜 키로 쓴다. `fetch_current_month_orders`가
+    앞 10글자(`YYYY-MM-DD`)만 날짜 키로 쓴다. `fetch_orders`가
     반환한(여러 페이지에 걸쳐 이미 dedup된) flat 리스트를 그대로 받는다 —
     가게통계 화면의 월별 조회가 진행 중인 이번 달을 지원하지 않는 제약(모듈
     docstring의 discrepancy 절 참고)을 주문내역 화면 데이터로 보완하기 위한
@@ -852,13 +852,21 @@ def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]
     return responses
 
 
-def fetch_current_month_orders(page) -> list[dict]:
-    """주문내역 화면(`/orders/history`)에서 이번 달 1일부터 오늘까지의 주문
-    (`/v4/orders`) organic 응답을 가로챈다. 가게통계 화면의 월별 조회가
+def fetch_orders(page, start_date: str, end_date: str) -> list[dict]:
+    """주문내역 화면(`/orders/history`)에서 `start_date`~`end_date`("YYYY-MM-DD")
+    범위의 주문(`/v4/orders`) organic 응답을 가로챈다. 가게통계 화면의 월별 조회가
     진행 중인 이번 달을 지원하지 않는다는 제약(모듈 docstring의 discrepancy
     절 참고)을 보완하기 위한 함수 — 호출자는 이 함수가 반환한 `contents`
     항목 리스트를 `map_orders_to_daily_sales`로 집계해 이번 달 매출만 별도로
     채운다.
+
+    2026-08-13부터는 두 가지 목적으로 함께 쓰인다: (1) 기존처럼 이번 달
+    1일~오늘 범위로 호출해 진행 중인 이번 달 매출을 보완하고(호출자가
+    `map_orders_to_daily_sales`로 집계), (2) `compute_order_sync_range`가
+    계산한 범위로 호출해 개별 주문 자체를 `orders` 테이블에 저장한다
+    (호출자가 `map_order_rows`로 매핑). 날짜 범위만 다를 뿐 스크래핑
+    로직은 완전히 동일하다 — 원래 함수 내부에 하드코딩돼 있던 "이번 달
+    1일~오늘"을 호출자가 넘기는 인자로 바꿨을 뿐이다.
 
     날짜 범위 지정은 정산내역(`/orders/billing`)과 완전히 동일한 공유
     다이얼로그 컴포넌트를 그대로 재사용한다(실측 확인 — "날짜 직접 선택"
@@ -877,10 +885,6 @@ def fetch_current_month_orders(page) -> list[dict]:
     반환값은 `contents` 항목을 `order.orderNumber` 기준으로 중복 제거해
     합친 flat 리스트다(리뷰 리스트의 `id` 기준 dedup과 동일한 방어적
     패턴 — 페이지네이션 경계에서 항목이 겹칠 가능성에 대비)."""
-    today = date.today()
-    start_date = today.replace(day=1).isoformat()
-    end_date = today.isoformat()
-
     collected: dict[object, dict] = {}
     observed = {"any": False}
 

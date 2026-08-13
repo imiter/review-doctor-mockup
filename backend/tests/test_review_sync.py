@@ -71,7 +71,7 @@ def sync_setup(db_session, seeded_user, platforms, monkeypatch):
 
     monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", lambda page, shop_no, months: ([], []))
     monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
-    monkeypatch.setattr(review_sync_mod, "fetch_current_month_orders", lambda page: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_orders", lambda page, start_date, end_date: [])
     monkeypatch.setattr(review_sync_mod, "fetch_brand_click_metrics", lambda page, shop_no, months: [])
     monkeypatch.setattr(review_sync_mod, "fetch_settlement_breakdown_details", lambda page, start_date, end_date: [])
 
@@ -609,8 +609,8 @@ def test_sync_merges_current_month_orders_into_sales_for_a_different_date(db_ses
     )
     monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
     monkeypatch.setattr(
-        review_sync_mod, "fetch_current_month_orders",
-        lambda page: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+        review_sync_mod, "fetch_orders",
+        lambda page, start_date, end_date: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -642,10 +642,10 @@ def test_sync_isolates_current_month_orders_failure_from_completed_months_sales(
     )
     monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
 
-    def _raise_current_month(page):
+    def _raise_current_month(page, start_date, end_date):
         raise BaeminStatsScrapeError("주문내역 조회 실패")
 
-    monkeypatch.setattr(review_sync_mod, "fetch_current_month_orders", _raise_current_month)
+    monkeypatch.setattr(review_sync_mod, "fetch_orders", _raise_current_month)
 
     sync_reviews_for_job(job, conn, db_session)
 
@@ -672,8 +672,8 @@ def test_sync_merges_current_month_sales_and_settlement_deposit_on_the_same_date
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
     monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", lambda page, shop_no, months: ([], []))
     monkeypatch.setattr(
-        review_sync_mod, "fetch_current_month_orders",
-        lambda page: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+        review_sync_mod, "fetch_orders",
+        lambda page, start_date, end_date: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
     )
     monkeypatch.setattr(
         review_sync_mod, "fetch_account_settlement",
@@ -825,8 +825,8 @@ def test_sync_isolates_malformed_sales_response_from_other_three_sources(db_sess
         lambda page, shop_no, months: ([_malformed_sales_resp], [_CRM_RESP]),
     )
     monkeypatch.setattr(
-        review_sync_mod, "fetch_current_month_orders",
-        lambda page: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+        review_sync_mod, "fetch_orders",
+        lambda page, start_date, end_date: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
     )
     monkeypatch.setattr(
         review_sync_mod, "fetch_account_settlement",
@@ -914,8 +914,8 @@ def test_sync_isolates_non_keyerror_malformed_sales_response_from_other_three_so
         lambda page, shop_no, months: ([_malformed_sales_resp], [_CRM_RESP]),
     )
     monkeypatch.setattr(
-        review_sync_mod, "fetch_current_month_orders",
-        lambda page: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+        review_sync_mod, "fetch_orders",
+        lambda page, start_date, end_date: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
     )
     monkeypatch.setattr(
         review_sync_mod, "fetch_account_settlement",

@@ -31,7 +31,7 @@ from scrapers.baemin_stats import (
     BaeminStatsScrapeError,
     compute_repurchase_rates,
     fetch_account_settlement,
-    fetch_current_month_orders,
+    fetch_orders,
     fetch_settlement_breakdown_details,
     fetch_shop_stats,
     map_deposits_by_date,
@@ -345,7 +345,10 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         # 보완한다 — 계정 전체를 한 번에 반환하므로 매장 루프 밖에서 한 번만
         # 호출한다(fetch_shop_stats처럼 매장별로 반복하지 않는다).
         try:
-            current_month_orders = fetch_current_month_orders(session.page)
+            today_for_orders = date.today()
+            current_month_orders = fetch_orders(
+                session.page, today_for_orders.replace(day=1).isoformat(), today_for_orders.isoformat(),
+            )
             current_month_sales = map_orders_to_daily_sales(current_month_orders)
             for settle_date, amount in current_month_sales.items():
                 upsert_daily_settlement(
