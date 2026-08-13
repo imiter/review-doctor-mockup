@@ -15,21 +15,29 @@ type Order = {
   order_type: string;
   amount: number;
 };
+type PlatformOption = { id: number; code: string; name: string; brand_color: string | null };
 
 export default function OrdersPage() {
   const { storeId } = useStoreContext();
   const [orders, setOrders] = useState<Order[]>([]);
+  const [baeminPlatformId, setBaeminPlatformId] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!storeId) return;
-    apiGet<Order[]>(`/orders?store_id=${storeId}`).then(setOrders);
-  }, [storeId]);
+    apiGet<PlatformOption[]>("/platforms").then((rows) => {
+      setBaeminPlatformId(rows.find((p) => p.code === "baemin")?.id ?? null);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!storeId || !baeminPlatformId) return;
+    apiGet<Order[]>(`/orders?store_id=${storeId}&platform_id=${baeminPlatformId}`).then(setOrders);
+  }, [storeId, baeminPlatformId]);
 
   return (
     <div className="max-w-4xl space-y-6">
       <div>
         <h1 className="text-xl font-semibold">주문내역</h1>
-        <p className="text-sm text-muted">최근 60일 주문 내역입니다.</p>
+        <p className="text-sm text-muted">최근 30일 주문 내역입니다.</p>
       </div>
 
       <Card>
