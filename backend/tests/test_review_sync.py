@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from cryptography.fernet import Fernet
@@ -9,7 +10,7 @@ from app.review_sync import sync_reviews_for_job, upsert_brand_ad_click_metric, 
 from scrapers.baemin_ads import BaeminAdsScrapeError
 from scrapers.baemin_auth import BaeminLoginError
 from scrapers.baemin_reviews import BaeminScrapeError
-from scrapers.baemin_stats import BaeminStatsScrapeError, compute_order_sync_range, map_order_rows
+from scrapers.baemin_stats import BaeminStatsScrapeError
 
 _RAW_1 = {
     "id": 1001, "rating": 5.0, "contents": "이미 있는 리뷰", "memberNickname": "기존고객",
@@ -70,10 +71,10 @@ def sync_setup(db_session, seeded_user, platforms, monkeypatch):
     db_session.commit()
 
     monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", lambda page, shop_no, months: ([], []))
-    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
-    monkeypatch.setattr(review_sync_mod, "fetch_orders", lambda page, start_date, end_date: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date, **kwargs: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_orders", lambda page, start_date, end_date, **kwargs: [])
     monkeypatch.setattr(review_sync_mod, "fetch_brand_click_metrics", lambda page, shop_no, months: [])
-    monkeypatch.setattr(review_sync_mod, "fetch_settlement_breakdown_details", lambda page, start_date, end_date: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_settlement_breakdown_details", lambda page, start_date, end_date, **kwargs: [])
 
     return job, conn
 
@@ -574,7 +575,7 @@ def test_sync_upserts_sales_deposit_repurchase_when_all_succeed(db_session, sync
     )
     monkeypatch.setattr(
         review_sync_mod, "fetch_account_settlement",
-        lambda page, start_date, end_date: [_SETTLE_RESP],
+        lambda page, start_date, end_date, **kwargs: [_SETTLE_RESP],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -607,10 +608,10 @@ def test_sync_merges_current_month_orders_into_sales_for_a_different_date(db_ses
         review_sync_mod, "fetch_shop_stats",
         lambda page, shop_no, months: ([_SALES_RESP], []),  # 2026-08-10에 50000원 (완료된 달분)
     )
-    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_orders",
-        lambda page, start_date, end_date: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+        lambda page, start_date, end_date, **kwargs: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -640,9 +641,9 @@ def test_sync_isolates_current_month_orders_failure_from_completed_months_sales(
         review_sync_mod, "fetch_shop_stats",
         lambda page, shop_no, months: ([_SALES_RESP], []),
     )
-    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date, **kwargs: [])
 
-    def _raise_current_month(page, start_date, end_date):
+    def _raise_current_month(page, start_date, end_date, **kwargs):
         raise BaeminStatsScrapeError("주문내역 조회 실패")
 
     monkeypatch.setattr(review_sync_mod, "fetch_orders", _raise_current_month)
@@ -673,11 +674,11 @@ def test_sync_merges_current_month_sales_and_settlement_deposit_on_the_same_date
     monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", lambda page, shop_no, months: ([], []))
     monkeypatch.setattr(
         review_sync_mod, "fetch_orders",
-        lambda page, start_date, end_date: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+        lambda page, start_date, end_date, **kwargs: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
     )
     monkeypatch.setattr(
         review_sync_mod, "fetch_account_settlement",
-        lambda page, start_date, end_date: [
+        lambda page, start_date, end_date, **kwargs: [
             {"contents": [{"giveId": 900002, "depositDueDate": "2026-08-15", "giveAmount": 9000, "giveStatus": "REQUEST"}], "totalSize": 1},
         ],
     )
@@ -707,7 +708,7 @@ def test_sync_sums_stats_across_multiple_shops(db_session, sync_setup, monkeypat
         return ([sales_a], [_CRM_RESP]) if shop_no == 11111 else ([sales_b], [_CRM_RESP])
 
     monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _fetch_stats)
-    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [_SETTLE_RESP])
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date, **kwargs: [_SETTLE_RESP])
 
     sync_reviews_for_job(job, conn, db_session)
 
@@ -734,7 +735,7 @@ def test_sync_reports_success_with_error_message_when_stats_fail_but_reviews_suc
 
     monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _raise_stats)
 
-    def _raise_settlement(page, start_date, end_date):
+    def _raise_settlement(page, start_date, end_date, **kwargs):
         raise BaeminStatsScrapeError("정산내역 API 응답을 한 번도 확인하지 못했습니다")
 
     monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", _raise_settlement)
@@ -761,7 +762,7 @@ def test_sync_isolates_settlement_failure_from_stats_success(db_session, sync_se
         lambda page, shop_no, months: ([_SALES_RESP], [_CRM_RESP]),
     )
 
-    def _raise_settlement(page, start_date, end_date):
+    def _raise_settlement(page, start_date, end_date, **kwargs):
         raise BaeminStatsScrapeError("정산내역 조회 실패")
 
     monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", _raise_settlement)
@@ -793,7 +794,7 @@ def test_sync_isolates_one_shop_stats_failure_from_other_shops(db_session, sync_
         return [_SALES_RESP], [_CRM_RESP]
 
     monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _fetch_stats)
-    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [_SETTLE_RESP])
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date, **kwargs: [_SETTLE_RESP])
 
     sync_reviews_for_job(job, conn, db_session)
 
@@ -826,11 +827,11 @@ def test_sync_isolates_malformed_sales_response_from_other_three_sources(db_sess
     )
     monkeypatch.setattr(
         review_sync_mod, "fetch_orders",
-        lambda page, start_date, end_date: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+        lambda page, start_date, end_date, **kwargs: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
     )
     monkeypatch.setattr(
         review_sync_mod, "fetch_account_settlement",
-        lambda page, start_date, end_date: [_SETTLE_RESP],
+        lambda page, start_date, end_date, **kwargs: [_SETTLE_RESP],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -915,11 +916,11 @@ def test_sync_isolates_non_keyerror_malformed_sales_response_from_other_three_so
     )
     monkeypatch.setattr(
         review_sync_mod, "fetch_orders",
-        lambda page, start_date, end_date: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
+        lambda page, start_date, end_date, **kwargs: [{"order": {"orderNumber": "T1", "orderDateTime": "2026-08-15T12:00:00", "payAmount": 12000}}],
     )
     monkeypatch.setattr(
         review_sync_mod, "fetch_account_settlement",
-        lambda page, start_date, end_date: [_SETTLE_RESP],
+        lambda page, start_date, end_date, **kwargs: [_SETTLE_RESP],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -976,7 +977,7 @@ def test_sync_zeroes_stale_mock_deposit_on_gap_date_within_fetch_window(db_sessi
         "contents": [{"giveId": 900003, "depositDueDate": payout_date.isoformat(), "giveAmount": 40000, "giveStatus": "REQUEST"}],
         "totalSize": 1,
     }
-    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date: [settle_resp])
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", lambda page, start_date, end_date, **kwargs: [settle_resp])
 
     sync_reviews_for_job(job, conn, db_session)
 
@@ -1280,7 +1281,7 @@ def test_sync_upserts_settlement_breakdown_columns(db_session, sync_setup, monke
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_settlement_breakdown_details",
-        lambda page, start_date, end_date: [_BREAKDOWN_DETAIL],
+        lambda page, start_date, end_date, **kwargs: [_BREAKDOWN_DETAIL],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -1308,12 +1309,12 @@ def test_sync_isolates_settlement_breakdown_failure_from_deposit(db_session, syn
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_account_settlement",
-        lambda page, start_date, end_date: [
+        lambda page, start_date, end_date, **kwargs: [
             {"contents": [{"giveId": 531969790, "depositDueDate": "2026-08-12", "giveAmount": 904812}], "totalSize": 1},
         ],
     )
 
-    def _raise(page, start_date, end_date):
+    def _raise(page, start_date, end_date, **kwargs):
         raise BaeminStatsScrapeError("정산 상세 API 응답을 한 번도 확인하지 못했습니다")
 
     monkeypatch.setattr(review_sync_mod, "fetch_settlement_breakdown_details", _raise)
@@ -1344,6 +1345,39 @@ def test_upsert_order_creates_new_row(db_session, seeded_user, platforms):
     assert row.order_type == "delivery"
     assert row.amount == 15900
     assert row.ordered_at == datetime(2026, 8, 13, 2, 19, 37)
+
+
+def test_upsert_order_stores_kst_wall_clock_as_correct_absolute_instant(db_session, seeded_user, platforms):
+    """배민의 `orderDateTime`은 타임존 오프셋이 없는 **한국 벽시계 시간**이고
+    `orders.ordered_at`은 TIMESTAMPTZ다 — naive datetime을 그대로 넣으면
+    Postgres가 UTC로 해석해 실제보다 9시간 늦은 순간으로 저장한다(15시 이후
+    주문은 날짜까지 하루 밀린다, 2026-08-13 최종 리뷰에서 실데이터로 확인).
+    그래서 DB로 넘어가는 값이 "한국시간 02:19:37"이라는 절대 시각을 정확히
+    담고 있어야 한다.
+
+    DB에 실제로 넘어가는 값이 타임존을 가진 절대 시각인지는
+    `parse_baemin_datetime` 단위 테스트가 검증한다(test_baemin_stats.py) —
+    이 스위트의 DB는 인메모리 SQLite인데 SQLite의 DATETIME 저장 포맷에는
+    오프셋 자리가 아예 없어서, 커밋 후 다시 읽으면 오프셋이 사라진 naive
+    값으로 돌아오기 때문이다(즉 SQLite로는 이 버그의 유무를 구분할 수 없다).
+    실제 TIMESTAMPTZ 왕복은 Postgres로 라이브 검증했다(final-fix-report.md).
+
+    여기서는 그 대신 **저장된 벽시계 숫자**를 고정한다 — 한국시간 02:19:37이
+    그대로 남아야 하고, UTC로 바꿔 저장하는(17:19:37) 식의 잘못된 "수정"이
+    들어오면 이 테스트가 깨진다."""
+    upsert_order(
+        db_session, seeded_user["store"].id, platforms["baemin"].id,
+        order_no="KST0000001", ordered_at="2026-08-13T02:19:37",
+        menu_summary="심야 치킨", order_type="delivery", amount=15900,
+    )
+    db_session.commit()
+
+    row = db_session.query(Order).filter_by(order_no="KST0000001").one()
+    seoul_wall_clock = row.ordered_at.astimezone(ZoneInfo("Asia/Seoul")) if row.ordered_at.tzinfo else row.ordered_at
+    assert (
+        seoul_wall_clock.year, seoul_wall_clock.month, seoul_wall_clock.day,
+        seoul_wall_clock.hour, seoul_wall_clock.minute, seoul_wall_clock.second,
+    ) == (2026, 8, 13, 2, 19, 37)
 
 
 def test_upsert_order_updates_existing_row_without_duplicate(db_session, seeded_user, platforms):
@@ -1443,7 +1477,7 @@ def test_sync_upserts_individual_orders(db_session, sync_setup, monkeypatch):
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_orders",
-        lambda page, start_date, end_date: [_ORDER_ITEM_A, _ORDER_ITEM_B],
+        lambda page, start_date, end_date, **kwargs: [_ORDER_ITEM_A, _ORDER_ITEM_B],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -1476,7 +1510,7 @@ def test_sync_uses_incremental_range_when_orders_already_exist(db_session, sync_
 
     captured_ranges = []
 
-    def _fake_fetch_orders(page, start_date, end_date):
+    def _fake_fetch_orders(page, start_date, end_date, **kwargs):
         captured_ranges.append((start_date, end_date))
         return []
 
@@ -1503,7 +1537,7 @@ def test_sync_isolates_individual_order_failure_from_current_month_sales(db_sess
 
     call_count = {"n": 0}
 
-    def _flaky_fetch_orders(page, start_date, end_date):
+    def _flaky_fetch_orders(page, start_date, end_date, **kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
             # 첫 호출(이번 달 매출 보완)은 성공
@@ -1522,3 +1556,33 @@ def test_sync_isolates_individual_order_failure_from_current_month_sales(db_sess
     assert current_month_row.sales_amount == 15900  # 매출 보완은 정상 반영
     assert db_session.query(Order).filter_by(order_no="T2FE000020VQ").count() == 0  # 개별 주문 저장은 실패
     assert "주문내역" in job.error_message
+
+
+def test_sync_raises_page_click_cap_for_deep_order_backfill(db_session, sync_setup, monkeypatch):
+    """3개월 백필은 실측 1,541건(약 155페이지)이라, 기본 페이지네이션 상한으로는
+    구조적으로 끝까지 도달할 수 없다 — 개별 주문 저장 호출만 상한을 크게 올려
+    넘겨야 한다. 이번 달 매출 보완 호출(한 달치)은 기본값을 그대로 쓴다."""
+    import app.review_sync as review_sync_mod
+    from scrapers.baemin_stats import ORDER_BACKFILL_PAGE_CLICKS
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    calls = []
+
+    def _capture(page, start_date, end_date, **kwargs):
+        calls.append({"start": start_date, "end": end_date, "max_page_clicks": kwargs.get("max_page_clicks")})
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_orders", _capture)
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert len(calls) == 2, "이번 달 매출 보완 + 개별 주문 저장, 두 번 호출된다"
+    backfill_call = calls[-1]
+    assert backfill_call["max_page_clicks"] == ORDER_BACKFILL_PAGE_CLICKS
+    # 3개월(약 92일)치를 10건씩 페이지네이션하려면 최소 155페이지가 필요하다.
+    assert ORDER_BACKFILL_PAGE_CLICKS >= 155
+    # 이번 달 매출 보완은 기본 상한을 그대로 쓴다(명시적으로 넘기지 않는다).
+    assert calls[0]["max_page_clicks"] is None

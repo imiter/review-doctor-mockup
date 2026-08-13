@@ -336,9 +336,16 @@ def test_map_settlement_breakdown_by_date_empty_list_returns_empty_dict():
     assert map_settlement_breakdown_by_date([]) == {}
 
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
-from scrapers.baemin_stats import compute_order_sync_range, map_order_rows
+from zoneinfo import ZoneInfo
+
+from scrapers.baemin_stats import (
+    compute_order_sync_range,
+    map_order_rows,
+    parse_applied_range,
+    parse_baemin_datetime,
+)
 
 # 실 계정(2026-08-13 조사)에서 확인한 실제 GET /v4/orders
 # contents[].order 필드 형태를 축약한 것. deliveryType은 실측 227건 중
@@ -451,3 +458,69 @@ def test_compute_order_sync_range_with_existing_data_uses_two_day_buffer():
     start, end = compute_order_sync_range(latest, today)
     assert end == today
     assert start == date(2026, 8, 8)  # 8/10 - 2일
+
+
+def test_compute_order_sync_range_converts_aware_cursor_to_kst():
+    """`orders.ordered_at`은 TIMESTAMPTZ라 DB에서 읽으면 UTC 기준 aware
+    datetime이다. 한국 새벽 주문(KST 00~09시)은 UTC로는 전날이라, 변환 없이
+    `.date()`를 쓰면 커서가 하루 어긋난다 — KST로 변환한 날짜를 써야 한다."""
+    today = date(2026, 8, 13)
+    # 2026-08-12 17:19:37 UTC == 2026-08-13 02:19:37 KST (심야 치킨 주문)
+    latest_utc = datetime(2026, 8, 12, 17, 19, 37, tzinfo=timezone.utc)
+    start, end = compute_order_sync_range(latest_utc, today)
+    assert end == today
+    # KST 날짜(8/13) - 2일 = 8/11. UTC 날짜(8/12)를 썼다면 8/10이 됐을 것이다.
+    assert start == date(2026, 8, 11)
+
+
+def test_parse_applied_range_reads_same_year_range():
+    """실측 확인된 표시 형태 — 범위는 연도가 왼쪽에만 나온다."""
+    assert parse_applied_range("2026. 8. 7 ~ 8. 13") == ((2026, 8, 7), (2026, 8, 13))
+
+
+def test_parse_applied_range_reads_single_date_as_same_start_and_end():
+    """날짜 선택이 빗나가면 화면 표시가 하루짜리 단일 날짜가 된다(실측) —
+    이 경우 시작=종료로 파싱돼 요청한 범위와 달라 재시도를 유발해야 한다."""
+    assert parse_applied_range("2026. 8. 13") == ((2026, 8, 13), (2026, 8, 13))
+
+
+def test_parse_applied_range_reads_cross_year_range():
+    assert parse_applied_range("2025. 12. 30 ~ 2026. 1. 5") == ((2025, 12, 30), (2026, 1, 5))
+
+
+def test_parse_applied_range_returns_none_for_unparseable_text():
+    """모호하면 조용히 통과시키지 않는다 — None이면 호출자가 재시도하고,
+    끝내 못 맞추면 하드 에러를 던진다."""
+    assert parse_applied_range("") is None
+    assert parse_applied_range("기간을 선택해 주세요") is None
+    assert parse_applied_range("2026. 8 ~ 9") is None
+
+
+def test_parse_baemin_datetime_attaches_kst_to_naive_wall_clock():
+    """배민 `orderDateTime`은 오프셋 없는 한국 벽시계 시간이다 — TIMESTAMPTZ
+    컬럼에 naive로 넣으면 Postgres가 UTC로 해석해 9시간 늦은 순간이 된다."""
+    dt = parse_baemin_datetime("2026-08-13T02:19:37")
+    assert dt.tzinfo is not None
+    assert dt.utcoffset() == timedelta(hours=9)
+    # 절대 시각 왕복: 한국시간 8/13 02:19:37 == UTC 8/12 17:19:37
+    assert dt.astimezone(timezone.utc) == datetime(2026, 8, 12, 17, 19, 37, tzinfo=timezone.utc)
+    # 다시 한국시간으로 되돌리면 원래 벽시계 숫자가 그대로 나온다.
+    seoul = dt.astimezone(ZoneInfo("Asia/Seoul"))
+    assert (seoul.year, seoul.month, seoul.day, seoul.hour, seoul.minute, seoul.second) == (
+        2026, 8, 13, 2, 19, 37,
+    )
+
+
+def test_parse_baemin_datetime_keeps_evening_order_on_the_same_korean_day():
+    """15시 이후 주문(실측 데이터의 91%)은 naive로 저장하면 UTC 해석 때문에
+    날짜까지 하루 밀린다 — 한국 날짜가 그대로 유지돼야 한다."""
+    dt = parse_baemin_datetime("2026-08-13T21:40:00")
+    assert dt.astimezone(timezone.utc) == datetime(2026, 8, 13, 12, 40, 0, tzinfo=timezone.utc)
+    assert dt.astimezone(ZoneInfo("Asia/Seoul")).date() == date(2026, 8, 13)
+
+
+def test_parse_baemin_datetime_respects_existing_offset():
+    """이미 오프셋이 붙어 온 값은 절대 시각이 확정된 것이라 그대로 존중한다."""
+    dt = parse_baemin_datetime("2026-08-13T02:19:37+00:00")
+    assert dt.utcoffset() == timedelta(0)
+    assert dt == datetime(2026, 8, 13, 2, 19, 37, tzinfo=timezone.utc)

@@ -114,6 +114,44 @@ exact=True).count() == 0`, 스크롤을 여러 번 반복해도 추가 요청이
 `_click_next_page_until_done`(숫자 페이지네이션 + 타임아웃 기반 종료)을
 쓰도록 고쳤다.
 
+### 정정 (2026-08-13, 최종 리뷰 fix round) — 주문내역 수집의 "조용한 절단" 세 원인
+
+3개월 백필을 요청했는데 6일치 120건만 저장되고 job은 `success`로 끝난 사고를
+실 계정으로 재현·분해한 결과, 원인이 세 개였다. 셋 다 "일부만 가져오고 성공한
+척"으로 끝나는 종류였고, 증분 커서(`MAX(ordered_at)`)가 그 위에서 오늘까지
+전진해버리기 때문에 못 가져온 구간이 영구 유실됐다.
+
+1. **날짜 범위가 조용히 다르게 적용된다.** "기간" 다이얼로그의 캘린더는
+   상태 기계라, 같은 "시작일 클릭 → 종료일 클릭"이 진입 시점의 기존 선택에
+   따라 전혀 다른 결과를 낸다(상세 표는 `_set_date_range` docstring). 실측:
+   `2026-08-08~2026-08-13`을 요청했는데 실제 적용은 `2026-08-13~2026-08-13`
+   (하루)이었다. 기존 코드는 적용 결과를 확인하지 않았다.
+2. **범위 밖 응답이 그대로 섞여 들어온다.** 주문내역 화면은 진입 즉시 기본
+   필터(최근 7일)로 organic 요청을 한 번 보낸다(실측:
+   `startDate=2026-08-07&endDate=2026-08-13`, `totalSize=126`). `fetch_orders`에는
+   `fetch_shop_stats`/`fetch_account_settlement`가 쓰는 `collecting` 게이트가
+   없어서 이 응답을 그대로 수집했다 — 위 1번과 겹치면 "요청한 3개월" 대신
+   기본 7일치를 반환하면서도 호출자는 알 방법이 없다(사고 당시 저장된
+   "6일치 120건"의 정체가 정확히 이것이다).
+3. **페이지네이션이 조용히 일찍 끝난다.** 상한 30회(=300건) 고정이라 3개월
+   (실측 1,541건 = 155페이지)은 애초에 도달 불가였고, 클릭 타임아웃을
+   버튼 비활성(진짜 마지막 페이지)과 구분하지 않았으며, 클릭 후 1.5초 안에
+   응답이 안 오면 마지막 페이지로 오판했다(실측 재현).
+
+수정 방향은 "조용한 절단을 구조적으로 불가능하게 만든다"다. `/v4/orders`
+응답 최상위에 `{"totalSize": int, "totalPayAmount": int, "contents": [...]}`가
+있는 걸 확인해(정산 summary의 `totalSize`와 같은 종류의 신호) 이걸 완결성
+기준으로 삼는다 — 요청한 범위와 정확히 일치하는 응답만 수집하고, 수집
+건수가 `totalSize`에 못 미치면 하드 에러를 던진다. 자세한 근거는
+`fetch_orders`/`_click_next_page_until_done`/`_set_date_range` docstring 참고.
+
+**오버레이가 두 종류라는 것도 이때 확인했다.** `data-testid="backdrop"`
+(다이얼로그/프로모션, Escape로 닫힘) 말고도
+`div[class*="LoadingBackdrop"]`(데이터 로딩 중, Escape로 안 닫힘)가 따로 있고,
+둘 다 클릭을 가로챈다(실측 로그: `<div class="LoadingBackdrop-module__...">
+intercepts pointer events`). 로딩 오버레이는 "기다리는" 게 유일한 대응이라
+`_wait_for_loading_overlay`/`_clear_click_blockers`로 나눠 처리한다.
+
 ### crmInfo 재조사 결과 (fix round, 2026-08-11)
 
 Task 2 최초 구현에서는 crmInfo가 두 차례 재현 모두 0건이라 미관측을
@@ -177,7 +215,8 @@ Escape로 닫아버린다(실 계정 재현으로 확인된 버그 패턴).
 import calendar
 import re
 from datetime import date, datetime, timedelta
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -185,6 +224,33 @@ _MAX_LOAD_MORE_CLICKS = 30
 _MAX_CONSECUTIVE_NO_PROGRESS = 2
 _LOAD_MORE_WAIT_MS = 1_500
 _MAX_CALENDAR_NAV_CLICKS = 36
+# 주문내역 페이지네이션 한 페이지 크기(실측: `limit=10&offset=0`부터 10씩 증가).
+_ORDER_PAGE_SIZE = 10
+# 주문내역 기본 페이지 클릭 상한. `fetch_orders`의 기본 용도(이번 달 1일~오늘
+# 매출 보완)를 기준으로 잡는다 — 실측(2026-08-13) 이 계정의 주문량은 하루
+# 약 17건(3개월 1,541건 / 92일, 최근 7일 126건 / 7일)이라 한 달이면 약 520건
+# = 52페이지다. 기존 상한 30(=300건)은 매달 중순 이후 이번 달 매출을 조용히
+# 잘라내고 있었다(이번 fix에서 실측으로 확인) — 두 배 이상 여유를 둔다.
+_MAX_ORDER_PAGE_CLICKS = 120
+# 3개월 백필 전용 상한. 실측(2026-08-13) 3개월 창의 `totalSize`가 1,541건
+# = 155페이지였다 — 주문량이 지금의 2.5배가 되어도 견디도록 잡는다. 이
+# 값이 모자라면 조용히 잘리는 게 아니라 아래 `fetch_orders`의 totalSize
+# 대조가 하드 에러를 던진다(설계상 "조용한 절단"은 발생하지 않는다).
+ORDER_BACKFILL_PAGE_CLICKS = 400
+# "다음" 클릭 후 새 페이지가 도착하길 기다리는 최대 시간. 고정 대기
+# (`_LOAD_MORE_WAIT_MS`) 하나로는 부족했다 — 넓은 날짜 범위를 적용한 직후
+# 첫 페이지 전환은 실측에서 1.5초 안에 안 끝나는 경우가 있었고, 그때
+# 기존 코드는 "진행 없음 = 마지막 페이지"로 오판하고 조용히 멈췄다.
+_NEXT_PAGE_PROGRESS_TIMEOUT_MS = 15_000
+_NEXT_PAGE_POLL_MS = 500
+# 클릭이 오버레이(로딩 backdrop/다이얼로그 backdrop)에 가로채였을 때 같은
+# 페이지를 다시 시도하는 횟수.
+_NEXT_PAGE_BLOCKED_RETRIES = 3
+# 날짜 범위 선택이 요청한 대로 적용됐는지 확인하고 다시 시도하는 횟수
+# (아래 `_set_date_range` docstring의 캘린더 상태 기계 참고 — 실측상 2회면
+# 항상 수렴했다).
+_MAX_DATE_RANGE_ATTEMPTS = 3
+_APPLIED_RANGE_RE = re.compile(r"\d+")
 _MONTH_CAPTION_RE = re.compile(r"(\d{4})년 (\d{1,2})월")
 _CARD_DATE_RE = re.compile(r"^\d{1,2}월 \d{1,2}일$")
 # 정산 상세 카드 클릭 루프 동안만 쓰는 임시 뷰포트 높이. 기본 로그인 뷰포트
@@ -201,6 +267,35 @@ class BaeminStatsScrapeError(Exception):
     pass
 
 
+# 배민이 내려주는 시각 문자열(`orderDateTime` 등)은 타임존 오프셋이 없는
+# 한국 현지 벽시계 시간이다(실측: `"2026-08-13T02:19:37"`). 이 값을 그대로
+# naive datetime으로 `TIMESTAMPTZ` 컬럼에 넣으면 Postgres가 세션 타임존
+# (배포 환경 기준 UTC)으로 해석해 실제보다 9시간 늦은 순간으로 저장한다 —
+# 15시 이후 주문은 날짜까지 하루 밀린다. 그래서 DB에 넣기 전에 이 타임존을
+# 명시적으로 붙인다(2026-08-13 fix).
+KST = ZoneInfo("Asia/Seoul")
+
+
+def parse_baemin_datetime(value: str) -> datetime:
+    """배민이 준 시각 문자열을 **타임존이 붙은** datetime으로 변환한다.
+
+    배민의 `orderDateTime`은 `"2026-08-13T02:19:37"`처럼 오프셋이 없는 한국
+    현지 벽시계 시간이다(실측). 이 값을 naive 그대로 `TIMESTAMPTZ` 컬럼에
+    넣으면 Postgres가 세션 타임존(배포 환경 기준 UTC)으로 해석해 실제보다
+    9시간 늦은 순간으로 저장한다 — 19~02시(치킨 배달의 정상적인 저녁·심야
+    피크)가 화면에 04~11시로 찍히고, 15시 이후 주문(실측 데이터의 91%)은
+    날짜까지 하루 밀린다(2026-08-13 최종 리뷰에서 실데이터로 확인).
+
+    같은 동기화 안에서 `map_orders_to_daily_sales`는 같은 `orderDateTime`의
+    앞 10글자를 한국 날짜로 그대로 쓴다 — 변환을 안 하면 하나의 원본 필드가
+    두 개의 서로 다른 타임존 가정으로 저장되는 모순이 생긴다.
+
+    이미 오프셋이 붙어 있는 값은 그대로 존중한다(절대 시각이 이미 확정된
+    값에 KST를 덮어쓰면 오히려 틀린다)."""
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=KST)
+
+
 def _dismiss_backdrop_if_present(page) -> None:
     # baemin_reviews.py의 페이지네이션 클릭과 동일한 방어 패턴 — 프로모션
     # 모달이 조사 도중 언제든 다시 뜰 수 있다(실 계정으로 확인됨). 단,
@@ -209,6 +304,73 @@ def _dismiss_backdrop_if_present(page) -> None:
     if page.get_by_test_id("backdrop").count() > 0:
         page.keyboard.press("Escape")
         page.wait_for_timeout(500)
+
+
+def _loading_overlay_visible(page) -> bool:
+    """로딩 오버레이가 **지금 실제로 화면을 덮고 있는지** 판정한다.
+
+    반드시 `:visible`로 봐야 한다(2026-08-13 실측): 이 오버레이 엘리먼트는
+    로딩 중이 아닐 때도 DOM에 그대로 남아 있어(`count() == 1`) 존재 여부로
+    판정하면 "영원히 로딩 중"으로 오해한다. 그러면 아래 대기 함수가 매번
+    타임아웃을 통째로 소모해 페이지네이션이 페이지당 10.7초까지 느려진다
+    (3개월 155페이지면 28분 — 실측으로 확인하고 고친 버그다)."""
+    return page.locator("div[class*='LoadingBackdrop']:visible").count() > 0
+
+
+def _wait_for_loading_overlay(page, timeout_ms: int = 10_000) -> bool:
+    """로딩 오버레이가 사라질 때까지 기다린다. 사라졌으면(또는 애초에 안
+    보였으면) True.
+
+    `data-testid="backdrop"`(다이얼로그 backdrop, Escape로 닫힘)과는 **다른**
+    레이어다(2026-08-13 실측으로 새로 발견). 이 레이어는 화면이 데이터를
+    불러오는 동안만 보이고 Escape로 닫히지 않으며, 떠 있는 동안의 클릭은
+    전부 이 레이어가 가로챈다 — 실 계정 재현에서 "날짜 직접 선택" 클릭이
+    `<div class="LoadingBackdrop-module__...">intercepts pointer events`로
+    타임아웃 나는 것을 직접 확인했다. 그래서 Escape가 아니라 "기다린다"가
+    유일한 올바른 대응이다."""
+    for _ in range(max(1, timeout_ms // 250)):
+        if not _loading_overlay_visible(page):
+            return True
+        page.wait_for_timeout(250)
+    return not _loading_overlay_visible(page)
+
+
+def _clear_click_blockers(page, timeout_ms: int = 10_000) -> None:
+    """클릭을 가로챌 수 있는 두 레이어를 각각 그에 맞는 방법으로 해소한다 —
+    다이얼로그 backdrop은 Escape, 로딩 오버레이는 대기. 우리 자신의
+    다이얼로그가 열려있는 동안에는 호출하면 안 된다(모듈 docstring의
+    "backdrop 처리 시 주의" 참고)."""
+    _dismiss_backdrop_if_present(page)
+    _wait_for_loading_overlay(page, timeout_ms)
+
+
+def _is_disabled(button) -> bool:
+    """페이지네이션 "다음" 버튼이 실제로 비활성(=마지막 페이지)인지 판정한다.
+
+    실측(2026-08-13)한 버튼 DOM은
+    `<button data-disabled="false" ... aria-disabled="false" type="button">`
+    형태라, 비활성 여부가 `disabled` 속성이 아니라 `data-disabled`/
+    `aria-disabled`로 표현된다. 세 가지를 모두 본다(어느 하나라도 참이면
+    비활성) — 배민이 표현 방식을 바꿔도 최소 한 가지는 잡히도록.
+
+    이 판정이 이번 fix의 핵심이다: 클릭 타임아웃 하나만 보고 "마지막
+    페이지"로 단정하던 기존 코드는, 오버레이가 클릭을 가로챈 일시적 방해와
+    진짜 종료를 구분하지 못해 잘린 결과를 조용히 정상 종료로 취급했다."""
+    try:
+        if button.evaluate("el => el.disabled") is True:
+            return True
+    except Exception:
+        pass
+    for attr in ("data-disabled", "aria-disabled"):
+        try:
+            if (button.get_attribute(attr) or "").lower() == "true":
+                return True
+        except Exception:
+            continue
+    try:
+        return not button.is_enabled(timeout=1_000)
+    except Exception:
+        return False
 
 
 def map_sales_by_date(responses: list[dict]) -> dict[str, int]:
@@ -273,7 +435,16 @@ def compute_order_sync_range(latest_ordered_at: datetime | None, today: date) ->
     있으면 그 시각에서 이틀 여유를 두고 오늘까지만 반환한다 — 동기화
     시점 이후 주문 상태가 늦게 확정되는 경우를 대비한 여유다(설계 문서
     "스코프 결정 2" 참고). `order_no` 기준 upsert라 겹치는 기간을 다시
-    조회해도 중복 저장되지 않는다."""
+    조회해도 중복 저장되지 않는다.
+
+    `latest_ordered_at`이 타임존을 가진 값이면(`orders.ordered_at`은
+    `TIMESTAMPTZ`라 DB에서 읽어오면 UTC 기준 aware datetime이다) 한국
+    시간으로 변환한 뒤 날짜를 뽑는다 — 배민 화면의 날짜 필터는 한국 벽시계
+    기준인데, 새벽 주문(KST 00~09시)은 UTC로는 전날이라 변환 없이 `.date()`를
+    쓰면 커서가 하루 어긋난다(치킨 배달 특성상 심야 주문이 많아 실제로 자주
+    발생하는 경우다)."""
+    if latest_ordered_at is not None and latest_ordered_at.tzinfo is not None:
+        latest_ordered_at = latest_ordered_at.astimezone(KST)
     if latest_ordered_at is None:
         # 3개월 전 같은 날짜를 계산한다. 월 차감 시 연도 롤오버 처리.
         y, m = today.year, today.month
@@ -650,11 +821,29 @@ def fetch_shop_stats(page, shop_no: int, months: list[str]) -> tuple[list[dict],
 
 
 def _open_date_range_picker(page) -> None:
-    """정산내역 화면의 "날짜 직접 선택" 버튼을 눌러 "기간" 다이얼로그를 연다.
-    실측 확인: 이 다이얼로그는 "날짜"(직접 선택) 탭이 이미 기본 활성 상태로
-    열린다 — 별도로 탭을 클릭할 필요가 없다(모듈 docstring 참고)."""
-    page.get_by_text("날짜 직접 선택").first.click(timeout=5_000)
-    page.wait_for_timeout(800)
+    """정산내역/주문내역 화면의 "날짜 직접 선택" 버튼을 눌러 "기간"
+    다이얼로그를 연다. 실측 확인: 이 다이얼로그는 "날짜"(직접 선택) 탭이 이미
+    기본 활성 상태로 열린다 — 별도로 탭을 클릭할 필요가 없다(모듈 docstring
+    참고).
+
+    2026-08-13 fix: 이 클릭이 오버레이에 가로채여 타임아웃 나는 것을 실
+    계정에서 재현했다(로그: `<div class="LoadingBackdrop-module__...">
+    intercepts pointer events`, 이어서 `data-testid="backdrop"`도 같은
+    클릭을 가로챔). 두 레이어는 해소 방법이 서로 다르므로
+    `_clear_click_blockers`로 각각 처리한 뒤 재시도한다 — 한 번의 타임아웃을
+    곧장 실패로 확정하면, 실제로는 잠깐 뜬 로딩 오버레이 때문에 그 동기화
+    소스 전체가 통째로 실패한다."""
+    last_error: Exception | None = None
+    for _attempt in range(3):
+        _clear_click_blockers(page)
+        try:
+            page.get_by_text("날짜 직접 선택").first.click(timeout=5_000)
+            page.wait_for_timeout(800)
+            return
+        except PlaywrightTimeoutError as e:
+            last_error = e
+            page.wait_for_timeout(1_500)
+    raise last_error if last_error is not None else BaeminStatsScrapeError("날짜 선택 버튼을 열지 못했습니다")
 
 
 def _visible_month_captions(dialog) -> list[tuple[int, int]]:
@@ -680,6 +869,11 @@ def _click_calendar_day(dialog, year: int, month: int, day: int) -> None:
             table.get_by_role("button", name=f"{day}일", exact=True).click(timeout=5_000)
             return
         target_key = year * 12 + month
+        if not captions:
+            # 캘린더가 안 열린 상태(범위 표시 클릭이 먹지 않았을 때)를 원시
+            # ValueError(`min()` on empty) 대신 알아볼 수 있는 에러로 바꾼다 —
+            # 호출자(`_set_date_range`)가 이걸 잡아 재시도한다.
+            raise BaeminStatsScrapeError("날짜 캘린더가 열리지 않았습니다(월 표시를 찾지 못함)")
         min_key = min(y * 12 + m for y, m in captions)
         nav_label = "이전 달" if target_key < min_key else "다음 달"
         dialog.get_by_role("button", name=nav_label).click(timeout=3_000)
@@ -687,31 +881,127 @@ def _click_calendar_day(dialog, year: int, month: int, day: int) -> None:
     raise BaeminStatsScrapeError(f"{year}-{month:02d}-{day:02d} 날짜를 캘린더에서 찾지 못했습니다")
 
 
+def parse_applied_range(text: str) -> tuple[tuple[int, int, int], tuple[int, int, int]] | None:
+    """"기간" 다이얼로그의 날짜 범위 표시 문구를 (시작, 종료) 튜플로 파싱한다.
+    파싱할 수 없으면 `None`(호출자는 "요청한 범위가 아님"으로 취급한다 —
+    모호하면 조용히 통과시키지 않고 재시도/에러로 간다).
+
+    실측 확인된 형태(2026-08-13, 주문내역 화면):
+    - 범위: `"2026. 8. 7 ~ 8. 13"` — 숫자 5개(연도는 왼쪽에만 나온다)
+    - 단일: `"2026. 8. 13"` — 숫자 3개(시작=종료인 하루짜리 선택)
+    해가 바뀌는 범위(`"2025. 12. 30 ~ 2026. 1. 5"`, 숫자 6개)는 실측하지
+    못했지만 형태상 가능성이 있어 함께 받아준다 — 1~3월에 3개월 백필을
+    하면 실제로 발생하는 경우다."""
+    nums = [int(n) for n in _APPLIED_RANGE_RE.findall(text)]
+    if "~" not in text:
+        if len(nums) == 3:
+            return (nums[0], nums[1], nums[2]), (nums[0], nums[1], nums[2])
+        return None
+    if len(nums) == 5:
+        return (nums[0], nums[1], nums[2]), (nums[0], nums[3], nums[4])
+    if len(nums) == 6:
+        return (nums[0], nums[1], nums[2]), (nums[3], nums[4], nums[5])
+    return None
+
+
+def _range_display_locator(dialog):
+    """"기간" 다이얼로그에서 클릭하면 캘린더가 열리는 날짜 범위 표시 요소.
+
+    기본은 원래부터 쓰던 "~" 포함 텍스트다 — 세 화면(주문내역/정산내역/정산
+    상세) 전부에서 실측 검증된 선택자라 그대로 유지한다. 날짜 선택이 한 번
+    빗나가면 표시가 하루짜리 단일 날짜("2026. 8. 13")로 바뀌어 "~"가 아예
+    없어지는데, 그 상태에서는 재시도조차 못 하므로 **그때만** 더 넓은 패턴
+    으로 폴백한다.
+
+    처음부터 넓은 패턴 하나로 찾으면 안 된다(2026-08-13, 실 계정 A/B로 확인한
+    회귀): 후보가 늘어나면서 `.first`가 실제 범위 표시가 아닌 다른 요소로
+    리졸브돼 클릭해도 캘린더가 열리지 않았고, 정산 상세 수집이 20건 → 크래시로
+    깨졌다(입금 90일 창은 같은 코드인데도 멀쩡했다 — 화면 상태에 따라 갈리는
+    종류의 회귀라 라이브 검증 없이는 못 잡았을 것이다)."""
+    tilde = dialog.get_by_text(re.compile(r"~"))
+    if tilde.count() > 0:
+        return tilde.first
+    return dialog.get_by_text(re.compile(r"\d{4}\. \d")).first
+
+
 def _set_date_range(page, start_date: str, end_date: str) -> None:
     """열린 "기간" 다이얼로그에서 `start_date`~`end_date`("YYYY-MM-DD")를
-    지정하고 적용한다. 날짜 범위 표시("~" 포함 텍스트)를 클릭해 두 달짜리
-    캘린더를 연 뒤, 시작일 → 종료일 순으로 클릭하고, 캘린더 자체의 "적용"과
-    상위 "기간" 다이얼로그의 "적용"을 순서대로 누른다 — 두 다이얼로그가
-    겹쳐있는 동안 "적용" 버튼도 두 개 동시에 존재하므로 각 클릭을 정확히
-    그 시점의 최상단 다이얼로그로 scope한다(모듈 docstring 참고)."""
-    period_dialog = page.get_by_role("dialog").last
-    range_display = period_dialog.get_by_text(re.compile(r"~")).first
-    range_display.click(timeout=5_000)
-    page.wait_for_timeout(800)
+    지정하고 적용한다. 날짜 범위 표시 텍스트를 클릭해 두 달짜리 캘린더를 연
+    뒤, 시작일 → 종료일 순으로 클릭하고, 캘린더 자체의 "적용"과 상위 "기간"
+    다이얼로그의 "적용"을 순서대로 누른다 — 두 다이얼로그가 겹쳐있는 동안
+    "적용" 버튼도 두 개 동시에 존재하므로 각 클릭을 정확히 그 시점의 최상단
+    다이얼로그로 scope한다(모듈 docstring 참고).
 
+    **정정 (2026-08-13, 최종 리뷰 fix round — 실 계정으로 재현·수정): 두 번
+    클릭하면 범위가 선택된다는 가정이 틀렸다.** 이 캘린더는 상태 기계라,
+    "시작일 클릭 → 종료일 클릭"이 **진입 시점의 기존 선택 상태에 따라**
+    전혀 다른 결과를 낸다(실측 재현):
+
+    | 진입 상태 | 클릭 | 결과 |
+    |---|---|---|
+    | 범위 `[7,13]` 선택됨 | `5` (범위 밖) | 새 선택 시작 → 대기 `[5]` |
+    | 대기 `[5]` | `10` (뒤 날짜) | 범위 완성 `[5,10]` ✅ |
+    | 범위 `[7,13]` 선택됨 | `8` (범위 **안쪽**) | 시작은 그대로, 끝만 이동 → `[7,8]` ❌ |
+    | 범위 `[7,8]` | `12` (범위 밖) | 새 선택 시작 → 대기 `[12]` ❌ |
+    | 대기 `[12]` | `6` (앞 날짜) | 새 선택 시작 → 대기 `[6]` ❌ |
+    | 범위 `[8,13]` | `13` (끝점) | 새 선택 시작 → 대기 `[13]` ❌ |
+
+    즉 요청한 시작일이 "이미 선택돼 있던 범위 안쪽"에 들어가면, 두 번의
+    클릭이 끝나도 우리가 요청한 범위가 아니라 **엉뚱한 범위(또는 하루짜리
+    단일 날짜)** 가 선택된다. 기존 구현은 이걸 전혀 확인하지 않고 그대로
+    "적용"을 눌렀기 때문에, 화면은 우리가 요청한 적 없는 범위(대개 하루,
+    혹은 화면 기본값인 최근 7일)로 조회되는데 호출자는 그 사실을 알 방법이
+    없었다 — 3개월 백필을 요청하고도 조용히 하루치만 받는 실패가 실제로
+    재현됐다(요청 `2026-08-08~2026-08-13` → 실제 적용 `2026-08-13~2026-08-13`).
+
+    그래서 이제는 **적용 결과를 읽어서 요청한 범위와 대조하고, 다르면 다시
+    시도한다**. 재시도가 수렴하는 이유는 위 상태 기계 때문이다 — 실패한
+    시도가 남긴 상태(하루짜리 대기 선택 또는 짧은 범위)에서 같은 클릭 쌍을
+    다시 하면 이번엔 "범위 밖 클릭 → 새 선택 시작 → 뒤 날짜 클릭 → 범위
+    완성"으로 떨어진다(실측: 2회차에 항상 성공). 끝내 못 맞추면 조용히
+    잘못된 범위를 쓰는 대신 `BaeminStatsScrapeError`를 던진다."""
     start_y, start_m, start_d = (int(p) for p in start_date.split("-"))
     end_y, end_m, end_d = (int(p) for p in end_date.split("-"))
+    expected = ((start_y, start_m, start_d), (end_y, end_m, end_d))
+    applied_text = ""
 
-    cal_dialog = page.get_by_role("dialog").last
-    _click_calendar_day(cal_dialog, start_y, start_m, start_d)
-    page.wait_for_timeout(400)
-    cal_dialog = page.get_by_role("dialog").last
-    _click_calendar_day(cal_dialog, end_y, end_m, end_d)
-    page.wait_for_timeout(400)
+    for attempt in range(_MAX_DATE_RANGE_ATTEMPTS):
+        try:
+            period_dialog = page.get_by_role("dialog").last
+            _range_display_locator(period_dialog).click(timeout=5_000)
+            page.wait_for_timeout(800)
 
-    cal_dialog = page.get_by_role("dialog").last
-    cal_dialog.get_by_role("button", name="적용").first.click(timeout=5_000)
-    page.wait_for_timeout(800)
+            cal_dialog = page.get_by_role("dialog").last
+            _click_calendar_day(cal_dialog, start_y, start_m, start_d)
+            page.wait_for_timeout(400)
+            cal_dialog = page.get_by_role("dialog").last
+            _click_calendar_day(cal_dialog, end_y, end_m, end_d)
+            page.wait_for_timeout(400)
+
+            cal_dialog = page.get_by_role("dialog").last
+            cal_dialog.get_by_role("button", name="적용").first.click(timeout=5_000)
+            page.wait_for_timeout(800)
+
+            period_dialog = page.get_by_role("dialog").last
+            applied_text = _range_display_locator(period_dialog).inner_text(timeout=3_000)
+        except (PlaywrightTimeoutError, BaeminStatsScrapeError) as e:
+            # 캘린더가 안 열렸거나 클릭이 가로채인 경우 — 마지막 시도가
+            # 아니면 상태를 정리하고 다시 해본다(한 번의 일시적 방해로
+            # 이 소스 전체를 실패시키지 않는다).
+            if attempt == _MAX_DATE_RANGE_ATTEMPTS - 1:
+                raise BaeminStatsScrapeError(
+                    f"날짜 범위를 {start_date}~{end_date}로 지정하지 못했습니다: {e}"
+                ) from e
+            applied_text = ""
+            page.wait_for_timeout(1_000)
+            continue
+        if parse_applied_range(applied_text) == expected:
+            break
+    else:
+        raise BaeminStatsScrapeError(
+            f"날짜 범위를 {start_date}~{end_date}로 지정하지 못했습니다"
+            f"(화면에 적용된 범위: {applied_text or '확인 불가'})"
+        )
 
     remaining = page.get_by_role("dialog").all()
     if remaining:
@@ -758,30 +1048,90 @@ def _click_load_more_until_done(page, progress_fn) -> None:
                 break
 
 
-def _click_next_page_until_done(page, progress_fn) -> None:
-    """주문내역 화면의 숫자 페이지네이션(`1 2 3 ... 20` + 접근성 이름
-    `"다음"`인 다음-페이지 버튼)을 진행이 없을 때까지 반복 클릭한다.
+def _click_next_page_until_done(page, progress_fn, max_clicks: int = _MAX_LOAD_MORE_CLICKS) -> str:
+    """주문내역/정산내역 화면의 숫자 페이지네이션(`1 2 3 ... 20` + 접근성
+    이름 `"다음"`인 다음-페이지 버튼)을 끝까지 반복 클릭한다. 클릭할 때마다
+    `offset`이 10씩 늘어난 요청이 새로 나간다(실측 확인).
     `_click_load_more_until_done`("더보기" 텍스트 버튼)과는 다른 UI라 별도
-    헬퍼로 분리했다(모듈 docstring의 2026-08-12 정정 절 참고). 클릭할
-    때마다 `offset`이 10씩 늘어난 `/v4/orders` 요청이 새로 나간다(실측
-    확인). 마지막 페이지에서는 "다음" 버튼이 비활성화돼 클릭 자체가
-    타임아웃 나므로, 그 타임아웃을 정상 종료 신호로 다룬다 — 버튼이 여전히
-    DOM에 남아있어 `count()==0`으로는 끝을 구분할 수 없기 때문이다(실측
-    확인). `progress_fn()`은 `_click_load_more_until_done`과 동일하게
-    현재까지 수집한 항목 수를 반환해야 한다."""
-    for _ in range(_MAX_LOAD_MORE_CLICKS):
+    헬퍼로 분리했다(모듈 docstring의 2026-08-12 정정 절 참고).
+    `progress_fn()`은 현재까지 수집한 항목 수를 반환해야 한다.
+
+    **종료 사유를 문자열로 반환한다**(2026-08-13 fix): `"no_button"`(버튼
+    자체가 없음) / `"disabled"`(버튼이 실제로 비활성 — 진짜 마지막 페이지) /
+    `"no_progress"`(버튼은 살아있는데 새 데이터가 안 옴) / `"blocked"`(오버레이가
+    클릭을 계속 가로챔) / `"max_clicks"`(상한 도달). 호출자는 이 값으로
+    "정상 종료"와 "중단"을 구분할 수 있다 — 다만 이 반환값만으로 완결성을
+    판단하지는 말아야 한다(`fetch_orders`는 응답의 `totalSize`와 실제 수집
+    건수를 대조하는 별도 게이트를 함께 쓴다).
+
+    **왜 고쳤나 (2026-08-13, 최종 리뷰 fix round)**: 원래 구현은 (1) 상한이
+    30회로 고정이라 3개월 백필(실측 1,541건 = 155페이지)이 구조적으로
+    불가능했고, (2) `except PlaywrightTimeoutError: break`가 "버튼이 비활성
+    이라 클릭이 타임아웃난 진짜 종료"와 "backdrop/로딩 오버레이가 클릭을
+    가로챈 일시적 방해"를 완전히 같은 신호로 취급했으며, (3) 클릭 후 고정
+    1.5초만 기다리고 진행이 없으면 곧장 종료해서, 응답이 조금만 늦어도
+    (실측 재현됨) 남은 페이지를 통째로 버렸다. 셋 다 결과가 "일부만 수집한
+    뒤 조용히 성공한 척"이라, 주문내역처럼 최신순으로 잘리는 목록에서는
+    가장 오래된 구간이 영구히 유실되는 원인이 됐다.
+
+    이제는 (1) 상한을 호출자가 정하고(기본값은 기존 30 유지 — 정산내역 등
+    기존 호출자의 동작을 그대로 보존), (2) 클릭 실패 시 버튼의 실제 비활성
+    여부(`_is_disabled`)를 확인해 진짜 종료가 아니면 오버레이를 해소하고
+    같은 페이지를 재시도하며, (3) 진행 여부를 고정 대기가 아니라 폴링으로
+    기다리고, 그래도 진행이 없으면 **같은 페이지를 몇 번 더 눌러본다**.
+
+    (3)의 재시도가 왜 필요한가: 3개월 백필은 155페이지짜리라, 페이지 하나가
+    일시적으로 느리거나 응답을 흘리면 그것만으로 백필 전체가 실패한다(실측:
+    67페이지째에서 한 번 멈춰 670/1541에서 중단됐다). 한 번의 무진행을 곧장
+    종료로 확정하지 않고 다시 눌러보면 대부분 그대로 이어진다 — "다음"을
+    한 번 더 누르는 건 데이터 유실 위험이 없다(어차피 모든 응답을 리스너가
+    수집하고, 마지막엔 `totalSize` 대조가 완결성을 최종 판정한다)."""
+    for _ in range(max_clicks):
         next_button = page.get_by_role("button", name="다음")
         if next_button.count() == 0:
-            break
+            return "no_button"
+        button = next_button.first
+        if _is_disabled(button):
+            return "disabled"
+
         before = progress_fn()
-        try:
-            next_button.first.scroll_into_view_if_needed()
-            next_button.first.click(timeout=5_000)
-        except PlaywrightTimeoutError:
-            break
-        page.wait_for_timeout(_LOAD_MORE_WAIT_MS)
-        if progress_fn() <= before:
-            break
+        progressed = False
+        clicked_any = False
+        for _attempt in range(_NEXT_PAGE_BLOCKED_RETRIES):
+            # 클릭 직전에 오버레이를 해소한다 — 로딩 오버레이는 Escape로
+            # 닫히지 않으므로 사라질 때까지 기다리는 게 유일한 대응이다.
+            if page.get_by_test_id("backdrop").count() > 0:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
+            _wait_for_loading_overlay(page)
+            try:
+                button.scroll_into_view_if_needed()
+                button.click(timeout=5_000)
+                clicked_any = True
+            except PlaywrightTimeoutError:
+                # 여기서 갈린다: 버튼이 실제로 비활성이면 정상 종료이고,
+                # 그게 아니면 무언가가 클릭을 가로챈 것이라 재시도해야 한다.
+                if _is_disabled(button):
+                    return "disabled"
+                page.wait_for_timeout(_LOAD_MORE_WAIT_MS)
+                continue
+
+            # 고정 대기 대신, 실제로 새 데이터가 도착할 때까지 폴링한다.
+            waited = 0
+            while waited < _NEXT_PAGE_PROGRESS_TIMEOUT_MS and progress_fn() <= before:
+                page.wait_for_timeout(_NEXT_PAGE_POLL_MS)
+                waited += _NEXT_PAGE_POLL_MS
+            if progress_fn() > before:
+                progressed = True
+                break
+            # 진행이 없다 — 마지막 페이지라 버튼이 방금 비활성이 됐을 수도
+            # 있고(정상 종료), 일시적으로 응답을 놓친 것일 수도 있다(재시도).
+            if _is_disabled(page.get_by_role("button", name="다음").first):
+                return "disabled"
+
+        if not progressed:
+            return "no_progress" if clicked_any else "blocked"
+    return "max_clicks"
 
 
 def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]:
@@ -852,7 +1202,9 @@ def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]
     return responses
 
 
-def fetch_orders(page, start_date: str, end_date: str) -> list[dict]:
+def fetch_orders(
+    page, start_date: str, end_date: str, max_page_clicks: int = _MAX_ORDER_PAGE_CLICKS,
+) -> list[dict]:
     """주문내역 화면(`/orders/history`)에서 `start_date`~`end_date`("YYYY-MM-DD")
     범위의 주문(`/v4/orders`) organic 응답을 가로챈다. 가게통계 화면의 월별 조회가
     진행 중인 이번 달을 지원하지 않는다는 제약(모듈 docstring의 discrepancy
@@ -884,21 +1236,60 @@ def fetch_orders(page, start_date: str, end_date: str) -> list[dict]:
 
     반환값은 `contents` 항목을 `order.orderNumber` 기준으로 중복 제거해
     합친 flat 리스트다(리뷰 리스트의 `id` 기준 dedup과 동일한 방어적
-    패턴 — 페이지네이션 경계에서 항목이 겹칠 가능성에 대비)."""
+    패턴 — 페이지네이션 경계에서 항목이 겹칠 가능성에 대비).
+
+    **완결성 보장 (2026-08-13, 최종 리뷰 fix round)**: 이 함수는 이제 "요청한
+    범위의 주문을 하나도 빠짐없이 가져왔다"가 확인될 때만 정상 반환한다.
+    근거는 응답 본문의 `totalSize`다 — 실 계정 조사에서 `/v4/orders` 응답
+    최상위에 `{"totalSize": int, "totalPayAmount": int, "contents": [...]}`가
+    있는 걸 확인했고(예: 3개월 창 1,541건, 최근 7일 126건), 이는
+    `fetch_settlement_breakdown_details`가 쓰는 정산 summary의 `totalSize`
+    부분 캡처 게이트와 정확히 같은 종류의 신호다. 수집 건수가 `totalSize`에
+    못 미치면 조용히 잘린 리스트를 반환하는 대신 `BaeminStatsScrapeError`를
+    던진다.
+
+    이게 왜 중요한가: 개별 주문 저장의 증분 커서는 `MAX(ordered_at)`이고
+    주문 목록은 최신순이라, 잘린 수집은 항상 **가장 오래된 구간**을 버린다.
+    그런데도 성공으로 반환하면 커서는 오늘까지 전진해버려서, 버려진 구간은
+    이후 어떤 동기화도 다시 쳐다보지 않는 영구 유실이 된다. 하드 에러로
+    표면화해야 `_run_sync`가 그 소스를 실패로 기록하고 커서가 그대로 남아
+    다음 동기화가 같은 구간을 다시 시도한다.
+
+    또한 화면 기본 필터(최근 7일)에 대한 organic 응답이 우리 요청과 무관하게
+    먼저 발생하므로(실측 확인 — `startDate=2026-08-07&endDate=2026-08-13`),
+    요청 URL의 `startDate`/`endDate`가 우리가 지정한 범위와 정확히 일치하는
+    응답만 수집한다(`fetch_shop_stats`/`fetch_account_settlement`의
+    `collecting` 게이트와 같은 목적이지만, 플래그가 아니라 요청 파라미터
+    자체를 대조하는 더 엄격한 방식이다). 이 게이트가 없으면 날짜 범위 지정이
+    빗나갔을 때 기본 7일치 데이터를 "요청한 3개월"인 양 반환하는 은폐된
+    실패가 생긴다.
+
+    `max_page_clicks`는 페이지네이션 클릭 상한이다. 기본값은 이 함수의 기본
+    용도(이번 달 1일~오늘)를 넉넉히 덮는 값이고, 3개월 백필처럼 훨씬 깊은
+    조회는 호출자가 `ORDER_BACKFILL_PAGE_CLICKS`를 넘긴다."""
     collected: dict[object, dict] = {}
-    observed = {"any": False}
+    state = {"observed_any": False, "matched_responses": 0, "total_sizes": []}
 
     def _on_response(response) -> None:
-        url = response.url
-        if urlparse(url).path != "/v4/orders":
+        parsed = urlparse(response.url)
+        if parsed.path != "/v4/orders":
             return
-        observed["any"] = True
+        state["observed_any"] = True
         if response.status != 200:
+            return
+        query = parse_qs(parsed.query)
+        if (query.get("startDate") or [""])[0] != start_date:
+            return
+        if (query.get("endDate") or [""])[0] != end_date:
             return
         try:
             body = response.json()
         except Exception:
             return
+        state["matched_responses"] += 1
+        total_size = body.get("totalSize")
+        if isinstance(total_size, int):
+            state["total_sizes"].append(total_size)
         for item in body.get("contents", []):
             order_number = item.get("order", {}).get("orderNumber")
             key = order_number if order_number is not None else id(item)
@@ -912,7 +1303,7 @@ def fetch_orders(page, start_date: str, end_date: str) -> list[dict]:
             raise BaeminStatsScrapeError(f"주문내역 페이지 이동에 실패했습니다: {e}") from e
 
         page.wait_for_timeout(2_000)
-        _dismiss_backdrop_if_present(page)
+        _clear_click_blockers(page)
         try:
             _open_date_range_picker(page)
             _set_date_range(page, start_date, end_date)
@@ -920,12 +1311,35 @@ def fetch_orders(page, start_date: str, end_date: str) -> list[dict]:
             raise BaeminStatsScrapeError(f"주문내역 날짜 범위 지정에 실패했습니다: {e}") from e
         page.wait_for_timeout(2_000)
 
-        _click_next_page_until_done(page, lambda: len(collected))
+        # 진행 여부는 "수집한 주문 수"가 아니라 "받은 응답 수"로 판정한다 —
+        # 페이지 경계에서 이미 본 주문만 담긴 페이지가 오면(정산내역에서
+        # 실측된 겹침 현상) 주문 수는 그대로라 멀쩡히 넘어간 페이지를
+        # "진행 없음 = 끝"으로 오판한다. `fetch_account_settlement`가 응답
+        # 수를 쓰는 것과 같은 이유다.
+        stop_reason = _click_next_page_until_done(
+            page, lambda: state["matched_responses"], max_clicks=max_page_clicks,
+        )
     finally:
         page.remove_listener("response", _on_response)
 
-    if not observed["any"]:
+    if not state["observed_any"]:
         raise BaeminStatsScrapeError("주문내역 API 응답을 한 번도 확인하지 못했습니다")
+    if not state["matched_responses"]:
+        raise BaeminStatsScrapeError(
+            f"주문내역 {start_date}~{end_date} 범위의 응답을 한 번도 받지 못했습니다"
+        )
+
+    if state["total_sizes"]:
+        # 여러 페이지의 `totalSize`가 다를 수 있다(조회 도중 새 주문이
+        # 들어오면 늘어난다) — 가장 작은 값을 기준으로 삼아, 조회 중
+        # 늘어난 건수 때문에 false 에러가 나지 않게 한다.
+        expected_total = min(state["total_sizes"])
+        if len(collected) < expected_total:
+            raise BaeminStatsScrapeError(
+                f"주문내역 {start_date}~{end_date} 총 {expected_total}건 중 "
+                f"{len(collected)}건만 수집했습니다(페이지네이션 종료 사유: {stop_reason}) "
+                f"— 부분 수집을 저장하면 가장 오래된 구간이 영구 유실되므로 실패로 처리합니다"
+            )
 
     return list(collected.values())
 

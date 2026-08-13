@@ -28,6 +28,7 @@ from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics,
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 from scrapers.baemin_reviews import BaeminScrapeError, extract_owner_reply, fetch_all_reviews, map_review
 from scrapers.baemin_stats import (
+    ORDER_BACKFILL_PAGE_CLICKS,
     BaeminStatsScrapeError,
     compute_order_sync_range,
     compute_repurchase_rates,
@@ -41,6 +42,7 @@ from scrapers.baemin_stats import (
     map_repurchase_by_date,
     map_sales_by_date,
     map_settlement_breakdown_by_date,
+    parse_baemin_datetime,
     recent_months,
 )
 
@@ -186,8 +188,21 @@ def upsert_order(
     유일 — schema.sql의 `UNIQUE` 제약과 동일하게 `order_no`만으로 조회한다).
     증분 동기화(`compute_order_sync_range`)가 며칠씩 겹치는 기간을 다시
     조회할 수 있어 같은 `order_no`가 여러 번 들어올 수 있다 — 그때마다
-    최신 값으로 덮어쓴다(주문 상태가 뒤늦게 바뀌는 경우를 반영하기 위해)."""
-    dt = datetime.fromisoformat(ordered_at)
+    최신 값으로 덮어쓴다(주문 상태가 뒤늦게 바뀌는 경우를 반영하기 위해).
+
+    `ordered_at`은 배민이 준 `orderDateTime`("2026-08-13T02:19:37") 그대로,
+    **타임존 오프셋이 없는 한국 벽시계 시간**이다. `orders.ordered_at`은
+    `TIMESTAMPTZ`이므로 naive datetime을 그대로 넣으면 Postgres가 세션
+    타임존(배포 환경에서 사실상 UTC)으로 해석해 실제보다 9시간 늦은 순간으로
+    저장한다 — 화면에는 19~02시(치킨 배달의 정상적인 저녁·심야 피크)가
+    04~11시로 찍히고, 15시 이후 주문(실측 데이터의 91%)은 날짜까지 하루
+    밀린다(2026-08-13 최종 리뷰 발견). 게다가 같은 동기화 안에서
+    `map_orders_to_daily_sales`는 같은 `orderDateTime`의 앞 10글자를 한국
+    날짜로 그대로 쓰기 때문에, 아무것도 안 하면 하나의 원본 필드가 두 개의
+    서로 다른 타임존 가정으로 저장되는 모순이 생긴다. 그래서 DB 경계인
+    여기서 `parse_baemin_datetime`으로 한국 타임존을 명시적으로 붙여 절대
+    시각을 정확히 맞춘다(변환 규칙과 근거는 그 함수 docstring 참고)."""
+    dt = parse_baemin_datetime(ordered_at)
     existing = db.scalar(select(Order).where(Order.order_no == order_no))
     if existing is None:
         db.add(Order(
@@ -371,8 +386,13 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 )
             )
             order_range_start, order_range_end = compute_order_sync_range(latest_order, date.today())
+            # 이 호출만 페이지네이션 상한을 크게 올린다 — 최초 실행/Mock 정리
+            # 직후의 3개월 백필은 실측(2026-08-13) 1,541건 = 약 155페이지라
+            # 기본 상한으로는 구조적으로 도달할 수 없다. 위 "이번 달 매출
+            # 보완" 호출은 한 달치라 기본값을 그대로 쓴다.
             order_contents = fetch_orders(
                 session.page, order_range_start.isoformat(), order_range_end.isoformat(),
+                max_page_clicks=ORDER_BACKFILL_PAGE_CLICKS,
             )
             order_rows = map_order_rows(order_contents)
             for row in order_rows:
