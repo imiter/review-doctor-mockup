@@ -278,7 +278,7 @@ export default function DashboardPage() {
     <div className="max-w-6xl space-y-6">
       <div>
         <h1 className="text-xl font-semibold">{dashboard.store.name}</h1>
-        <p className="text-sm text-muted">{dashboard.store.category} · 카드를 클릭하면 상세를 볼 수 있습니다 (Mock 데이터)</p>
+        <p className="text-sm text-muted">{dashboard.store.category} · 카드를 클릭하면 상세를 볼 수 있습니다</p>
       </div>
 
       <div className="flex items-center gap-2">
