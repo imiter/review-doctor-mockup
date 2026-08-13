@@ -8,7 +8,7 @@
 
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.credential_crypto import CredentialCryptoError, decrypt_credential
@@ -29,12 +29,14 @@ from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 from scrapers.baemin_reviews import BaeminScrapeError, extract_owner_reply, fetch_all_reviews, map_review
 from scrapers.baemin_stats import (
     BaeminStatsScrapeError,
+    compute_order_sync_range,
     compute_repurchase_rates,
     fetch_account_settlement,
     fetch_orders,
     fetch_settlement_breakdown_details,
     fetch_shop_stats,
     map_deposits_by_date,
+    map_order_rows,
     map_orders_to_daily_sales,
     map_repurchase_by_date,
     map_sales_by_date,
@@ -361,6 +363,28 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 stats_succeeded_any = True
         except Exception as e:
             stats_errors.append(f"이번 달 매출(주문내역) 동기화 실패: {e}")
+
+        try:
+            latest_order = db.scalar(
+                select(func.max(Order.ordered_at)).where(
+                    Order.store_id == job.store_id, Order.platform_id == job.platform_id,
+                )
+            )
+            order_range_start, order_range_end = compute_order_sync_range(latest_order, date.today())
+            order_contents = fetch_orders(
+                session.page, order_range_start.isoformat(), order_range_end.isoformat(),
+            )
+            order_rows = map_order_rows(order_contents)
+            for row in order_rows:
+                upsert_order(
+                    db, job.store_id, job.platform_id,
+                    order_no=row["order_no"], ordered_at=row["ordered_at"],
+                    menu_summary=row["menu_summary"], order_type=row["order_type"], amount=row["amount"],
+                )
+            if order_rows:
+                stats_succeeded_any = True
+        except Exception as e:
+            stats_errors.append(f"주문내역(개별 주문) 동기화 실패: {e}")
 
         if crm_responses:
             try:

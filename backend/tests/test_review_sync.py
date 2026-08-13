@@ -9,7 +9,7 @@ from app.review_sync import sync_reviews_for_job, upsert_brand_ad_click_metric, 
 from scrapers.baemin_ads import BaeminAdsScrapeError
 from scrapers.baemin_auth import BaeminLoginError
 from scrapers.baemin_reviews import BaeminScrapeError
-from scrapers.baemin_stats import BaeminStatsScrapeError
+from scrapers.baemin_stats import BaeminStatsScrapeError, compute_order_sync_range, map_order_rows
 
 _RAW_1 = {
     "id": 1001, "rating": 5.0, "contents": "이미 있는 리뷰", "memberNickname": "기존고객",
@@ -1418,3 +1418,107 @@ def test_upsert_order_keyed_by_order_no_alone_not_by_store_id(db_session, seeded
     assert row.menu_summary == "바뀐 메뉴 (다른 매장)", "데이터 필드는 최신값으로 갱신"
     assert row.order_type == "takeout", "데이터 필드는 최신값으로 갱신"
     assert row.amount == 22000, "데이터 필드는 최신값으로 갱신"
+
+
+_ORDER_ITEM_A = {
+    "order": {
+        "orderNumber": "T2FE000020VQ", "orderDateTime": "2026-08-13T02:19:37",
+        "payAmount": 15900, "itemsSummary": "숯불양념바베큐치킨", "deliveryType": "DELIVERY",
+    },
+}
+_ORDER_ITEM_B = {
+    "order": {
+        "orderNumber": "B2FD00HZNU", "orderDateTime": "2026-08-10T18:02:11",
+        "payAmount": 21000, "itemsSummary": "1인 숯불양념치밥 SET", "deliveryType": "TAKEOUT",
+    },
+}
+
+
+def test_sync_upserts_individual_orders(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_orders",
+        lambda page, start_date, end_date: [_ORDER_ITEM_A, _ORDER_ITEM_B],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    row_a = db_session.query(Order).filter_by(order_no="T2FE000020VQ").one()
+    assert row_a.amount == 15900
+    assert row_a.order_type == "delivery"
+    row_b = db_session.query(Order).filter_by(order_no="B2FD00HZNU").one()
+    assert row_b.order_type == "takeout"
+
+
+def test_sync_uses_incremental_range_when_orders_already_exist(db_session, sync_setup, monkeypatch):
+    """이미 저장된 주문이 있으면 compute_order_sync_range가 계산한 좁은
+    범위로 fetch_orders를 호출해야 한다 — 3개월 전체를 다시 긁지 않는다."""
+    import app.review_sync as review_sync_mod
+    from datetime import date, datetime
+
+    job, conn = sync_setup
+    db_session.add(Order(
+        store_id=job.store_id, platform_id=job.platform_id, order_no="OLD0000001",
+        ordered_at=datetime(2026, 8, 10, 9, 0, 0),
+        menu_summary="기존 주문", order_type="delivery", amount=10000,
+    ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    captured_ranges = []
+
+    def _fake_fetch_orders(page, start_date, end_date):
+        captured_ranges.append((start_date, end_date))
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_orders", _fake_fetch_orders)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    # 두 번 호출된다: "이번 달 매출 보완"(이번 달 1일~오늘)과
+    # "개별 주문 저장"(증분 범위) — 둘 중 하나는 2026-08-08(8/10 - 2일)로
+    # 시작해야 한다.
+    assert any(r[0] == "2026-08-08" for r in captured_ranges)
+
+
+def test_sync_isolates_individual_order_failure_from_current_month_sales(db_session, sync_setup, monkeypatch):
+    """개별 주문 저장이 실패해도 이번 달 매출 보완(별도 fetch_orders 호출)은
+    영향받지 않아야 한다 — 항목별 독립 실패 격리 원칙."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    call_count = {"n": 0}
+
+    def _flaky_fetch_orders(page, start_date, end_date):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # 첫 호출(이번 달 매출 보완)은 성공
+            return [_ORDER_ITEM_A]
+        # 두 번째 호출(개별 주문 저장)은 실패
+        raise BaeminStatsScrapeError("주문내역 상세 조회 실패")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_orders", _flaky_fetch_orders)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    current_month_row = db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-13",
+    ).one()
+    assert current_month_row.sales_amount == 15900  # 매출 보완은 정상 반영
+    assert db_session.query(Order).filter_by(order_no="T2FE000020VQ").count() == 0  # 개별 주문 저장은 실패
+    assert "주문내역" in job.error_message
