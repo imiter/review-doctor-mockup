@@ -334,3 +334,95 @@ def test_map_settlement_breakdown_by_date_skips_entries_without_deposit_due_date
 
 def test_map_settlement_breakdown_by_date_empty_list_returns_empty_dict():
     assert map_settlement_breakdown_by_date([]) == {}
+
+
+from datetime import date, datetime, timedelta
+
+from scrapers.baemin_stats import compute_order_sync_range, map_order_rows
+
+# 실 계정(2026-08-13 조사)에서 확인한 실제 GET /v4/orders
+# contents[].order 필드 형태를 축약한 것. deliveryType은 실측 227건 중
+# DELIVERY 223건, TAKEOUT 4건만 나왔다.
+_ORDER_DELIVERY = {
+    "order": {
+        "orderNumber": "T2FE000020VQ",
+        "orderDateTime": "2026-08-13T02:19:37",
+        "payAmount": 15900,
+        "itemsSummary": "[양념조절가능]숯불양념바베큐치킨",
+        "deliveryType": "DELIVERY",
+    },
+}
+_ORDER_TAKEOUT = {
+    "order": {
+        "orderNumber": "B2FD00HZNU",
+        "orderDateTime": "2026-08-10T18:02:11",
+        "payAmount": 21000,
+        "itemsSummary": "[갓성비]1인 숯불양념치밥 SET",
+        "deliveryType": "TAKEOUT",
+    },
+}
+_ORDER_UNKNOWN_TYPE = {
+    "order": {
+        "orderNumber": "X9999999999",
+        "orderDateTime": "2026-08-11T09:00:00",
+        "payAmount": 9900,
+        "itemsSummary": "알 수 없는 유형",
+        "deliveryType": "SOMETHING_NEW",
+    },
+}
+
+
+def test_map_order_rows_maps_delivery_type():
+    result = map_order_rows([_ORDER_DELIVERY])
+    assert result == [{
+        "order_no": "T2FE000020VQ",
+        "ordered_at": "2026-08-13T02:19:37",
+        "menu_summary": "[양념조절가능]숯불양념바베큐치킨",
+        "order_type": "delivery",
+        "amount": 15900,
+    }]
+
+
+def test_map_order_rows_maps_takeout_type():
+    result = map_order_rows([_ORDER_TAKEOUT])
+    assert result[0]["order_type"] == "takeout"
+
+
+def test_map_order_rows_skips_unknown_delivery_type():
+    # 알려지지 않은 deliveryType은 그 주문만 건너뛴다 — 하드 에러 아님.
+    result = map_order_rows([_ORDER_DELIVERY, _ORDER_UNKNOWN_TYPE, _ORDER_TAKEOUT])
+    assert len(result) == 2
+    assert {r["order_no"] for r in result} == {"T2FE000020VQ", "B2FD00HZNU"}
+
+
+def test_map_order_rows_truncates_long_menu_summary():
+    long_item = {
+        "order": {
+            "orderNumber": "T1234567890",
+            "orderDateTime": "2026-08-13T10:00:00",
+            "payAmount": 10000,
+            "itemsSummary": "메" * 250,
+            "deliveryType": "DELIVERY",
+        },
+    }
+    result = map_order_rows([long_item])
+    assert len(result[0]["menu_summary"]) == 200
+
+
+def test_map_order_rows_empty_list_returns_empty_list():
+    assert map_order_rows([]) == []
+
+
+def test_compute_order_sync_range_no_existing_data_backfills_three_months():
+    today = date(2026, 8, 13)
+    start, end = compute_order_sync_range(None, today)
+    assert end == today
+    assert start == date(2026, 5, 13)  # 오늘 포함 최근 3개월
+
+
+def test_compute_order_sync_range_with_existing_data_uses_two_day_buffer():
+    today = date(2026, 8, 13)
+    latest = datetime(2026, 8, 10, 15, 30, 0)
+    start, end = compute_order_sync_range(latest, today)
+    assert end == today
+    assert start == date(2026, 8, 8)  # 8/10 - 2일

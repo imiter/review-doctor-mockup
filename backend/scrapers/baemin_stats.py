@@ -175,7 +175,7 @@ Escape로 닫아버린다(실 계정 재현으로 확인된 버그 패턴).
 """
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -236,6 +236,46 @@ def map_orders_to_daily_sales(order_contents: list[dict]) -> dict[str, int]:
         date_str = order["orderDateTime"][:10]
         totals[date_str] = totals.get(date_str, 0) + order["payAmount"]
     return totals
+
+
+_ORDER_TYPE_MAP = {"DELIVERY": "delivery", "TAKEOUT": "takeout"}
+
+
+def map_order_rows(order_contents: list[dict]) -> list[dict]:
+    """`GET /v4/orders` 응답의 `contents[].order.{orderNumber, orderDateTime,
+    payAmount, itemsSummary, deliveryType}`를 `orders` 테이블 upsert용
+    딕셔너리 리스트로 매핑한다. `deliveryType`이 실측으로 확인된 두 값
+    (`DELIVERY`/`TAKEOUT`) 중 하나가 아니면 그 주문 하나만 건너뛴다(하드
+    에러로 전체 동기화를 막지 않는다 — 새로운 배달 유형이 배민에 추가돼도
+    나머지 주문은 계속 저장돼야 한다). `menu_summary`는 `orders.menu_summary
+    VARCHAR(200)` 제약에 맞춰 200자로 자른다."""
+    rows: list[dict] = []
+    for item in order_contents:
+        order = item["order"]
+        order_type = _ORDER_TYPE_MAP.get(order["deliveryType"])
+        if order_type is None:
+            continue
+        rows.append({
+            "order_no": order["orderNumber"],
+            "ordered_at": order["orderDateTime"],
+            "menu_summary": order["itemsSummary"][:200],
+            "order_type": order_type,
+            "amount": order["payAmount"],
+        })
+    return rows
+
+
+def compute_order_sync_range(latest_ordered_at: datetime | None, today: date) -> tuple[date, date]:
+    """증분 동기화 범위를 계산한다. `latest_ordered_at`은 이 매장·배민의
+    `orders` 테이블에 이미 저장된 가장 최근 `ordered_at`(없으면 `None`).
+    `None`이면 이번 달 포함 최근 3개월(최초 백필, 또는 Mock 정리 직후)을,
+    있으면 그 시각에서 이틀 여유를 두고 오늘까지만 반환한다 — 동기화
+    시점 이후 주문 상태가 늦게 확정되는 경우를 대비한 여유다(설계 문서
+    "스코프 결정 2" 참고). `order_no` 기준 upsert라 겹치는 기간을 다시
+    조회해도 중복 저장되지 않는다."""
+    if latest_ordered_at is None:
+        return today - timedelta(days=92), today
+    return latest_ordered_at.date() - timedelta(days=2), today
 
 
 def map_deposits_by_date(responses: list[dict]) -> dict[str, int]:
