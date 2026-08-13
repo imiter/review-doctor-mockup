@@ -413,11 +413,36 @@ def test_map_order_rows_empty_list_returns_empty_list():
     assert map_order_rows([]) == []
 
 
-def test_compute_order_sync_range_no_existing_data_backfills_three_months():
+def test_compute_order_sync_range_no_existing_data_backfills_three_calendar_months():
+    # 직관적인 경우: 2026-08-13 → 3개월 전 = 2026-05-13
     today = date(2026, 8, 13)
     start, end = compute_order_sync_range(None, today)
     assert end == today
-    assert start == date(2026, 5, 13)  # 오늘 포함 최근 3개월
+    assert start == date(2026, 5, 13)
+
+
+def test_compute_order_sync_range_no_existing_data_handles_year_rollover():
+    # 연도 롤오버: 2026-02-15 → 3개월 전 = 2025-11-15
+    today = date(2026, 2, 15)
+    start, end = compute_order_sync_range(None, today)
+    assert end == today
+    assert start == date(2025, 11, 15)
+
+
+def test_compute_order_sync_range_no_existing_data_clamps_day_for_short_month():
+    # 일자 제약: 2026-05-31 → 3개월 전은 2월인데, 2월은 31일이 없으므로 28일로 조정
+    today = date(2026, 5, 31)
+    start, end = compute_order_sync_range(None, today)
+    assert end == today
+    assert start == date(2026, 2, 28)
+
+
+def test_compute_order_sync_range_no_existing_data_clamps_day_in_leap_year():
+    # 윤년 경우: 2024-05-31 → 3개월 전은 2월인데, 2024년은 윤년이므로 29일로 조정
+    today = date(2024, 5, 31)
+    start, end = compute_order_sync_range(None, today)
+    assert end == today
+    assert start == date(2024, 2, 29)
 
 
 def test_compute_order_sync_range_with_existing_data_uses_two_day_buffer():

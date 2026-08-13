@@ -174,6 +174,7 @@ fix round에서는 이 엔드포인트로 갈아타지 않았다 — crmInfo가 
 Escape로 닫아버린다(실 계정 재현으로 확인된 버그 패턴).
 """
 
+import calendar
 import re
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
@@ -274,7 +275,16 @@ def compute_order_sync_range(latest_ordered_at: datetime | None, today: date) ->
     "스코프 결정 2" 참고). `order_no` 기준 upsert라 겹치는 기간을 다시
     조회해도 중복 저장되지 않는다."""
     if latest_ordered_at is None:
-        return today - timedelta(days=92), today
+        # 3개월 전 같은 날짜를 계산한다. 월 차감 시 연도 롤오버 처리.
+        y, m = today.year, today.month
+        m -= 3
+        if m <= 0:
+            m += 12
+            y -= 1
+        # 대상 월에 해당 일자가 없으면(예: 2026-05-31 → 2월) 마지막 날로 맞춘다.
+        _, last_day = calendar.monthrange(y, m)
+        day = min(today.day, last_day)
+        return date(y, m, day), today
     return latest_ordered_at.date() - timedelta(days=2), today
 
 
