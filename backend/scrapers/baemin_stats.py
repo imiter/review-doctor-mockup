@@ -1700,17 +1700,31 @@ def fetch_shop_info(page, shop_no: str) -> dict:
     브리프의 스타팅 코드는 수정 없이 그대로 통과했다 — `name`/
     `categories[0].name`/`address.road.address`/`address.latitude`/
     `address.longitude` 응답 형태가 계획 수립 단계의 조사 결과와 정확히
-    일치했다(정정 사항 없음)."""
-    body_holder: dict = {}
-    observed = {"any": False}
+    일치했다(정정 사항 없음).
+
+    **정정 (2026-08-15, 코드 리뷰 발견)**: 반환 dict를 만드는 구간의
+    `except (KeyError, IndexError)`가 `TypeError`를 못 잡았다. 도로명주소가
+    없는(지번주소만 있는) 매장은 `address["road"]`가 `None`일 수 있고,
+    좌표가 없는 매장은 `address["latitude"]`/`address["longitude"]`가
+    `None`일 수 있는데, 그 경우 `None["address"]` 인덱싱이나 `float(None)`이
+    `KeyError`/`IndexError`가 아니라 `TypeError`를 던져 이 함수가 보장해야
+    할 "응답은 받았지만 파싱 실패 시 `BaeminStatsScrapeError`" 계약이
+    깨졌다. 치밥대장은 도로명주소·좌표가 전부 채워져 있어 Step 2 라이브
+    검증에서는 이 경로가 재현되지 않았다(리뷰로 발견, 실 계정 재현은 아님).
+    `TypeError`를 같은 except 절에 추가해 null 필드도 다른 파싱 실패와
+    동일하게 `BaeminStatsScrapeError`로 표면화하도록 고쳤다."""
+    state = {"observed_any": False, "body": None}
 
     def _on_response(response) -> None:
-        if urlparse(response.url).path != f"/v4/store/shops/{shop_no}":
+        url = response.url
+        if "self-api.baemin.com" not in url:
             return
-        observed["any"] = True
+        if urlparse(url).path != f"/v4/store/shops/{shop_no}":
+            return
+        state["observed_any"] = True
         if response.status == 200:
             try:
-                body_holder["body"] = response.json()
+                state["body"] = response.json()
             except Exception:
                 pass
 
@@ -1727,12 +1741,12 @@ def fetch_shop_info(page, shop_no: str) -> dict:
     finally:
         page.remove_listener("response", _on_response)
 
-    if not observed["any"]:
+    if not state["observed_any"]:
         raise BaeminStatsScrapeError("가게 정보 API 응답을 한 번도 확인하지 못했습니다")
-    if "body" not in body_holder:
+    if state["body"] is None:
         raise BaeminStatsScrapeError("가게 정보 API 응답을 받았지만 파싱하지 못했습니다")
 
-    body = body_holder["body"]
+    body = state["body"]
     try:
         categories = body["categories"]
         address = body["address"]
@@ -1743,5 +1757,5 @@ def fetch_shop_info(page, shop_no: str) -> dict:
             "latitude": float(address["latitude"]),
             "longitude": float(address["longitude"]),
         }
-    except (KeyError, IndexError) as e:
+    except (KeyError, IndexError, TypeError) as e:
         raise BaeminStatsScrapeError(f"가게 정보 응답 형태가 예상과 다릅니다: {e}") from e
