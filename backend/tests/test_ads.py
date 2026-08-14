@@ -3,8 +3,11 @@ from datetime import date, datetime, timezone
 from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order
 
 
-def make_campaign(db_session, store, current_cpc=400, target_rank=3):
-    campaign = AdCampaign(store_id=store.id, category="치킨", current_cpc=current_cpc, target_rank=target_rank, status="active")
+def make_campaign(db_session, store, current_cpc=400, target_rank=3, shop_no=None):
+    campaign = AdCampaign(
+        store_id=store.id, category="치킨", current_cpc=current_cpc, target_rank=target_rank,
+        status="active", shop_no=shop_no,
+    )
     db_session.add(campaign)
     db_session.commit()
     return campaign
@@ -189,3 +192,13 @@ def test_click_performance_no_data_returns_zeroed_response(client, db_session, s
     assert body["ad_spend"] == 0
     assert body["acos"] is None  # 분모 0 — 계산 불가
     assert body["score"] is None
+
+
+def test_ad_campaign_shop_no_defaults_to_none(db_session, seeded_user):
+    campaign = make_campaign(db_session, seeded_user["store"])
+    assert campaign.shop_no is None
+
+
+def test_ad_campaign_shop_no_can_be_set(db_session, seeded_user):
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+    assert campaign.shop_no == "14804318"

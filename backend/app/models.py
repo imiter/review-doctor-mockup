@@ -244,6 +244,7 @@ class AdCampaign(Base):
     current_cpc: Mapped[int]
     target_rank: Mapped[int]
     status: Mapped[str] = mapped_column(String(10), default="active")
+    shop_no: Mapped[str | None] = mapped_column(String(20), default=None)
 
     store: Mapped[Store] = relationship()
 

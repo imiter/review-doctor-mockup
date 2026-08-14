@@ -225,6 +225,9 @@ CREATE TABLE repurchase_metrics (
 
 -- ----------------------------------------------------------------------------
 -- 13. ad_campaigns — 광고 캠페인. stores 1:N
+--     shop_no가 있으면(예: 치밥대장 = '14804318') 이 캠페인은 실제 배민
+--     브랜드에 연결된 것으로 취급해 순위 현황/광고 성과/반경별 실측이
+--     실데이터 경로를 탄다. NULL이면(대부분의 캠페인) 지금처럼 전부 Mock.
 -- ----------------------------------------------------------------------------
 CREATE TABLE ad_campaigns (
     id          BIGSERIAL PRIMARY KEY,
@@ -232,7 +235,8 @@ CREATE TABLE ad_campaigns (
     category    VARCHAR(30) NOT NULL,               -- 노출 카테고리 (예: 치킨)
     current_cpc INT         NOT NULL CHECK (current_cpc >= 0),   -- 현재 클릭당 단가 (원)
     target_rank SMALLINT    NOT NULL CHECK (target_rank >= 1),   -- 목표 순위
-    status      VARCHAR(10) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused'))
+    status      VARCHAR(10) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused')),
+    shop_no     VARCHAR(20)                          -- 실제 배민 shop_no (baemin_shop_brands.shop_no와 동일한 값), 실데이터 캠페인만
 );
 
 CREATE INDEX idx_ad_campaigns_store ON ad_campaigns(store_id);
