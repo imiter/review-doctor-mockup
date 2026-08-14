@@ -89,7 +89,8 @@ const NAV: NavSection[] = [
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { user, stores, storeId, setStoreId, logout } = useStoreContext();
+  const { user, stores, storeId, logout } = useStoreContext();
+  const currentStore = stores.find((s) => s.id === storeId) ?? stores[0];
 
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col overflow-y-auto border-r border-border-subtle bg-surface">
@@ -101,19 +102,11 @@ export function Sidebar() {
         </div>
       </div>
 
-      {stores.length > 0 && (
+      {currentStore && (
         <div className="px-4 pb-3">
-          <select
-            value={storeId ?? ""}
-            onChange={(e) => setStoreId(Number(e.target.value))}
-            className="w-full rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-xs outline-none focus:border-accent"
-          >
-            {stores.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+          <div className="w-full truncate rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-xs">
+            {currentStore.name}
+          </div>
         </div>
       )}
 
