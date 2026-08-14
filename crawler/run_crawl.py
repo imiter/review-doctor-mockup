@@ -173,11 +173,14 @@ def run():
 
     os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
-    try:
-        base_lat, base_lng = address_to_coords(settings.store_address, settings.kakao_api_key)
-    except GeocodeError as e:
-        print(f"지오코딩 실패, 실행을 중단합니다: {e}")
-        sys.exit(1)
+    if settings.store_lat is not None and settings.store_lng is not None:
+        base_lat, base_lng = settings.store_lat, settings.store_lng
+    else:
+        try:
+            base_lat, base_lng = address_to_coords(settings.store_address, settings.kakao_api_key)
+        except GeocodeError as e:
+            print(f"지오코딩 실패, 실행을 중단합니다: {e}")
+            sys.exit(1)
 
     rng = random.Random()
     driver = start_session(PACKAGE)  # 내부적으로 check_server_ready() 호출
