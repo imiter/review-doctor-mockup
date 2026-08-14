@@ -89,8 +89,7 @@ const NAV: NavSection[] = [
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { user, stores, storeId, logout } = useStoreContext();
-  const currentStore = stores.find((s) => s.id === storeId) ?? stores[0];
+  const { user, logout } = useStoreContext();
 
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col overflow-y-auto border-r border-border-subtle bg-surface">
@@ -101,14 +100,6 @@ export function Sidebar() {
           <p className="text-[11px] text-muted leading-tight">& Store Insight</p>
         </div>
       </div>
-
-      {currentStore && (
-        <div className="px-4 pb-3">
-          <div className="w-full truncate rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-xs">
-            {currentStore.name}
-          </div>
-        </div>
-      )}
 
       <nav className="flex-1 space-y-4 px-3 pb-4">
         {NAV.map((section, i) => (
