@@ -1682,3 +1682,66 @@ def fetch_settlement_breakdown_details(page, start_date: str, end_date: str) -> 
             )
 
     return details
+
+
+def fetch_shop_info(page, shop_no: str) -> dict:
+    """사장님광장 가게관리 화면(`/shops/{shop_no}/manage`)에서
+    `GET /v4/store/shops/{shop_no}` organic 응답을 가로채 상호명·카테고리·
+    도로명주소·위도·경도를 반환한다. 광고 순위 실측 크롤러(`crawler/`)가
+    가게 정보를 `.env` 수동 편집 대신 이 함수의 결과로 받을 수 있게
+    하기 위한 용도다(호출자는 `backend/app/routers/ads.py`의
+    `_run_local_crawl` 참고).
+
+    반환 키: `name`(str), `category`(str, 배민 카테고리 탭과 정확히
+    일치하는 문자열), `road_address`(str), `latitude`(float),
+    `longitude`(float).
+
+    실 계정 재검증(2026-08-15, 치밥대장 `shop_no='14804318'` 기준) 결과
+    브리프의 스타팅 코드는 수정 없이 그대로 통과했다 — `name`/
+    `categories[0].name`/`address.road.address`/`address.latitude`/
+    `address.longitude` 응답 형태가 계획 수립 단계의 조사 결과와 정확히
+    일치했다(정정 사항 없음)."""
+    body_holder: dict = {}
+    observed = {"any": False}
+
+    def _on_response(response) -> None:
+        if urlparse(response.url).path != f"/v4/store/shops/{shop_no}":
+            return
+        observed["any"] = True
+        if response.status == 200:
+            try:
+                body_holder["body"] = response.json()
+            except Exception:
+                pass
+
+    page.on("response", _on_response)
+    try:
+        try:
+            page.goto(f"https://self.baemin.com/shops/{shop_no}/manage")
+        except Exception as e:
+            raise BaeminStatsScrapeError(f"가게관리 페이지 이동에 실패했습니다: {e}") from e
+
+        page.wait_for_timeout(3_000)
+        _dismiss_backdrop_if_present(page)
+        page.wait_for_timeout(1_000)
+    finally:
+        page.remove_listener("response", _on_response)
+
+    if not observed["any"]:
+        raise BaeminStatsScrapeError("가게 정보 API 응답을 한 번도 확인하지 못했습니다")
+    if "body" not in body_holder:
+        raise BaeminStatsScrapeError("가게 정보 API 응답을 받았지만 파싱하지 못했습니다")
+
+    body = body_holder["body"]
+    try:
+        categories = body["categories"]
+        address = body["address"]
+        return {
+            "name": body["name"],
+            "category": categories[0]["name"],
+            "road_address": address["road"]["address"],
+            "latitude": float(address["latitude"]),
+            "longitude": float(address["longitude"]),
+        }
+    except (KeyError, IndexError) as e:
+        raise BaeminStatsScrapeError(f"가게 정보 응답 형태가 예상과 다릅니다: {e}") from e
