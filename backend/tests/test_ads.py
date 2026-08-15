@@ -1,6 +1,16 @@
+import subprocess
 from datetime import date, datetime, timezone
+from unittest.mock import Mock
 
-from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order
+import pytest
+from cryptography.fernet import Fernet
+from sqlalchemy.orm import sessionmaker
+
+from fastapi import HTTPException
+
+import app.routers.ads as ads_module
+from app.credential_crypto import encrypt_credential
+from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order, StorePlatformConnection
 
 
 def make_campaign(db_session, store, current_cpc=400, target_rank=3, shop_no=None):
@@ -197,6 +207,81 @@ def test_click_performance_no_data_returns_zeroed_response(client, db_session, s
 def test_ad_campaign_shop_no_defaults_to_none(db_session, seeded_user):
     campaign = make_campaign(db_session, seeded_user["store"])
     assert campaign.shop_no is None
+
+
+def _bind_run_local_crawl_to_test_db(db_session, monkeypatch):
+    """_run_local_crawl은 요청 스코프 db_session이 아니라 app.db.SessionLocal로
+    자기 세션을 새로 연다(백그라운드 스레드에서 실행되므로 요청 세션을 공유할
+    수 없다 — review_sync.run_review_sync_job과 동일한 패턴). db_session
+    픽스처와 같은 (StaticPool) 엔진에 바인딩된 별도 sessionmaker로 바꿔치기해야
+    _run_local_crawl이 이 테스트가 커밋해둔 캠페인/연결 행을 볼 수 있다."""
+    monkeypatch.setattr(ads_module, "SessionLocal", sessionmaker(bind=db_session.get_bind(), autoflush=False))
+
+
+def test_run_local_crawl_hard_fails_before_subprocess_when_shop_info_fetch_fails(
+    db_session, seeded_user, platforms, monkeypatch
+):
+    """shop_no가 있는 캠페인에서 배민 로그인(fetch_shop_info 이전 단계)이
+    실패하면 크롤러 서브프로세스를 아예 띄우지 않고 HTTPException(502)로
+    중단해야 한다 — .env로 조용히 폴백하면 엉뚱한 가게 실측 결과가 이
+    캠페인 몫으로 저장될 위험이 있다는 게 이 하드 에러의 존재 이유다."""
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+
+    _bind_run_local_crawl_to_test_db(db_session, monkeypatch)
+
+    def _raise_login(login_id, password):
+        raise RuntimeError("배민 로그인 실패(테스트로 유발)")
+
+    monkeypatch.setattr(ads_module, "baemin_login", _raise_login)
+    mock_run = Mock()
+    monkeypatch.setattr(ads_module.subprocess, "run", mock_run)
+
+    with pytest.raises(HTTPException) as exc_info:
+        ads_module._run_local_crawl(campaign.id)
+
+    assert exc_info.value.status_code == 502
+    assert "가게 정보 조회에 실패" in exc_info.value.detail
+    mock_run.assert_not_called()  # 크롤러 서브프로세스는 절대 시작되면 안 된다
+
+
+def test_run_local_crawl_skips_injection_entirely_when_campaign_has_no_shop_no(
+    db_session, seeded_user, monkeypatch
+):
+    """shop_no가 없는 캠페인(예: 닭갈비연구소)은 배민 로그인/가게정보 조회
+    블록을 아예 건너뛰고 기존처럼 crawler/.env 값 그대로(=주입 없는
+    _crawler_subprocess_env() 결과) 서브프로세스를 실행해야 한다. 자격증명
+    복호화·로그인이 절대 시도되지 않는다는 것까지 함께 확인한다."""
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no=None)
+
+    _bind_run_local_crawl_to_test_db(db_session, monkeypatch)
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("shop_no가 없는 캠페인은 이 함수를 호출하면 안 된다")
+
+    monkeypatch.setattr(ads_module, "decrypt_credential", _fail_if_called)
+    monkeypatch.setattr(ads_module, "baemin_login", _fail_if_called)
+    monkeypatch.setattr(ads_module, "fetch_shop_info", _fail_if_called)
+
+    fake_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    mock_run = Mock(return_value=fake_proc)
+    monkeypatch.setattr(ads_module.subprocess, "run", mock_run)
+    monkeypatch.setattr(ads_module, "ingest_csv", lambda csv_path, campaign_id: (0, 0))
+
+    result = ads_module._run_local_crawl(campaign.id)
+
+    assert result == (0, 0)
+    mock_run.assert_called_once()
+    passed_env = mock_run.call_args.kwargs["env"]
+    plain_env = ads_module._crawler_subprocess_env()
+    # 주입 블록을 건너뛰었으니 서브프로세스에 넘어간 env는 그냥
+    # _crawler_subprocess_env()의 결과 그대로다(주입된 STORE_DISPLAY_NAME 등이
+    # 섞여 들어가지 않음).
+    assert passed_env.keys() == plain_env.keys()
 
 
 def test_ad_campaign_shop_no_can_be_set(db_session, seeded_user):
