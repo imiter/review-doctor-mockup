@@ -107,14 +107,33 @@ def ads_performance(
 
     result = []
     for c in campaigns:
-        agg = db.execute(
-            select(
-                func.coalesce(func.sum(AdPerformanceMetric.ad_spend), 0),
-                func.coalesce(func.sum(AdPerformanceMetric.clicks), 0),
-                func.coalesce(func.sum(AdPerformanceMetric.ad_orders), 0),
-                func.coalesce(func.sum(AdPerformanceMetric.ad_revenue), 0),
-            ).where(AdPerformanceMetric.campaign_id == c.id, AdPerformanceMetric.metric_date >= since)
-        ).one()
+        if c.shop_no:
+            # shop_no가 있으면(실데이터 캠페인) 이미 실측인 BrandAdClickMetric을
+            # 쓴다 — /ads/click-performance가 하는 것과 동일한 조회, Mock인
+            # ad_performance_metrics는 아예 조회하지 않는다.
+            baemin_platform = db.scalar(select(Platform).where(Platform.code == "baemin"))
+            agg = db.execute(
+                select(
+                    func.coalesce(func.sum(BrandAdClickMetric.ad_spend), 0),
+                    func.coalesce(func.sum(BrandAdClickMetric.clicks), 0),
+                    func.coalesce(func.sum(BrandAdClickMetric.ad_orders), 0),
+                    func.coalesce(func.sum(BrandAdClickMetric.ad_revenue), 0),
+                ).where(
+                    BrandAdClickMetric.store_id == sid,
+                    BrandAdClickMetric.platform_id == baemin_platform.id,
+                    BrandAdClickMetric.shop_no == c.shop_no,
+                    BrandAdClickMetric.metric_date >= since,
+                )
+            ).one() if baemin_platform else (0, 0, 0, 0)
+        else:
+            agg = db.execute(
+                select(
+                    func.coalesce(func.sum(AdPerformanceMetric.ad_spend), 0),
+                    func.coalesce(func.sum(AdPerformanceMetric.clicks), 0),
+                    func.coalesce(func.sum(AdPerformanceMetric.ad_orders), 0),
+                    func.coalesce(func.sum(AdPerformanceMetric.ad_revenue), 0),
+                ).where(AdPerformanceMetric.campaign_id == c.id, AdPerformanceMetric.metric_date >= since)
+            ).one()
         perf = calculate_performance(*agg)
         order_share = round(perf.ad_orders / total_orders, 4) if total_orders else None
         result.append({
@@ -456,6 +475,36 @@ def ads_rank_monitoring(
 
     result = []
     for c in campaigns:
+        if c.shop_no:
+            # shop_no가 있으면(실데이터 캠페인) 시간별 Mock 스냅샷이 아니라
+            # 반경별 실측(distance_km=0, 가게 주소 지점)의 가장 최근 값을
+            # "현재 순위"로 쓴다 — competitor_est_cpc는 실측이 구조적으로
+            # 불가능해 계속 추정치로 남긴다(아래).
+            real_latest = db.scalar(
+                select(AdRankSnapshot)
+                .where(AdRankSnapshot.campaign_id == c.id, AdRankSnapshot.distance_km == 0)
+                .order_by(AdRankSnapshot.snapshot_at.desc())
+                .limit(1)
+            )
+            current_rank = real_latest.current_rank if real_latest else None
+            rank_status = ("rank_dropped" if current_rank > c.target_rank else "normal") if current_rank is not None else None
+            recommended_action = "raise_cpc" if rank_status == "rank_dropped" else "keep"
+            competitor_est_cpc = round(c.current_cpc * 1.15) if current_rank is not None and rank_status == "rank_dropped" else None
+            result.append({
+                "campaign_id": c.id,
+                "category": c.category,
+                "current_cpc": c.current_cpc,
+                "target_rank": c.target_rank,
+                "status": c.status,
+                "current_rank": current_rank,
+                "competitor_est_cpc": competitor_est_cpc,
+                "rank_status": rank_status,
+                "recommended_action": recommended_action,
+                "suggested_cpc": None,  # 경쟁 CPC를 실측할 방법이 없어 구체적 액수는 안 줌
+                "snapshot_at": real_latest.snapshot_at.isoformat() if real_latest else None,
+            })
+            continue
+
         latest = db.scalar(
             select(AdRankSnapshot)
             .where(AdRankSnapshot.campaign_id == c.id)

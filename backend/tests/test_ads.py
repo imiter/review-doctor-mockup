@@ -287,3 +287,92 @@ def test_run_local_crawl_skips_injection_entirely_when_campaign_has_no_shop_no(
 def test_ad_campaign_shop_no_can_be_set(db_session, seeded_user):
     campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
     assert campaign.shop_no == "14804318"
+
+
+def test_ads_performance_uses_real_brand_click_metrics_when_shop_no_set(client, db_session, seeded_user, platforms, auth_headers):
+    from app.models import BrandAdClickMetric
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+    db_session.add(BrandAdClickMetric(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        shop_no="14804318", metric_date=date.today(),
+        ad_spend=34730, impressions=4632, clicks=106, ad_orders=16, ad_revenue=427000,
+    ))
+    db_session.commit()
+
+    row = client.get("/ads/performance", headers=auth_headers).json()[0]
+    assert row["campaign_id"] == campaign.id
+    # CPC = 34730 / 106 ≈ 327.64 (실측 브랜드 데이터에서 계산됨, Mock ad_performance_metrics 아님)
+    assert row["cpc"] == round(34730 / 106, 2)
+    assert row["ad_spend"] == 34730
+
+
+def test_ads_performance_ignores_ad_performance_metrics_when_shop_no_set(client, db_session, seeded_user, platforms, auth_headers):
+    from app.models import BrandAdClickMetric
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+    db_session.add(AdPerformanceMetric(
+        campaign_id=campaign.id, metric_date=date.today(),
+        ad_spend=999999, clicks=1, ad_orders=0, ad_revenue=0,
+    ))
+    db_session.add(BrandAdClickMetric(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        shop_no="14804318", metric_date=date.today(),
+        ad_spend=1000, impressions=100, clicks=10, ad_orders=1, ad_revenue=25000,
+    ))
+    db_session.commit()
+
+    row = client.get("/ads/performance", headers=auth_headers).json()[0]
+    assert row["ad_spend"] == 1000  # AdPerformanceMetric(999999)이 아니라 BrandAdClickMetric 값
+
+
+def test_ads_performance_without_shop_no_still_uses_mock(client, db_session, seeded_user, auth_headers):
+    """회귀 테스트 — shop_no 없는 캠페인은 이번 변경으로 전혀 영향받지 않는다."""
+    campaign = make_campaign(db_session, seeded_user["store"])
+    db_session.add(AdPerformanceMetric(
+        campaign_id=campaign.id, metric_date=date.today(),
+        ad_spend=10_000, clicks=100, ad_orders=10, ad_revenue=200_000,
+    ))
+    db_session.commit()
+
+    row = client.get("/ads/performance", headers=auth_headers).json()[0]
+    assert row["ad_spend"] == 10_000
+
+
+def test_rank_monitoring_uses_real_distance_snapshot_when_shop_no_set(client, db_session, seeded_user, auth_headers):
+    campaign = make_campaign(db_session, seeded_user["store"], target_rank=3, shop_no="14804318")
+    db_session.add_all([
+        # 시간별 Mock 스냅샷(distance_km NULL) — shop_no 있는 캠페인이면 무시돼야 함
+        AdRankSnapshot(campaign_id=campaign.id, snapshot_at=datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc),
+                        current_rank=1, competitor_est_cpc=390, status="normal", recommended_action="keep"),
+        # 반경별 실측 스냅샷(distance_km NOT NULL) — 0km가 "현재 순위"의 근거가 돼야 함
+        AdRankSnapshot(campaign_id=campaign.id, snapshot_at=datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc),
+                        current_rank=36, distance_km=0, point_label="0km", total_scanned=36, ads_above=8),
+    ])
+    db_session.commit()
+
+    row = client.get("/ads/rank-monitoring", headers=auth_headers).json()[0]
+    assert row["current_rank"] == 36  # 시간별 Mock(1위)이 아니라 실측 0km(36위)
+    assert row["rank_status"] == "rank_dropped"  # 36 > target_rank(3)
+    assert row["recommended_action"] == "raise_cpc"
+    assert row["suggested_cpc"] is None  # 경쟁 CPC를 몰라 구체적 액수는 못 줌
+
+
+def test_rank_monitoring_no_real_snapshot_yet_when_shop_no_set(client, db_session, seeded_user, auth_headers):
+    make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+    row = client.get("/ads/rank-monitoring", headers=auth_headers).json()[0]
+    assert row["current_rank"] is None
+    assert row["recommended_action"] == "keep"
+
+
+def test_rank_monitoring_without_shop_no_still_uses_mock_snapshot(client, db_session, seeded_user, auth_headers):
+    """회귀 테스트 — shop_no 없는 캠페인은 기존 시간별 Mock 스냅샷 로직 그대로."""
+    campaign = make_campaign(db_session, seeded_user["store"], target_rank=3)
+    db_session.add(AdRankSnapshot(
+        campaign_id=campaign.id, snapshot_at=datetime(2026, 7, 25, 10, 0, tzinfo=timezone.utc),
+        current_rank=7, competitor_est_cpc=650, status="rank_dropped",
+        recommended_action="raise_cpc", suggested_cpc=700,
+    ))
+    db_session.commit()
+
+    row = client.get("/ads/rank-monitoring", headers=auth_headers).json()[0]
+    assert row["current_rank"] == 7
+    assert row["suggested_cpc"] == 700  # Mock 경로는 suggested_cpc를 그대로 줌
