@@ -21,8 +21,21 @@ from sqlalchemy.orm import Session
 
 from app.acos import calculate_performance
 from app.auth import get_current_user, get_user_default_store_id
-from app.db import get_db
-from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order, Platform, Store, User
+from app.credential_crypto import decrypt_credential
+from app.db import SessionLocal, get_db
+from app.models import (
+    AdCampaign,
+    AdPerformanceMetric,
+    AdRankSnapshot,
+    BrandAdClickMetric,
+    Order,
+    Platform,
+    Store,
+    StorePlatformConnection,
+    User,
+)
+from scrapers.baemin_auth import login as baemin_login
+from scrapers.baemin_stats import fetch_shop_info
 from scripts.ingest_rank_snapshots import ingest as ingest_csv
 
 router = APIRouter(tags=["ads"])
@@ -204,14 +217,55 @@ def _run_local_crawl(campaign_id: int) -> tuple[int, int]:
     """이 프로세스와 같은 컴퓨터의 crawler venv/에뮬레이터로 실제 크롤링을 실행하고
     결과를 DB에 적재한다. (inserted, skipped) 개수를 반환한다. 3~5분 걸리는
     블로킹 호출이므로 반드시 백그라운드 스레드에서만 부른다(요청 핸들러에서
-    직접 부르면 배포 환경 프록시 타임아웃에 걸린다 — 아래 _start_crawl_job 참고)."""
+    직접 부르면 배포 환경 프록시 타임아웃에 걸린다 — 아래 _start_crawl_job 참고).
+
+    캠페인에 shop_no가 있으면(실데이터 캠페인, 지금은 치밥대장뿐) 크롤러
+    실행 전에 이 프로세스가 이미 갖고 있는 배민 인증 흐름으로 로그인해
+    fetch_shop_info로 실제 상호명/카테고리/주소/좌표를 가져와 크롤러
+    서브프로세스의 환경변수로 넘긴다 — crawler/.env 파일은 건드리지 않는다.
+    이 단계가 실패하면 크롤 자체를 하드 에러로 중단한다(.env로 조용히
+    폴백하면 엉뚱한 가게를 실측한 결과가 이 캠페인 결과로 저장될 위험이
+    있다). shop_no가 없는 캠페인(예: 닭갈비연구소)은 이 단계를 완전히
+    건너뛰고 기존처럼 crawler/.env 값을 그대로 쓴다."""
     if not _CRAWLER_PYTHON.exists():
         raise HTTPException(500, f"crawler venv를 찾을 수 없습니다: {_CRAWLER_PYTHON}")
+
+    env = _crawler_subprocess_env()
+    db = SessionLocal()
+    try:
+        campaign = db.get(AdCampaign, campaign_id)
+        if campaign is not None and campaign.shop_no:
+            baemin_platform = db.scalar(select(Platform).where(Platform.code == "baemin"))
+            conn = db.scalar(
+                select(StorePlatformConnection).where(
+                    StorePlatformConnection.store_id == campaign.store_id,
+                    StorePlatformConnection.platform_id == baemin_platform.id,
+                )
+            ) if baemin_platform else None
+            if conn is None:
+                raise HTTPException(500, f"캠페인 {campaign_id}의 배민 연결을 찾을 수 없습니다")
+            try:
+                credential = decrypt_credential(conn.credential_ciphertext)
+                session = baemin_login(credential["login_id"], credential["password"])
+                try:
+                    info = fetch_shop_info(session.page, campaign.shop_no)
+                finally:
+                    session.close()
+            except Exception as e:
+                raise HTTPException(502, f"가게 정보 조회에 실패해 크롤을 시작하지 않았습니다: {e}") from e
+            env["STORE_DISPLAY_NAME"] = info["name"]
+            env["CATEGORY_LABEL"] = info["category"]
+            env["STORE_ADDRESS"] = info["road_address"]
+            env["STORE_LAT"] = str(info["latitude"])
+            env["STORE_LNG"] = str(info["longitude"])
+    finally:
+        db.close()
+
     try:
         proc = subprocess.run(
             [str(_CRAWLER_PYTHON), "run_crawl.py"],
             cwd=_CRAWLER_DIR,
-            env=_crawler_subprocess_env(),
+            env=env,
             capture_output=True,
             text=True,
             timeout=_CRAWL_TIMEOUT_SEC,
