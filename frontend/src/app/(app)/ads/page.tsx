@@ -121,9 +121,10 @@ export default function AdsPage() {
       <div>
         <h1 className="text-xl font-semibold">광고 순위 모니터링</h1>
         <p className="text-sm text-muted">
-          순위 현황·경쟁 CPC는 수집됐다고 가정한 Mock 스냅샷입니다. 아래 반경별 순위만
-          실기기 자동화로 실측한 값이며, 사이트가 요청마다 직접 크롤링하지는 않습니다.
-          CPC 자동 입찰은 하지 않습니다.
+          치밥대장은 실제 배민 데이터 기반입니다 — 현재 순위는 아래 반경별 실측(실기기
+          자동화) 중 가게 주소 지점(0km) 결과, 광고 성과는 우리가게클릭 실데이터입니다.
+          경쟁 가게 CPC만은 배민이 노출하지 않아 추정치입니다. 나머지 캠페인은 수집됐다고
+          가정한 Mock 스냅샷입니다. CPC 자동 입찰은 하지 않습니다.
         </p>
       </div>
 
@@ -136,7 +137,7 @@ export default function AdsPage() {
                 <th className="font-medium">현재 CPC</th>
                 <th className="font-medium">목표 순위</th>
                 <th className="font-medium">현재 순위</th>
-                <th className="font-medium">경쟁 예상 CPC</th>
+                <th className="font-medium">경쟁 예상 CPC (추정)</th>
                 <th className="font-medium">상태</th>
                 <th className="font-medium">추천 액션</th>
               </tr>
