@@ -338,19 +338,26 @@ def test_ads_performance_without_shop_no_still_uses_mock(client, db_session, see
 
 
 def test_rank_monitoring_uses_real_distance_snapshot_when_shop_no_set(client, db_session, seeded_user, auth_headers):
+    """distance_km == 0 필터가 실제로 걸려야만 통과한다 — 일부러 distance_km=0
+    행을 시간상 더 오래되게, distance_km NULL(Mock)/비0km 행을 더 최신으로
+    심는다. "그냥 가장 최신 스냅샷을 쓴다"는 버그로 후퇴해도 우연히 맞는
+    답이 나오지 않도록 하기 위함 — 필터가 없으면 이 테스트는 반드시 실패한다."""
     campaign = make_campaign(db_session, seeded_user["store"], target_rank=3, shop_no="14804318")
     db_session.add_all([
-        # 시간별 Mock 스냅샷(distance_km NULL) — shop_no 있는 캠페인이면 무시돼야 함
+        # 반경별 실측 스냅샷(distance_km=0) — 시간상 더 오래됐지만 "현재 순위"의 근거가 돼야 함
         AdRankSnapshot(campaign_id=campaign.id, snapshot_at=datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc),
-                        current_rank=1, competitor_est_cpc=390, status="normal", recommended_action="keep"),
-        # 반경별 실측 스냅샷(distance_km NOT NULL) — 0km가 "현재 순위"의 근거가 돼야 함
-        AdRankSnapshot(campaign_id=campaign.id, snapshot_at=datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc),
                         current_rank=36, distance_km=0, point_label="0km", total_scanned=36, ads_above=8),
+        # 시간별 Mock 스냅샷(distance_km NULL) — 시간상 더 최신이지만 shop_no 있는 캠페인이면 무시돼야 함
+        AdRankSnapshot(campaign_id=campaign.id, snapshot_at=datetime(2026, 8, 12, 9, 0, tzinfo=timezone.utc),
+                        current_rank=1, competitor_est_cpc=390, status="normal", recommended_action="keep"),
+        # 반경별이지만 0km가 아닌 실측 스냅샷 — 이것도 가장 최신이지만 distance_km != 0이라 무시돼야 함
+        AdRankSnapshot(campaign_id=campaign.id, snapshot_at=datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc),
+                        current_rank=9, distance_km="2.37", point_label="1.5~2.5km", total_scanned=10, ads_above=3),
     ])
     db_session.commit()
 
     row = client.get("/ads/rank-monitoring", headers=auth_headers).json()[0]
-    assert row["current_rank"] == 36  # 시간별 Mock(1위)이 아니라 실측 0km(36위)
+    assert row["current_rank"] == 36  # 가장 최신인 Mock(1위)도, 가장 최신인 1.5~2.5km(9위)도 아니라 distance_km=0(36위)
     assert row["rank_status"] == "rank_dropped"  # 36 > target_rank(3)
     assert row["recommended_action"] == "raise_cpc"
     assert row["suggested_cpc"] is None  # 경쟁 CPC를 몰라 구체적 액수는 못 줌
