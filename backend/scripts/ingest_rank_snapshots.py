@@ -15,8 +15,11 @@ import csv
 import datetime
 import pathlib
 import sys
+import zoneinfo
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+_KST = zoneinfo.ZoneInfo("Asia/Seoul")
 
 from app.db import SessionLocal  # noqa: E402
 from app.models import AdCampaign, AdRankSnapshot  # noqa: E402
@@ -50,7 +53,7 @@ def ingest(csv_path: pathlib.Path, campaign_id: int) -> tuple[int, int]:
 
                 snapshot = AdRankSnapshot(
                     campaign_id=campaign.id,
-                    snapshot_at=datetime.datetime.fromisoformat(row["timestamp"]),
+                    snapshot_at=datetime.datetime.fromisoformat(row["timestamp"]).replace(tzinfo=_KST),
                     current_rank=rank,
                     status="rank_dropped" if rank > campaign.target_rank else "normal",
                     distance_km=row["distance_km"] or None,

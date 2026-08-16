@@ -238,9 +238,9 @@ FROM win;
 -- ----------------------------------------------------------------------------
 -- 13. ad_campaigns — 캠페인 2개
 -- ----------------------------------------------------------------------------
-INSERT INTO ad_campaigns (store_id, category, current_cpc, target_rank, status) VALUES
-(1, '치킨',   400, 3, 'active'),
-(2, '닭갈비', 300, 5, 'active');
+INSERT INTO ad_campaigns (store_id, category, current_cpc, target_rank, status, shop_no) VALUES
+(1, '치킨',   400, 3, 'active', '14804318'),
+(2, '닭갈비', 300, 5, 'active', NULL);
 
 -- ----------------------------------------------------------------------------
 -- 14. ad_performance_metrics — 최근 14일 원본 성과
@@ -292,13 +292,10 @@ SELECT 2,
        'normal', 'keep', NULL
 FROM generate_series(0, 29) AS i;
 
--- 캠페인1: 반경별 실측 스냅샷 (crawler/로 실제 배민 앱에서 수집한 값 — 데모용)
-INSERT INTO ad_rank_snapshots
-    (campaign_id, snapshot_at, current_rank, status, distance_km, point_label, total_scanned, ads_above)
-VALUES
-(1, now() - interval '3 minutes', 17, 'rank_dropped', 0.00, '0km',       17, 4),
-(1, now() - interval '2 minutes',  9, 'rank_dropped', 2.37, '1.5~2.5km', 10, 3),
-(1, now() - interval '1 minutes', 17, 'rank_dropped', 2.61, '2.5~3.5km', 17, 5);
+-- 캠페인1의 반경별 실측 스냅샷(distance_km IS NOT NULL)은 seed로 심지 않는다 — 이 값은
+-- crawler/가 실제 배민 앱을 조작해 측정한 결과만 들어가야 하는 자리라, 가짜 값을 심으면
+-- "우리가게 순위 확인"을 한 번도 안 돌린 새 환경에서도 실측인 것처럼 보이는 문제가 생긴다.
+-- 실측 전에는 GET /ads/rank-monitoring이 current_rank/rank_status를 null로 반환하는 게 맞는 동작.
 
 -- ----------------------------------------------------------------------------
 -- 16. alerts — 데이터에서 파생되는 알림 (발송 없음, 화면 표시용)

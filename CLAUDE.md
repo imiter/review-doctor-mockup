@@ -330,8 +330,15 @@ ACoS(%) = CPC / (CVR × AOV) × 100
 ## 창의 기능: 광고 순위 모니터링
 경쟁 가게가 CPC를 조금만 올려도 순위가 밀리는 현장 고충을 위한 기능.
 ad_rank_snapshots에 카테고리, 현재 CPC, 목표 순위, 현재 순위, 경쟁 가게 예상
-CPC, 상태, 추천 액션을 담는다. 시간별 스냅샷은 수집됐다고 가정한 결과를
-Mock으로 저장하고 보여준다.
+CPC, 상태, 추천 액션을 담는다.
+
+ad_campaigns.shop_no(nullable)가 채워진 캠페인(현재 치밥대장=id 1만)은 실제
+배민 데이터 기반으로 동작한다 — 광고 성과(GET /ads/performance)는
+BrandAdClickMetric(우가클 실데이터) 집계, 현재 순위는 아래 반경별 실측
+스냅샷 중 distance_km=0(가게 주소) 최신 행을 쓴다. shop_no가 없는 캠페인은
+기존처럼 시간별 스냅샷을 수집됐다고 가정한 Mock으로 저장·표시한다. 경쟁
+가게의 CPC는 shop_no 유무와 무관하게 배민이 아무에게도 노출하지 않아 항상
+추정치이며, 화면에도 "(추정)"으로 표시한다.
 
 ### 반경별 실측 순위 (crawler/, 예외적으로 실제 크롤링 허용)
 가게 기준 거리(0km / 1.5~2.5km / 2.5~3.5km)에 따라 카테고리 내 순위가 얼마나
@@ -341,14 +348,35 @@ Mock으로 저장하고 보여준다.
 
 - crawler/run_crawl.py: 실기기에서 배민 앱을 조작해 GPS를 반경별로 이동시키며
   카테고리 리스트를 스크롤·캡처해 목표 가게의 순위를 찾는다. output/results.csv로
-  저장한다. 사이트(FastAPI/Next.js)와는 별개 프로세스로, 요청 시점에 실행되지
-  않고 사람이 필요할 때 수동 실행하는 배치 도구다.
-- backend/scripts/ingest_rank_snapshots.py: results.csv를 읽어 해당 캠페인의
-  ad_rank_snapshots에 distance_km/point_label/total_scanned/ads_above와 함께
-  적재한다. 경쟁 가게 CPC는 실측할 수 없으므로 이 종류의 행에는 저장하지 않는다.
+  저장한다. 사이트(FastAPI/Next.js)와는 별개 프로세스지만, shop_no가 있는
+  캠페인은 화면의 "우리가게 순위 확인" 버튼(POST /ads/rank-by-distance/run)이
+  backend/app/routers/ads.py의 _run_local_crawl을 통해 이 스크립트를 직접
+  트리거한다 — 더 이상 항상 수동 실행해야 하는 배치 도구는 아니다.
+- _run_local_crawl은 shop_no가 있으면 크롤 실행 전에 그 캠페인의 store_id로
+  배민 store_platform_connections 자격증명을 복호화해 로그인하고,
+  backend/scrapers/baemin_stats.py의 fetch_shop_info(GET
+  /v4/store/shops/{shopNo})로 사장님광장에서 상호명/카테고리/도로명주소/좌표를
+  가로채 크롤러 서브프로세스에 STORE_DISPLAY_NAME/CATEGORY_LABEL/STORE_ADDRESS/
+  STORE_LAT/STORE_LNG로 주입한다 — 가게마다 .env를 손으로 고칠 필요가 없다.
+  이 단계가 실패하면 .env 폴백 없이 하드 에러로 크롤을 중단한다. shop_no가
+  없는 캠페인은 기존처럼 crawler/.env 값을 그대로 쓴다.
+- backend/scripts/ingest_rank_snapshots.py: run_crawl.py 종료 직후
+  _run_local_crawl이 같은 함수 안에서 자동으로 호출한다(별도 수동 스텝
+  아님). results.csv를 읽어 해당 캠페인의 ad_rank_snapshots에
+  distance_km/point_label/total_scanned/ads_above와 함께 적재한다. rank가
+  숫자가 아닌 행(NOT_FOUND/NAV_ERROR 등, 예: 매장이 영업시간 외라 카테고리
+  리스트에 아예 안 뜨는 경우)은 적재하지 않고 스킵한다. 경쟁 가게 CPC는
+  실측할 수 없으므로 이 종류의 행에는 저장하지 않는다. 크롤러가 남기는
+  timestamp는 tzinfo 없는 KST 문자열이라, TIMESTAMPTZ 컬럼에 그대로 넣으면
+  UTC로 오해돼 9시간 밀린다 — Asia/Seoul을 명시적으로 attach한 뒤 저장한다.
 - GET /ads/rank-by-distance: 캠페인별로 point_label 최신 값을 거리순으로
   반환한다. 사이트는 DB에 이미 적재된 값을 조회만 할 뿐, 요청을 받을 때마다
   실시간으로 배민 앱을 크롤링하지 않는다.
+- seed.sql은 distance_km IS NOT NULL인 실측 스냅샷 행을 심지 않는다. 이 값은
+  crawler/가 실제로 측정한 결과만 들어가야 하는 자리라, seed로 가짜 값을
+  넣으면 한 번도 크롤을 안 돌린 새 환경에서도 실측인 것처럼 보인다. 실측
+  전에는 GET /ads/rank-monitoring이 current_rank/rank_status를 null로
+  반환하는 게 정상 동작이다.
 
 ## 포함 기능
 대시보드 요약, 매출/입금 기간 토글(1일/1주/1개월/이번달), 리뷰 관리,
