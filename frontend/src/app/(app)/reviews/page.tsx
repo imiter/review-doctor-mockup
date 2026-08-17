@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { Card } from "@/components/Card";
-import { apiGet, apiPost } from "@/lib/api";
+import { ApiError, apiGet, apiPost } from "@/lib/api";
 import { useStoreContext } from "@/lib/store-context";
 
 type ReplyStyle = { id: number; name: string; description: string };
@@ -104,12 +105,14 @@ function ReviewCard({
 }: {
   review: Review; styles: ReplyStyle[]; onSaved: () => void; brandName?: string;
 }) {
+  const { refreshBilling } = useStoreContext();
   const [styleId, setStyleId] = useState(review.draft_reply?.style_id ?? styles[0]?.id ?? 0);
   const [draft, setDraft] = useState(review.draft_reply?.content ?? "");
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [secondaryText, setSecondaryText] = useState("");
   const [savingSecondary, setSavingSecondary] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
 
   useEffect(() => {
     if (styles.length > 0 && styleId === 0) setStyleId(styles[0].id);
@@ -117,6 +120,7 @@ function ReviewCard({
 
   const generate = async () => {
     setGenerating(true);
+    setGenerateError(null);
     try {
       const res = await apiPost<{ content: string }>(`/reviews/${review.id}/generate-reply`, { style_id: styleId });
       setDraft(res.content);
@@ -124,6 +128,13 @@ function ReviewCard({
       // 서버에서 이미 pending으로 바뀌어 "답글 대기" 필터에서 사라지고,
       // 사장님이 미리보기를 확인·수정하기도 전에 카드가 없어져 버린다.
       // 목록 갱신은 최종 "답글 등록"을 눌렀을 때만 한다.
+      await refreshBilling();
+    } catch (e) {
+      if (e instanceof ApiError && e.errorCode === "reply_limit_exceeded") {
+        setGenerateError(e.message);
+      } else {
+        setGenerateError(e instanceof ApiError ? e.message : "답글 생성에 실패했습니다.");
+      }
     } finally {
       setGenerating(false);
     }
@@ -214,6 +225,14 @@ function ReviewCard({
               {generating ? "생성 중..." : "답글 생성 (Mock)"}
             </button>
           </div>
+          {generateError && (
+            <p className="mt-2 text-xs text-danger">
+              {generateError}{" "}
+              <Link href="/account/billing" className="underline">
+                구독 관리
+              </Link>
+            </p>
+          )}
           {draft && (
             <div className="space-y-2 rounded-lg border border-accent/40 bg-accent-soft/40 p-3">
               <p className="text-xs font-medium text-accent">미리보기 — 등록 전 자유롭게 수정하세요</p>
@@ -248,7 +267,7 @@ function ReviewCard({
 }
 
 export default function ReviewsPage() {
-  const { storeId } = useStoreContext();
+  const { storeId, billing } = useStoreContext();
   const [reviews, setReviews] = useState<Review[]>([]);
   const [styles, setStyles] = useState<ReplyStyle[]>([]);
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["key"]>("unanswered");
@@ -302,6 +321,12 @@ export default function ReviewsPage() {
       <div>
         <h1 className="text-xl font-semibold">리뷰 관리</h1>
         <p className="text-sm text-muted">답글 생성은 스타일 템플릿 기반 Mock — 실제 AI 호출 없음</p>
+        {billing && (
+          <p className="text-xs text-muted">
+            오늘 답글 생성{" "}
+            {billing.is_pro ? "무제한 (Pro)" : `${billing.replies_used_today}/${billing.daily_reply_limit} (Basic)`}
+          </p>
+        )}
       </div>
 
       <Card>

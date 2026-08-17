@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { Card } from "@/components/Card";
 import { ApiError, apiGet, apiPost, won } from "@/lib/api";
 import { useStoreContext } from "@/lib/store-context";
@@ -62,7 +63,7 @@ const ACTION_LABEL: Record<string, string> = {
 };
 
 export default function AdsPage() {
-  const { storeId } = useStoreContext();
+  const { storeId, billing } = useStoreContext();
   const [ranks, setRanks] = useState<RankRow[]>([]);
   const [distanceRanks, setDistanceRanks] = useState<DistanceRankRow[]>([]);
   const [performance, setPerformance] = useState<PerformanceRow[]>([]);
@@ -70,11 +71,11 @@ export default function AdsPage() {
   const [runError, setRunError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!storeId) return;
+    if (!storeId || (billing && !billing.is_pro)) return;
     apiGet<RankRow[]>(`/ads/rank-monitoring?store_id=${storeId}`).then(setRanks);
     apiGet<DistanceRankRow[]>(`/ads/rank-by-distance?store_id=${storeId}`).then(setDistanceRanks);
     apiGet<PerformanceRow[]>(`/ads/performance?store_id=${storeId}&days=14`).then(setPerformance);
-  }, [storeId]);
+  }, [storeId, billing]);
 
   // 크롤은 3~5분 걸리는데, 배포 환경(Railway) 앞단 프록시가 오래 걸리는 요청을
   // 강제로 끊어버려서(524 Timeout, 실측으로 확인) 응답 하나로 끝까지 기다릴 수
@@ -114,6 +115,24 @@ export default function AdsPage() {
     } finally {
       setRunningCampaignId(null);
     }
+  }
+
+  if (billing && !billing.is_pro) {
+    return (
+      <div className="mx-auto max-w-md space-y-4 py-24 text-center">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-accent-soft text-accent">
+          🔒
+        </div>
+        <p className="text-lg font-semibold">Pro 전용 기능입니다</p>
+        <p className="text-sm text-muted">광고 순위 모니터링은 Pro 플랜에서 이용할 수 있어요.</p>
+        <Link
+          href="/account/billing"
+          className="inline-block rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white"
+        >
+          Pro 시작하기
+        </Link>
+      </div>
+    );
   }
 
   return (
