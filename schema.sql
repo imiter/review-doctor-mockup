@@ -1,7 +1,7 @@
 -- ============================================================================
 -- Delivery Review & Store Insight MVP — PostgreSQL Schema
 -- ============================================================================
--- 21개 테이블. 모든 FK에 ON DELETE 정책 명시.
+-- 22개 테이블. 모든 FK에 ON DELETE 정책 명시.
 --
 -- 삭제 정책 원칙:
 --   ON DELETE CASCADE  — 부모에 종속된 소유 데이터 (사장 탈퇴 → 매장/주문/리뷰 연쇄 삭제)
@@ -19,7 +19,7 @@
 BEGIN;
 
 DROP TABLE IF EXISTS
-    brand_ad_click_metrics, baemin_shop_brands, review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
+    payments, brand_ad_click_metrics, baemin_shop_brands, review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
     ad_performance_metrics, ad_campaigns, repurchase_metrics, daily_settlements, review_replies,
     reviews, orders, reply_settings, reply_styles, subscriptions, store_platform_connections,
     platforms, stores, users
@@ -387,5 +387,23 @@ CREATE TABLE brand_ad_click_metrics (
     ad_revenue  INT NOT NULL DEFAULT 0 CHECK (ad_revenue  >= 0),  -- orderAmounts
     UNIQUE (store_id, platform_id, shop_no, metric_date)
 );
+
+-- ----------------------------------------------------------------------------
+-- 22. payments — 토스페이먼츠 결제(테스트 키). 일회성 결제만, 정기결제 없음.
+-- ----------------------------------------------------------------------------
+CREATE TABLE payments (
+    id               BIGSERIAL PRIMARY KEY,
+    user_id          BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    order_id         VARCHAR(64) NOT NULL UNIQUE,
+    plan             VARCHAR(10) NOT NULL DEFAULT 'pro',
+    amount           INT         NOT NULL,
+    status           VARCHAR(10) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'failed')),
+    toss_payment_key VARCHAR(200),
+    fail_reason      VARCHAR(200),
+    requested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    approved_at      TIMESTAMPTZ
+);
+
+CREATE INDEX idx_payments_user ON payments(user_id);
 
 COMMIT;

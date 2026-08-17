@@ -105,6 +105,21 @@ class Subscription(Base):
     user: Mapped[User] = relationship(back_populates="subscription")
 
 
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"))
+    order_id: Mapped[str] = mapped_column(String(64), unique=True)
+    plan: Mapped[str] = mapped_column(String(10), default="pro")
+    amount: Mapped[int]
+    status: Mapped[str] = mapped_column(String(10), default="pending")
+    toss_payment_key: Mapped[str | None] = mapped_column(String(200))
+    fail_reason: Mapped[str | None] = mapped_column(String(200))
+    requested_at: Mapped[datetime]
+    approved_at: Mapped[datetime | None]
+
+
 class ReplyStyle(Base):
     __tablename__ = "reply_styles"
 
