@@ -15,6 +15,7 @@
 확장하기로 결정했다. 아래 순서로 실제 기능을 하나씩 붙인다:
 1. 카카오 소셜 로그인 (진행 중 — 아래 "카카오 소셜 로그인" 절 참고)
 2. 결제/구독 (PG사 테스트 연동)
+   (2026-08-17 완료 — 아래 "결제/구독 연동" 절 참고)
 3. 실제 배달 플랫폼(배민/쿠팡이츠/요기요) 사장님광장 데이터 연동
 4. LLM 기반 답글 자동생성 고도화 (RAG 포함)
 
@@ -41,6 +42,29 @@
 요청 경로(FastAPI 프로세스) 밖에서 독립적으로 실행되는 별도 배치 도구이고,
 사이트는 그 결과를 DB에서 조회만 한다 — 사이트가 실시간으로 배민 앱을
 크롤링하지 않는다.
+
+### 결제/구독 연동 (예외 허용, 테스트 모드)
+원래 "실제 결제, 구독... 자동화 금지"였으나, 실 SaaS 전환 로드맵 2번으로
+토스페이먼츠 **테스트 키**(`test_ck_.../test_sk_...`) 연동을 실제로 붙이기로
+결정했다(2026-08-17). 테스트 키는 실제 카드사망을 타지 않아 구조적으로
+진짜 돈이 움직이지 않는다 — 운영 키(`live_ck_.../live_sk_...`) 전환은 완전히
+별도 승인이 필요한 범위 밖이고 아직 하지 않았다. 정기결제(빌링키/자동
+재결제)도 하지 않는다 — 사용자가 매달 수동으로 다시 결제하는 일회성
+결제만 지원한다.
+
+Basic/Pro 플랜 차이를 이번에 처음 실제로 정의했다: 답글 생성 일일 한도
+(Basic 10건, Pro 무제한, `backend/app/routers/reviews.py`의
+`generate_reply`가 강제)와 광고 순위 모니터링(Basic은 프론트에서 잠금,
+`frontend/src/app/(app)/ads/page.tsx`). 결제 승인은 `backend/app/routers/
+billing.py`가 처리한다 — 프론트가 `POST /billing/checkout`으로 서버가
+결정한 금액(`PRO_MONTHLY_PRICE=19900원`)의 주문을 만들고, 토스 결제위젯
+결제 후 `POST /billing/confirm`에서 **금액을 서버 DB에 저장된 값과
+대조 검증한 뒤**(클라이언트가 보낸 금액을 신뢰하지 않음) 토스 승인 API를
+호출한다. 만료 판정은 크론 없이 조회 시점 lazy 판정(`backend/app/
+plan.py`의 `effective_plan`)이고, 모든 날짜 경계는 KST(Asia/Seoul)
+자정 기준이다. 설계 상세는
+`docs/superpowers/specs/2026-08-17-toss-payments-subscription-design.md`
+참고.
 
 ### 카카오 소셜 로그인 (예외 허용)
 원래 "이메일 기반 간단 로그인 구현 (소셜 로그인 제외, 추후 추가)"였으나, 실
@@ -238,13 +262,13 @@ Mock 데이터로만 계산됐으나, 실 SaaS 전환 로드맵 3번의 다음 �
 - users 테이블 컬럼은 최소화: id, email, nickname, phone_hash,
   marketing_agreed, created_at.
 
-## DB 설계 (21개 테이블)
+## DB 설계 (22개 테이블)
 users, stores, platforms, store_platform_connections, subscriptions,
 orders, reviews, review_replies, reply_styles, reply_settings,
 daily_settlements, repurchase_metrics, ad_campaigns,
 ad_performance_metrics, ad_rank_snapshots, alerts, social_accounts,
 signup_verifications, review_sync_jobs, baemin_shop_brands,
-brand_ad_click_metrics.
+brand_ad_click_metrics, payments.
 
 ### 테이블 용도
 - users: 사장 계정. 전화번호는 phone_hash로 비식별화.
@@ -291,6 +315,7 @@ brand_ad_click_metrics.
   원본(노출/클릭/주문/광고비/광고매출). 계정 전체 합산이 아니라 브랜드별로
   완전히 분리 저장한다(우리가게클릭 화면 자체가 브랜드 단위로만 조회되기
   때문). ad_campaigns(카테고리 기반, 광고 순위 모니터링용)와는 별개.
+- payments: 토스페이먼츠 결제 기록(테스트 키). 일회성 결제만, 정기결제 없음.
 
 ### 핵심 관계 (모든 관계에 외래키와 삭제 정책 명시)
 - users 1:N stores
@@ -381,7 +406,7 @@ BrandAdClickMetric(우가클 실데이터) 집계, 현재 순위는 아래 반�
 ## 포함 기능
 대시보드 요약, 매출/입금 기간 토글(1일/1주/1개월/이번달), 리뷰 관리,
 답글 스타일 설정, 주문내역, 재주문율, 광고 성과, 광고 순위 모니터링,
-가게-플랫폼 연결, 구독 플랜.
+가게-플랫폼 연결, 구독 관리(결제 포함).
 
 ## 작업 순서
 1. schema.sql — PostgreSQL 스키마. 16개 테이블, 외래키, ON DELETE 정책 포함.
