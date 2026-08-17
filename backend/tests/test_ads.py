@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 import app.routers.ads as ads_module
 from app.credential_crypto import encrypt_credential
-from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order, StorePlatformConnection
+from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order, StorePlatformConnection, Subscription
 
 
 def make_campaign(db_session, store, current_cpc=400, target_rank=3, shop_no=None):
@@ -23,7 +23,19 @@ def make_campaign(db_session, store, current_cpc=400, target_rank=3, shop_no=Non
     return campaign
 
 
+def _upgrade_to_pro(db_session, user_id):
+    """ads.py의 사용자 세션 라우트 6개가 require_pro_plan 가드를 쓰므로, 이 파일에서
+    실제 데이터 조회 흐름을 검증하는 기존 테스트들은 Pro 구독을 가정해야 회귀하지 않는다
+    (conftest.seeded_user 기본값은 Basic). Basic 유저가 실제로 막히는지는 별도 신규
+    테스트(test_ads_pro_guard.py 성격의 403 테스트들)가 검증한다."""
+    db_session.query(Subscription).filter_by(user_id=user_id).update(
+        {"plan": "pro", "expires_at": date(2099, 1, 1)}
+    )
+    db_session.commit()
+
+
 def test_ads_performance_computes_acos_from_raw_metrics(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     campaign = make_campaign(db_session, seeded_user["store"])
     db_session.add(AdPerformanceMetric(
         campaign_id=campaign.id, metric_date=date.today(),
@@ -41,6 +53,7 @@ def test_ads_performance_computes_acos_from_raw_metrics(client, db_session, seed
 
 
 def test_ads_performance_aggregates_multiple_days(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     campaign = make_campaign(db_session, seeded_user["store"])
     db_session.add_all([
         AdPerformanceMetric(campaign_id=campaign.id, metric_date=date.today(), ad_spend=10_000, clicks=100, ad_orders=10, ad_revenue=200_000),
@@ -55,6 +68,7 @@ def test_ads_performance_aggregates_multiple_days(client, db_session, seeded_use
 
 
 def test_ads_performance_order_share(client, db_session, seeded_user, platforms, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     campaign = make_campaign(db_session, seeded_user["store"])
     db_session.add(AdPerformanceMetric(
         campaign_id=campaign.id, metric_date=date.today(), ad_spend=10_000, clicks=100, ad_orders=20, ad_revenue=400_000,
@@ -71,12 +85,14 @@ def test_ads_performance_order_share(client, db_session, seeded_user, platforms,
 
 
 def test_ads_performance_order_share_none_when_no_orders(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     make_campaign(db_session, seeded_user["store"])
     row = client.get("/ads/performance", headers=auth_headers).json()[0]
     assert row["order_share"] is None
 
 
 def test_rank_monitoring_returns_latest_snapshot_and_recommendation(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     campaign = make_campaign(db_session, seeded_user["store"], target_rank=3)
     db_session.add_all([
         AdRankSnapshot(campaign_id=campaign.id, snapshot_at=datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc),
@@ -94,6 +110,7 @@ def test_rank_monitoring_returns_latest_snapshot_and_recommendation(client, db_s
 
 
 def test_rank_monitoring_no_snapshot_yet(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     make_campaign(db_session, seeded_user["store"])
     row = client.get("/ads/rank-monitoring", headers=auth_headers).json()[0]
     assert row["current_rank"] is None
@@ -101,6 +118,7 @@ def test_rank_monitoring_no_snapshot_yet(client, db_session, seeded_user, auth_h
 
 
 def test_rank_by_distance_returns_points_sorted_by_distance(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     campaign = make_campaign(db_session, seeded_user["store"], target_rank=3)
     db_session.add_all([
         AdRankSnapshot(campaign_id=campaign.id, snapshot_at=datetime(2026, 7, 28, 8, 0, tzinfo=timezone.utc),
@@ -118,6 +136,7 @@ def test_rank_by_distance_returns_points_sorted_by_distance(client, db_session, 
 
 
 def test_rank_by_distance_keeps_only_latest_snapshot_per_point(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     campaign = make_campaign(db_session, seeded_user["store"], target_rank=3)
     db_session.add_all([
         AdRankSnapshot(campaign_id=campaign.id, snapshot_at=datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc),
@@ -133,6 +152,7 @@ def test_rank_by_distance_keeps_only_latest_snapshot_per_point(client, db_sessio
 
 
 def test_rank_by_distance_ignores_time_series_mock_rows(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     campaign = make_campaign(db_session, seeded_user["store"])
     db_session.add(AdRankSnapshot(
         campaign_id=campaign.id, snapshot_at=datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc),
@@ -145,6 +165,7 @@ def test_rank_by_distance_ignores_time_series_mock_rows(client, db_session, seed
 
 
 def test_click_performance_computes_acos_from_real_formula(client, db_session, seeded_user, platforms, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     db_session.add(BrandAdClickMetric(
         store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
         shop_no="14804914", metric_date=date.today(),
@@ -170,6 +191,7 @@ def test_click_performance_computes_acos_from_real_formula(client, db_session, s
 
 
 def test_click_performance_scopes_to_requested_shop_no_only(client, db_session, seeded_user, platforms, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     db_session.add_all([
         BrandAdClickMetric(
             store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
@@ -193,6 +215,7 @@ def test_click_performance_scopes_to_requested_shop_no_only(client, db_session, 
 
 
 def test_click_performance_no_data_returns_zeroed_response(client, db_session, seeded_user, platforms, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     resp = client.get(
         f"/ads/click-performance?store_id={seeded_user['store'].id}&shop_no=99999999&days=30",
         headers=auth_headers,
@@ -290,6 +313,7 @@ def test_ad_campaign_shop_no_can_be_set(db_session, seeded_user):
 
 
 def test_ads_performance_uses_real_brand_click_metrics_when_shop_no_set(client, db_session, seeded_user, platforms, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     from app.models import BrandAdClickMetric
     campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
     db_session.add(BrandAdClickMetric(
@@ -307,6 +331,7 @@ def test_ads_performance_uses_real_brand_click_metrics_when_shop_no_set(client, 
 
 
 def test_ads_performance_ignores_ad_performance_metrics_when_shop_no_set(client, db_session, seeded_user, platforms, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     from app.models import BrandAdClickMetric
     campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
     db_session.add(AdPerformanceMetric(
@@ -326,6 +351,7 @@ def test_ads_performance_ignores_ad_performance_metrics_when_shop_no_set(client,
 
 def test_ads_performance_without_shop_no_still_uses_mock(client, db_session, seeded_user, auth_headers):
     """회귀 테스트 — shop_no 없는 캠페인은 이번 변경으로 전혀 영향받지 않는다."""
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     campaign = make_campaign(db_session, seeded_user["store"])
     db_session.add(AdPerformanceMetric(
         campaign_id=campaign.id, metric_date=date.today(),
@@ -342,6 +368,7 @@ def test_rank_monitoring_uses_real_distance_snapshot_when_shop_no_set(client, db
     행을 시간상 더 오래되게, distance_km NULL(Mock)/비0km 행을 더 최신으로
     심는다. "그냥 가장 최신 스냅샷을 쓴다"는 버그로 후퇴해도 우연히 맞는
     답이 나오지 않도록 하기 위함 — 필터가 없으면 이 테스트는 반드시 실패한다."""
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     campaign = make_campaign(db_session, seeded_user["store"], target_rank=3, shop_no="14804318")
     db_session.add_all([
         # 반경별 실측 스냅샷(distance_km=0) — 시간상 더 오래됐지만 "현재 순위"의 근거가 돼야 함
@@ -364,6 +391,7 @@ def test_rank_monitoring_uses_real_distance_snapshot_when_shop_no_set(client, db
 
 
 def test_rank_monitoring_no_real_snapshot_yet_when_shop_no_set(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     make_campaign(db_session, seeded_user["store"], shop_no="14804318")
     row = client.get("/ads/rank-monitoring", headers=auth_headers).json()[0]
     assert row["current_rank"] is None
@@ -372,6 +400,7 @@ def test_rank_monitoring_no_real_snapshot_yet_when_shop_no_set(client, db_sessio
 
 def test_rank_monitoring_without_shop_no_still_uses_mock_snapshot(client, db_session, seeded_user, auth_headers):
     """회귀 테스트 — shop_no 없는 캠페인은 기존 시간별 Mock 스냅샷 로직 그대로."""
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
     campaign = make_campaign(db_session, seeded_user["store"], target_rank=3)
     db_session.add(AdRankSnapshot(
         campaign_id=campaign.id, snapshot_at=datetime(2026, 7, 25, 10, 0, tzinfo=timezone.utc),
@@ -383,3 +412,28 @@ def test_rank_monitoring_without_shop_no_still_uses_mock_snapshot(client, db_ses
     row = client.get("/ads/rank-monitoring", headers=auth_headers).json()[0]
     assert row["current_rank"] == 7
     assert row["suggested_cpc"] == 700  # Mock 경로는 suggested_cpc를 그대로 줌
+
+
+def test_rank_monitoring_blocked_for_basic_plan(client, db_session, seeded_user, auth_headers):
+    """seeded_user는 conftest 기본값대로 Basic 플랜 그대로 둔다(_upgrade_to_pro 호출 없음).
+    개발자도구로 백엔드를 직접 호출해도 프론트 잠금을 우회할 수 없어야 한다."""
+    make_campaign(db_session, seeded_user["store"])
+    res = client.get("/ads/rank-monitoring", headers=auth_headers)
+    assert res.status_code == 403
+    assert res.json()["detail"]["error_code"] == "pro_required"
+
+
+def test_rank_by_distance_run_blocked_for_basic_plan(client, db_session, seeded_user, auth_headers):
+    """실기기 크롤링을 트리거하는 엔드포인트(3~5분, 실제 컴퓨팅 비용 발생)라 특히
+    Basic 유저가 직접 호출해도 절대 실행되면 안 된다."""
+    campaign = make_campaign(db_session, seeded_user["store"])
+    res = client.post(f"/ads/rank-by-distance/run?campaign_id={campaign.id}", headers=auth_headers)
+    assert res.status_code == 403
+    assert res.json()["detail"]["error_code"] == "pro_required"
+
+
+def test_ads_performance_blocked_for_basic_plan(client, db_session, seeded_user, auth_headers):
+    make_campaign(db_session, seeded_user["store"])
+    res = client.get("/ads/performance", headers=auth_headers)
+    assert res.status_code == 403
+    assert res.json()["detail"]["error_code"] == "pro_required"

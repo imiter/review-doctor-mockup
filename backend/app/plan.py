@@ -9,9 +9,12 @@ import calendar
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from fastapi import Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.auth import get_current_user
+from app.db import get_db
 from app.models import Review, ReviewReply, Store, Subscription, User
 
 KST = ZoneInfo("Asia/Seoul")
@@ -63,3 +66,17 @@ def replies_used_today(user: User, db: Session) -> int:
         )
     )
     return count or 0
+
+
+def require_pro_plan(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+    """Pro 전용 라우트에서 쓰는 FastAPI dependency. 예: 광고 순위 모니터링은 프론트에서만
+    잠그면 개발자도구로 백엔드를 직접 호출해 우회할 수 있으므로(특히 실기기 크롤링을
+    트리거하는 POST /ads/rank-by-distance/run은 실제 컴퓨팅 비용이 발생) 백엔드에서도
+    강제해야 한다."""
+    sub = db.scalar(select(Subscription).where(Subscription.user_id == user.id))
+    if effective_plan(sub) != "pro":
+        raise HTTPException(
+            403,
+            detail={"message": "Pro 플랜 전용 기능입니다.", "error_code": "pro_required"},
+        )
+    return user

@@ -20,7 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.acos import calculate_performance
-from app.auth import get_current_user, get_user_default_store_id
+from app.auth import get_user_default_store_id
 from app.credential_crypto import decrypt_credential
 from app.db import SessionLocal, get_db
 from app.models import (
@@ -34,6 +34,7 @@ from app.models import (
     StorePlatformConnection,
     User,
 )
+from app.plan import require_pro_plan
 from scrapers.baemin_auth import login as baemin_login
 from scrapers.baemin_stats import fetch_shop_info
 from scripts.ingest_rank_snapshots import ingest as ingest_csv
@@ -94,7 +95,7 @@ def _latest_distance_points(db: Session, campaign: AdCampaign) -> list[dict]:
 def ads_performance(
     store_id: int | None = None,
     days: int = Query(14, ge=1, le=90),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_pro_plan),
     db: Session = Depends(get_db),
 ):
     sid = store_id or get_user_default_store_id(user, db)
@@ -161,7 +162,7 @@ def ads_click_performance(
     shop_no: str,
     store_id: int | None = None,
     days: int = Query(14, ge=1, le=90),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_pro_plan),
     db: Session = Depends(get_db),
 ):
     """브랜드(shop_no) 단위 우리가게클릭 실데이터 성과. 기존 `/ads/performance`
@@ -210,7 +211,7 @@ def ads_click_performance(
 @router.get("/ads/rank-by-distance")
 def ads_rank_by_distance(
     store_id: int | None = None,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_pro_plan),
     db: Session = Depends(get_db),
 ):
     """가게 기준 반경별(0km/1.5~2.5km/2.5~3.5km) 카테고리 순위.
@@ -394,7 +395,7 @@ def _campaign_for_user(campaign_id: int, user: User, db: Session) -> AdCampaign:
 def ads_rank_by_distance_run(
     campaign_id: int,
     background_tasks: BackgroundTasks,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_pro_plan),
     db: Session = Depends(get_db),
 ):
     """반경별 순위 실측을 시작만 시키고 즉시 반환한다({"status": "started"}).
@@ -432,7 +433,7 @@ def ads_rank_by_distance_run(
 @router.get("/ads/rank-by-distance/run/status")
 def ads_rank_by_distance_run_status(
     campaign_id: int,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_pro_plan),
     db: Session = Depends(get_db),
 ):
     """/ads/rank-by-distance/run이 시작시킨 크롤의 진행 상황을 조회한다.
@@ -467,7 +468,7 @@ def ads_rank_by_distance_run_status(
 @router.get("/ads/rank-monitoring")
 def ads_rank_monitoring(
     store_id: int | None = None,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_pro_plan),
     db: Session = Depends(get_db),
 ):
     sid = store_id or get_user_default_store_id(user, db)

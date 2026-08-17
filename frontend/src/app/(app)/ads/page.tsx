@@ -72,9 +72,12 @@ export default function AdsPage() {
 
   useEffect(() => {
     if (!storeId || (billing && !billing.is_pro)) return;
-    apiGet<RankRow[]>(`/ads/rank-monitoring?store_id=${storeId}`).then(setRanks);
-    apiGet<DistanceRankRow[]>(`/ads/rank-by-distance?store_id=${storeId}`).then(setDistanceRanks);
-    apiGet<PerformanceRow[]>(`/ads/performance?store_id=${storeId}&days=14`).then(setPerformance);
+    // 백엔드도 이 라우트들을 Pro 전용으로 막는다(403). billing 상태가 아직 로딩
+    // 중이거나 낡은 값일 때 요청이 나가 403을 받을 수 있어, unhandled promise
+    // rejection으로 화면이 깨지지 않도록 조용히 무시한다.
+    apiGet<RankRow[]>(`/ads/rank-monitoring?store_id=${storeId}`).then(setRanks).catch(() => {});
+    apiGet<DistanceRankRow[]>(`/ads/rank-by-distance?store_id=${storeId}`).then(setDistanceRanks).catch(() => {});
+    apiGet<PerformanceRow[]>(`/ads/performance?store_id=${storeId}&days=14`).then(setPerformance).catch(() => {});
   }, [storeId, billing]);
 
   // 크롤은 3~5분 걸리는데, 배포 환경(Railway) 앞단 프록시가 오래 걸리는 요청을
