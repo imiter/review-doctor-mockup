@@ -6,12 +6,21 @@ import { apiGet, clearToken, getToken } from "@/lib/api";
 
 type MeResponse = { id: number; email: string | null; nickname: string; has_phone: boolean; marketing_agreed: boolean };
 type StoreOption = { id: number; name: string; category: string };
+type BillingResponse = {
+  plan: string;
+  is_pro: boolean;
+  expires_at: string | null;
+  daily_reply_limit: number;
+  replies_used_today: number;
+};
 
 type StoreContextValue = {
   user: MeResponse | null;
   stores: StoreOption[];
   storeId: number | null;
   setStoreId: (id: number) => void;
+  billing: BillingResponse | null;
+  refreshBilling: () => Promise<void>;
   ready: boolean;
   logout: () => void;
   refreshUser: () => Promise<void>;
@@ -24,6 +33,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<MeResponse | null>(null);
   const [stores, setStores] = useState<StoreOption[]>([]);
   const [storeId, setStoreIdState] = useState<number | null>(null);
+  const [billing, setBilling] = useState<BillingResponse | null>(null);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -31,10 +41,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       router.replace("/login");
       return;
     }
-    Promise.all([apiGet<MeResponse>("/auth/me"), apiGet<StoreOption[]>("/stores")])
-      .then(([me, storeList]) => {
+    Promise.all([
+      apiGet<MeResponse>("/auth/me"),
+      apiGet<StoreOption[]>("/stores"),
+      apiGet<BillingResponse>("/billing/me"),
+    ])
+      .then(([me, storeList, billingInfo]) => {
         setUser(me);
         setStores(storeList);
+        setBilling(billingInfo);
         const saved = Number(window.localStorage.getItem("dris_store_id"));
         const initial = storeList.find((s) => s.id === saved)?.id ?? storeList[0]?.id ?? null;
         setStoreIdState(initial);
@@ -57,8 +72,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setUser(await apiGet<MeResponse>("/auth/me"));
   }, []);
 
+  const refreshBilling = useCallback(async () => {
+    setBilling(await apiGet<BillingResponse>("/billing/me"));
+  }, []);
+
   return (
-    <StoreContext.Provider value={{ user, stores, storeId, setStoreId, ready, logout, refreshUser }}>
+    <StoreContext.Provider
+      value={{ user, stores, storeId, setStoreId, billing, refreshBilling, ready, logout, refreshUser }}
+    >
       {children}
     </StoreContext.Provider>
   );

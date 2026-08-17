@@ -16,9 +16,11 @@ export function clearToken() {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  errorCode?: string;
+  constructor(status: number, message: string, errorCode?: string) {
     super(message);
     this.status = status;
+    this.errorCode = errorCode;
   }
 }
 
@@ -43,7 +45,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body.detail ?? `요청 실패 (${res.status})`);
+    const detail = body.detail;
+    const message = typeof detail === "string" ? detail : (detail?.message ?? `요청 실패 (${res.status})`);
+    const errorCode = typeof detail === "object" && detail !== null ? detail.error_code : undefined;
+    throw new ApiError(res.status, message, errorCode);
   }
   if (res.status === 204) return undefined as T;
   return res.json();

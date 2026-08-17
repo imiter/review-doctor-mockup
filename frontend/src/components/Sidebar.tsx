@@ -55,6 +55,12 @@ const ICONS = {
       <path d="M4 17c0-3 3-5 6-5s6 2 6 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   ),
+  billing: (
+    <svg viewBox="0 0 20 20" fill="none" className="h-4.5 w-4.5">
+      <rect x="2.5" y="5" width="15" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M2.5 8.5h15" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  ),
 };
 
 type NavItem = { href: string; label: string; icon: keyof typeof ICONS };
@@ -83,6 +89,7 @@ const NAV: NavSection[] = [
     items: [
       { href: "/account/stores", label: "가게 연결", icon: "store" },
       { href: "/account/profile", label: "계정 관리", icon: "account" },
+      { href: "/account/billing", label: "구독 관리", icon: "billing" },
     ],
   },
 ];
