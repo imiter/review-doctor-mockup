@@ -3,7 +3,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import ads, auth, dashboard, orders, reply_settings, reviews, sales, store_connections
+from app.routers import ads, auth, billing, dashboard, orders, reply_settings, reviews, sales, store_connections
 
 app = FastAPI(title="Delivery Review & Store Insight MVP")
 
@@ -32,3 +32,4 @@ app.include_router(ads.router)
 app.include_router(sales.router)
 app.include_router(reply_settings.router)
 app.include_router(store_connections.router)
+app.include_router(billing.router)
