@@ -62,8 +62,31 @@ class ConfirmRequest(BaseModel):
 
 class ConfirmResponse(BaseModel):
     status: str
-    plan: str
-    expires_at: date
+    plan: str | None = None
+    expires_at: date | None = None
+    bank_code: str | None = None
+    account_number: str | None = None
+    due_date: str | None = None
+
+
+def _approve_payment(payment: Payment, db: Session) -> Subscription:
+    """토스가 실제로 결제/입금을 확인해준 뒤에만 호출한다. confirm()의 즉시결제
+    경로(카드 등)와 webhook()의 가상계좌 입금완료 경로가 이 함수를 공유한다 —
+    구독 승인 로직을 두 곳에 따로 만들지 않기 위함."""
+    payment.status = "approved"
+    payment.approved_at = datetime.now(timezone.utc)
+
+    sub = db.scalar(select(Subscription).where(Subscription.user_id == payment.user_id))
+    if sub is None:
+        sub = Subscription(user_id=payment.user_id, plan="basic", daily_reply_limit=10, started_at=kst_today())
+        db.add(sub)
+        db.flush()
+
+    today = kst_today()
+    base = sub.expires_at if (sub.expires_at is not None and sub.expires_at > today) else today
+    sub.plan = "pro"
+    sub.expires_at = add_one_month(base)
+    return sub
 
 
 @router.post("/billing/confirm", response_model=ConfirmResponse)
@@ -78,8 +101,6 @@ def confirm(body: ConfirmRequest, user: User = Depends(get_current_user), db: Se
 
     try:
         result = confirm_payment(payment_key=body.payment_key, order_id=payment.order_id, amount=payment.amount)
-        if result.get("status") != "DONE" or result.get("totalAmount") != payment.amount:
-            raise TossConfirmError(f"결제가 완료되지 않았습니다 (status={result.get('status')})")
     except TossTransportError:
         # 토스한테 물어보지도 못한 상황(타임아웃/설정 오류) — payment는 pending으로
         # 남겨둬서 재시도 가능하게 한다. 내부 설정값이 노출되지 않게 메시지는 일반화한다.
@@ -90,21 +111,30 @@ def confirm(body: ConfirmRequest, user: User = Depends(get_current_user), db: Se
         db.commit()
         raise HTTPException(402, "결제가 완료되지 않았습니다. 다시 시도해주세요.")
 
-    payment.status = "approved"
+    status = result.get("status")
+
+    if status == "WAITING_FOR_DEPOSIT":
+        # 가상계좌 — 아직 입금 전. 실패가 아니라 대기 상태다. 웹훅(POST /billing/webhook)이
+        # 나중에 입금 완료를 알려주면 그때 _approve_payment를 호출한다.
+        va = result.get("virtualAccount") or {}
+        payment.virtual_account_secret = va.get("secret")
+        payment.toss_payment_key = body.payment_key
+        db.commit()
+        return ConfirmResponse(
+            status="waiting_for_deposit",
+            bank_code=va.get("bankCode"),
+            account_number=va.get("accountNumber"),
+            due_date=va.get("dueDate"),
+        )
+
+    if status != "DONE" or result.get("totalAmount") != payment.amount:
+        payment.status = "failed"
+        payment.fail_reason = f"status={status}"[:200]
+        db.commit()
+        raise HTTPException(402, "결제가 완료되지 않았습니다. 다시 시도해주세요.")
+
     payment.toss_payment_key = body.payment_key
-    payment.approved_at = datetime.now(timezone.utc)
-
-    sub = db.scalar(select(Subscription).where(Subscription.user_id == user.id))
-    if sub is None:
-        sub = Subscription(user_id=user.id, plan="basic", daily_reply_limit=10, started_at=kst_today())
-        db.add(sub)
-        db.flush()
-
-    today = kst_today()
-    base = sub.expires_at if (sub.expires_at is not None and sub.expires_at > today) else today
-    sub.plan = "pro"
-    sub.expires_at = add_one_month(base)
-
+    sub = _approve_payment(payment, db)
     db.commit()
     return ConfirmResponse(status="approved", plan=sub.plan, expires_at=sub.expires_at)
 

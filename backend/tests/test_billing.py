@@ -167,13 +167,14 @@ def test_confirm_toss_failure_marks_payment_failed_without_upgrading(client, db_
 
 
 def test_confirm_rejects_when_toss_status_is_not_done(client, db_session, seeded_user, auth_headers, monkeypatch):
-    """가상계좌 등 status가 DONE이 아닌 응답(예: WAITING_FOR_DEPOSIT)은 HTTP 200이라도
-    승인 실패로 처리해야 한다 — 돈을 실제로 받았다는 확인 없이 Pro로 올리면 안 된다."""
+    """status가 DONE도 WAITING_FOR_DEPOSIT(가상계좌 입금 대기)도 아닌 응답(예: ABORTED)은
+    HTTP 200이라도 승인 실패로 처리해야 한다 — 돈을 실제로 받았다는 확인 없이 Pro로 올리면 안 된다.
+    (WAITING_FOR_DEPOSIT 전용 분기는 test_confirm_waiting_for_deposit_does_not_fail_or_approve 참고)"""
     checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
 
     monkeypatch.setattr(
         "app.routers.billing.confirm_payment",
-        lambda **kw: {"status": "WAITING_FOR_DEPOSIT", "totalAmount": 19900},
+        lambda **kw: {"status": "ABORTED", "totalAmount": 19900},
     )
 
     res = client.post(
@@ -213,6 +214,57 @@ def test_confirm_transport_error_leaves_payment_pending_for_retry(client, db_ses
 
     sub = db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).one()
     assert sub.plan == "basic"
+
+
+def test_confirm_waiting_for_deposit_does_not_fail_or_approve(client, db_session, seeded_user, auth_headers, monkeypatch):
+    checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
+
+    def fake_confirm(payment_key, order_id, amount):
+        return {
+            "status": "WAITING_FOR_DEPOSIT",
+            "virtualAccount": {
+                "secret": "va-secret-abc",
+                "bankCode": "20",
+                "accountNumber": "1234567890",
+                "dueDate": "2026-08-25T23:59:59",
+            },
+        }
+
+    monkeypatch.setattr("app.routers.billing.confirm_payment", fake_confirm)
+
+    res = client.post(
+        "/billing/confirm",
+        json={"order_id": checkout["order_id"], "payment_key": "va-pk", "amount": 19900},
+        headers=auth_headers,
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "waiting_for_deposit"
+    assert body["account_number"] == "1234567890"
+
+    payment = db_session.query(Payment).filter_by(order_id=checkout["order_id"]).one()
+    assert payment.status == "pending"  # 실패도 승인도 아님 — 웹훅을 기다리는 중
+    assert payment.virtual_account_secret == "va-secret-abc"
+
+    sub = db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).one()
+    assert sub.plan == "basic"  # 아직 안 바뀜
+
+
+def test_confirm_still_rejects_non_done_non_waiting_status(client, db_session, seeded_user, auth_headers, monkeypatch):
+    checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
+    monkeypatch.setattr(
+        "app.routers.billing.confirm_payment",
+        lambda **kw: {"status": "ABORTED", "totalAmount": 19900},
+    )
+
+    res = client.post(
+        "/billing/confirm",
+        json={"order_id": checkout["order_id"], "payment_key": "pk", "amount": 19900},
+        headers=auth_headers,
+    )
+    assert res.status_code == 402
+    payment = db_session.query(Payment).filter_by(order_id=checkout["order_id"]).one()
+    assert payment.status == "failed"
 
 
 def test_billing_history_returns_users_payments_newest_first(client, db_session, seeded_user, auth_headers):
