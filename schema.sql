@@ -392,16 +392,17 @@ CREATE TABLE brand_ad_click_metrics (
 -- 22. payments — 토스페이먼츠 결제(테스트 키). 일회성 결제만, 정기결제 없음.
 -- ----------------------------------------------------------------------------
 CREATE TABLE payments (
-    id               BIGSERIAL PRIMARY KEY,
-    user_id          BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    order_id         VARCHAR(64) NOT NULL UNIQUE,
-    plan             VARCHAR(10) NOT NULL DEFAULT 'pro',
-    amount           INT         NOT NULL,
-    status           VARCHAR(10) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'failed')),
-    toss_payment_key VARCHAR(200),
-    fail_reason      VARCHAR(200),
-    requested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    approved_at      TIMESTAMPTZ
+    id                     BIGSERIAL PRIMARY KEY,
+    user_id                BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    order_id               VARCHAR(64) NOT NULL UNIQUE,
+    plan                   VARCHAR(10) NOT NULL DEFAULT 'pro',
+    amount                 INT         NOT NULL,
+    status                 VARCHAR(10) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'failed')),
+    toss_payment_key       VARCHAR(200),
+    fail_reason            VARCHAR(200),
+    virtual_account_secret VARCHAR(64),  -- 가상계좌 결제일 때만 채워짐. 웹훅(DEPOSIT_CALLBACK) 검증용.
+    requested_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    approved_at            TIMESTAMPTZ
 );
 
 CREATE INDEX idx_payments_user ON payments(user_id);

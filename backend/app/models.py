@@ -116,6 +116,7 @@ class Payment(Base):
     status: Mapped[str] = mapped_column(String(10), default="pending")
     toss_payment_key: Mapped[str | None] = mapped_column(String(200))
     fail_reason: Mapped[str | None] = mapped_column(String(200))
+    virtual_account_secret: Mapped[str | None] = mapped_column(String(64))
     requested_at: Mapped[datetime]
     approved_at: Mapped[datetime | None]
 
