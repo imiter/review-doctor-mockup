@@ -90,6 +90,35 @@ def test_confirm_rejects_amount_mismatch_without_calling_toss(client, db_session
     assert payment.status == "pending"  # 건드리지 않음
 
 
+def test_confirm_second_call_for_same_order_id_does_not_double_extend(client, db_session, seeded_user, auth_headers, monkeypatch):
+    """동시성 레이스(TOCTOU) 회귀 테스트: 같은 order_id로 confirm이 두 번 들어와도
+    두 번째 호출이 status != "pending" 체크에 걸려 거부되고, 구독이 1회분만 연장돼야 한다.
+    실제 동시 요청(멀티스레드)은 이 하네스로 재현하기 어려워 순차 호출로 대신 검증한다."""
+    checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
+    monkeypatch.setattr("app.routers.billing.confirm_payment", lambda **kw: {"status": "DONE"})
+
+    first = client.post(
+        "/billing/confirm",
+        json={"order_id": checkout["order_id"], "payment_key": "pk1", "amount": 19900},
+        headers=auth_headers,
+    )
+    assert first.status_code == 200
+    first_expires_at = first.json()["expires_at"]
+
+    second = client.post(
+        "/billing/confirm",
+        json={"order_id": checkout["order_id"], "payment_key": "pk2", "amount": 19900},
+        headers=auth_headers,
+    )
+    assert second.status_code == 400
+
+    sub = db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).one()
+    assert sub.expires_at.isoformat() == first_expires_at  # 두 번째 호출로 추가 연장되지 않음
+
+    payment = db_session.query(Payment).filter_by(order_id=checkout["order_id"]).one()
+    assert payment.toss_payment_key == "pk1"  # 두 번째 payment_key로 덮어써지지 않음
+
+
 def test_confirm_rejects_other_users_order_id(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
     from app.models import Store, Subscription as SubscriptionModel, User
 

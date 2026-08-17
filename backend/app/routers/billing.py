@@ -68,7 +68,7 @@ class ConfirmResponse(BaseModel):
 
 @router.post("/billing/confirm", response_model=ConfirmResponse)
 def confirm(body: ConfirmRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    payment = db.scalar(select(Payment).where(Payment.order_id == body.order_id))
+    payment = db.scalar(select(Payment).where(Payment.order_id == body.order_id).with_for_update())
     if payment is None or payment.user_id != user.id:
         raise HTTPException(404, "결제 요청을 찾을 수 없습니다")
     if payment.status != "pending":
