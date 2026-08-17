@@ -84,3 +84,34 @@ def test_replies_used_today_counts_only_this_user_and_today(db_session, seeded_u
     db_session.commit()
 
     assert replies_used_today(seeded_user["user"], db_session) == 2
+
+
+def test_replies_used_today_ignores_final_and_secondary_reply_types(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """'답글 생성 하루 N건' 한도는 AI 답글 생성(ai_draft)만 의미한다. 리뷰 하나에
+    ai_draft(초안 생성) + final(최종 저장)이 함께 생겨도 한도는 1번만 깎여야 한다 —
+    final/secondary까지 세면 리뷰 하나 처리에 한도가 두 번 깎여 실질 한도가 반토막난다."""
+    import app.plan as plan_module
+    monkeypatch.setattr(plan_module, "datetime", _FrozenDatetime)
+
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="테스트", rating=5, content="좋아요", customer_nickname="손님",
+        created_at=_FrozenDatetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.flush()
+
+    now_utc = _FrozenDatetime.now(timezone.utc)
+    db_session.add_all([
+        ReviewReply(review_id=review.id, reply_type="final", content="최종 저장1", created_at=now_utc),
+        ReviewReply(review_id=review.id, reply_type="final", content="최종 저장2", created_at=now_utc),
+        ReviewReply(review_id=review.id, reply_type="secondary", content="2차 답글", created_at=now_utc),
+    ])
+    db_session.commit()
+
+    assert replies_used_today(seeded_user["user"], db_session) == 0
+
+    db_session.add(ReviewReply(review_id=review.id, reply_type="ai_draft", content="초안", created_at=now_utc))
+    db_session.commit()
+
+    assert replies_used_today(seeded_user["user"], db_session) == 1
