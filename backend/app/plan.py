@@ -6,7 +6,7 @@ date.today()를 직접 쓰지 말고 kst_today()를 통해서만 "오늘"을 구
 """
 
 import calendar
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
@@ -40,7 +40,8 @@ def effective_plan(sub: Subscription | None) -> str:
 
 
 def _kst_today_range() -> tuple[datetime, datetime]:
-    start = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_kst = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = start_kst.astimezone(timezone.utc)
     return start, start + timedelta(days=1)
 
 

@@ -56,14 +56,15 @@ def test_replies_used_today_counts_only_this_user_and_today(db_session, seeded_u
     db_session.add_all([review, other_review])
     db_session.flush()
 
-    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
-    yesterday_kst = now_kst.replace(hour=12) - timedelta(days=1)
+    # 프로덕션 코드(generate_reply)처럼 UTC-aware로 삽입
+    now_utc = datetime.now(timezone.utc)
+    yesterday_utc = now_utc.replace(hour=12) - timedelta(days=1)
 
     db_session.add_all([
-        ReviewReply(review_id=review.id, reply_type="ai_draft", content="오늘 답글1", created_at=now_kst),
-        ReviewReply(review_id=review.id, reply_type="ai_draft", content="오늘 답글2", created_at=now_kst),
-        ReviewReply(review_id=review.id, reply_type="ai_draft", content="어제 답글", created_at=yesterday_kst),
-        ReviewReply(review_id=other_review.id, reply_type="ai_draft", content="남의 답글", created_at=now_kst),
+        ReviewReply(review_id=review.id, reply_type="ai_draft", content="오늘 답글1", created_at=now_utc),
+        ReviewReply(review_id=review.id, reply_type="ai_draft", content="오늘 답글2", created_at=now_utc),
+        ReviewReply(review_id=review.id, reply_type="ai_draft", content="어제 답글", created_at=yesterday_utc),
+        ReviewReply(review_id=other_review.id, reply_type="ai_draft", content="남의 답글", created_at=now_utc),
     ])
     db_session.commit()
 
