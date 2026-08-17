@@ -1,3 +1,4 @@
+import hmac
 import uuid
 from datetime import date, datetime, timezone
 
@@ -179,7 +180,7 @@ def billing_webhook(body: WebhookPayload, db: Session = Depends(get_db)):
         return {"received": True}
     if payment.status != "pending":
         return {"received": True}
-    if not payment.virtual_account_secret or payment.virtual_account_secret != body.secret:
+    if not payment.virtual_account_secret or not hmac.compare_digest(payment.virtual_account_secret, body.secret or ""):
         return {"received": True}
 
     if body.status in _DEPOSIT_DONE_STATUSES:
