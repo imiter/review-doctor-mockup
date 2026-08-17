@@ -2,7 +2,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from app.models import Payment, Subscription
 from app.plan import add_one_month, kst_today
-from app.toss_client import TossConfirmError
+from app.toss_client import TossConfirmError, TossTransportError
 
 
 def test_billing_me_basic_default(client, seeded_user, auth_headers):
@@ -32,7 +32,7 @@ def test_confirm_success_upgrades_subscription(client, db_session, seeded_user, 
     def fake_confirm(payment_key, order_id, amount):
         assert order_id == checkout["order_id"]
         assert amount == 19900
-        return {"status": "DONE"}
+        return {"status": "DONE", "totalAmount": 19900}
 
     monkeypatch.setattr("app.routers.billing.confirm_payment", fake_confirm)
 
@@ -61,7 +61,7 @@ def test_confirm_extends_existing_pro_period_instead_of_resetting(client, db_ses
     db_session.commit()
 
     checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
-    monkeypatch.setattr("app.routers.billing.confirm_payment", lambda **kw: {"status": "DONE"})
+    monkeypatch.setattr("app.routers.billing.confirm_payment", lambda **kw: {"status": "DONE", "totalAmount": 19900})
 
     res = client.post(
         "/billing/confirm",
@@ -76,7 +76,7 @@ def test_confirm_extends_existing_pro_period_instead_of_resetting(client, db_ses
 def test_confirm_rejects_amount_mismatch_without_calling_toss(client, db_session, seeded_user, auth_headers, monkeypatch):
     checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
     called = []
-    monkeypatch.setattr("app.routers.billing.confirm_payment", lambda **kw: called.append(kw) or {"status": "DONE"})
+    monkeypatch.setattr("app.routers.billing.confirm_payment", lambda **kw: called.append(kw) or {"status": "DONE", "totalAmount": 19900})
 
     res = client.post(
         "/billing/confirm",
@@ -95,7 +95,7 @@ def test_confirm_second_call_for_same_order_id_does_not_double_extend(client, db
     두 번째 호출이 status != "pending" 체크에 걸려 거부되고, 구독이 1회분만 연장돼야 한다.
     실제 동시 요청(멀티스레드)은 이 하네스로 재현하기 어려워 순차 호출로 대신 검증한다."""
     checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
-    monkeypatch.setattr("app.routers.billing.confirm_payment", lambda **kw: {"status": "DONE"})
+    monkeypatch.setattr("app.routers.billing.confirm_payment", lambda **kw: {"status": "DONE", "totalAmount": 19900})
 
     first = client.post(
         "/billing/confirm",
@@ -134,7 +134,7 @@ def test_confirm_rejects_other_users_order_id(client, db_session, seeded_user, p
     ))
     db_session.commit()
 
-    monkeypatch.setattr("app.routers.billing.confirm_payment", lambda **kw: {"status": "DONE"})
+    monkeypatch.setattr("app.routers.billing.confirm_payment", lambda **kw: {"status": "DONE", "totalAmount": 19900})
     res = client.post(
         "/billing/confirm",
         json={"order_id": "other-order", "payment_key": "pk", "amount": 19900},
@@ -161,6 +161,55 @@ def test_confirm_toss_failure_marks_payment_failed_without_upgrading(client, db_
     payment = db_session.query(Payment).filter_by(order_id=checkout["order_id"]).one()
     assert payment.status == "failed"
     assert "카드사" in payment.fail_reason
+
+    sub = db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).one()
+    assert sub.plan == "basic"
+
+
+def test_confirm_rejects_when_toss_status_is_not_done(client, db_session, seeded_user, auth_headers, monkeypatch):
+    """가상계좌 등 status가 DONE이 아닌 응답(예: WAITING_FOR_DEPOSIT)은 HTTP 200이라도
+    승인 실패로 처리해야 한다 — 돈을 실제로 받았다는 확인 없이 Pro로 올리면 안 된다."""
+    checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
+
+    monkeypatch.setattr(
+        "app.routers.billing.confirm_payment",
+        lambda **kw: {"status": "WAITING_FOR_DEPOSIT", "totalAmount": 19900},
+    )
+
+    res = client.post(
+        "/billing/confirm",
+        json={"order_id": checkout["order_id"], "payment_key": "pk", "amount": 19900},
+        headers=auth_headers,
+    )
+    assert res.status_code == 402
+
+    payment = db_session.query(Payment).filter_by(order_id=checkout["order_id"]).one()
+    assert payment.status == "failed"
+
+    sub = db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).one()
+    assert sub.plan == "basic"  # Pro로 올라가면 안 됨
+
+
+def test_confirm_transport_error_leaves_payment_pending_for_retry(client, db_session, seeded_user, auth_headers, monkeypatch):
+    """네트워크 타임아웃/설정 오류 등 토스한테 물어보지도 못한 상황은 진짜 거절과
+    달리 payment.status를 "failed"로 확정하면 안 된다 — pending으로 남겨서 재시도 가능하게."""
+    checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
+
+    def fake_confirm(**kw):
+        raise TossTransportError("토스 API 호출 실패: timeout")
+
+    monkeypatch.setattr("app.routers.billing.confirm_payment", fake_confirm)
+
+    res = client.post(
+        "/billing/confirm",
+        json={"order_id": checkout["order_id"], "payment_key": "pk", "amount": 19900},
+        headers=auth_headers,
+    )
+    assert res.status_code == 503
+    assert "TOSS_SECRET_KEY" not in res.text  # 내부 설정값 이름이 사용자 메시지에 노출되면 안 됨
+
+    payment = db_session.query(Payment).filter_by(order_id=checkout["order_id"]).one()
+    assert payment.status == "pending"  # 재시도 가능한 상태로 남아있어야 함
 
     sub = db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).one()
     assert sub.plan == "basic"

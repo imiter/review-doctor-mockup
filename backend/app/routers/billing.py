@@ -10,7 +10,7 @@ from app.auth import get_current_user
 from app.db import get_db
 from app.models import Payment, Subscription, User
 from app.plan import PRO_MONTHLY_PRICE, add_one_month, effective_plan, kst_today, replies_used_today
-from app.toss_client import TossConfirmError, confirm_payment
+from app.toss_client import TossConfirmError, TossTransportError, confirm_payment
 
 router = APIRouter(tags=["billing"])
 
@@ -77,12 +77,18 @@ def confirm(body: ConfirmRequest, user: User = Depends(get_current_user), db: Se
         raise HTTPException(400, "결제 금액이 일치하지 않습니다")
 
     try:
-        confirm_payment(payment_key=body.payment_key, order_id=payment.order_id, amount=payment.amount)
+        result = confirm_payment(payment_key=body.payment_key, order_id=payment.order_id, amount=payment.amount)
+        if result.get("status") != "DONE" or result.get("totalAmount") != payment.amount:
+            raise TossConfirmError(f"결제가 완료되지 않았습니다 (status={result.get('status')})")
+    except TossTransportError:
+        # 토스한테 물어보지도 못한 상황(타임아웃/설정 오류) — payment는 pending으로
+        # 남겨둬서 재시도 가능하게 한다. 내부 설정값이 노출되지 않게 메시지는 일반화한다.
+        raise HTTPException(503, "결제 확인 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
     except TossConfirmError as e:
         payment.status = "failed"
         payment.fail_reason = str(e)[:200]
         db.commit()
-        raise HTTPException(402, f"결제 승인 실패: {e}")
+        raise HTTPException(402, "결제가 완료되지 않았습니다. 다시 시도해주세요.")
 
     payment.status = "approved"
     payment.toss_payment_key = body.payment_key
