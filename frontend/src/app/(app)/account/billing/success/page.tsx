@@ -22,15 +22,26 @@ export default function BillingSuccessPage() {
       return;
     }
 
+    // StrictMode의 effect 이중 마운트(dev 환경) 또는 컴포넌트 재실행 시, 먼저 날아간
+    // 요청의 응답이 나중에 도착해 이미 확정된 화면 상태를 덮어쓰지 않도록 가드한다
+    // (billing/page.tsx의 cancelled 컨벤션과 동일).
+    let cancelled = false;
+
     apiPost("/billing/confirm", { order_id: orderId, payment_key: paymentKey, amount: Number(amount) })
       .then(async () => {
         await refreshBilling();
+        if (cancelled) return;
         setState("done");
       })
       .catch((e) => {
+        if (cancelled) return;
         setState("error");
         setMessage(e instanceof ApiError ? e.message : "결제 승인 중 오류가 발생했습니다.");
       });
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
