@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from app.models import Review
+from app.models import Review, Subscription
 
 
 def make_review(db_session, store, platforms, rating, content="테스트 리뷰"):
@@ -160,3 +160,27 @@ def test_reviews_date_from_only_includes_everything_after(client, db_session, se
 def test_reviews_invalid_date_format_returns_400(client, seeded_user, auth_headers):
     res = client.get("/reviews?date_from=2026/02/01", headers=auth_headers)
     assert res.status_code == 400
+
+
+def test_generate_reply_blocks_after_daily_limit_for_basic_plan(client, db_session, seeded_user, platforms, reply_styles, auth_headers):
+    reviews = [make_review(db_session, seeded_user["store"], platforms, rating=5) for _ in range(11)]
+
+    for review in reviews[:10]:
+        res = client.post(f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers)
+        assert res.status_code == 200
+
+    res = client.post(f"/reviews/{reviews[10].id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers)
+    assert res.status_code == 403
+    assert res.json()["detail"]["error_code"] == "reply_limit_exceeded"
+
+
+def test_generate_reply_unlimited_for_pro_plan(client, db_session, seeded_user, platforms, reply_styles, auth_headers):
+    db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).update(
+        {"plan": "pro", "expires_at": date(2099, 1, 1)}
+    )
+    db_session.commit()
+
+    reviews = [make_review(db_session, seeded_user["store"], platforms, rating=5) for _ in range(11)]
+    for review in reviews:
+        res = client.post(f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers)
+        assert res.status_code == 200

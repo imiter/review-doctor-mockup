@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
-from app.models import ReplyStyle, Review, ReviewReply, Store, User
+from app.models import ReplyStyle, Review, ReviewReply, Store, Subscription, User
+from app.plan import effective_plan, replies_used_today
 
 router = APIRouter(tags=["reviews"])
 
@@ -116,6 +117,15 @@ def generate_reply(
     style = db.get(ReplyStyle, body.style_id)
     if style is None:
         raise HTTPException(404, "답글 스타일 없음")
+
+    sub = db.scalar(select(Subscription).where(Subscription.user_id == user.id))
+    if effective_plan(sub) == "basic":
+        limit = sub.daily_reply_limit if sub else 10
+        if replies_used_today(user, db) >= limit:
+            raise HTTPException(
+                403,
+                detail={"message": "오늘 답글 생성 한도를 모두 사용했어요. Pro는 무제한이에요.", "error_code": "reply_limit_exceeded"},
+            )
 
     template = {"low": style.template_low, "mid": style.template_mid, "high": style.template_high}[_band(review.rating)]
     content = _fill_template(template, review, review.store)
