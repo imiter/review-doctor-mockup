@@ -156,3 +156,38 @@ def billing_history(user: User = Depends(get_current_user), db: Session = Depend
         select(Payment).where(Payment.user_id == user.id).order_by(Payment.requested_at.desc())
     ).all()
     return list(payments)
+
+
+_DEPOSIT_DONE_STATUSES = {"DONE"}
+_DEPOSIT_FAILED_STATUSES = {"CANCELED", "EXPIRED", "PARTIAL_CANCELED", "ABORTED"}
+
+
+class WebhookPayload(BaseModel):
+    orderId: str
+    secret: str | None = None
+    status: str
+
+
+@router.post("/billing/webhook")
+def billing_webhook(body: WebhookPayload, db: Session = Depends(get_db)):
+    """토스가 가상계좌 입금 완료/취소 시 서버-투-서버로 호출한다(로그인 세션 없음).
+    알 수 없는 요청은 절대 4xx/5xx를 주지 않고 항상 200으로 조용히 무시한다 —
+    위조된 orderId로 상태를 캐내는 오라클이 되지 않도록, 그리고 토스가 불필요하게
+    재시도하지 않도록."""
+    payment = db.scalar(select(Payment).where(Payment.order_id == body.orderId).with_for_update())
+    if payment is None:
+        return {"received": True}
+    if payment.status != "pending":
+        return {"received": True}
+    if not payment.virtual_account_secret or payment.virtual_account_secret != body.secret:
+        return {"received": True}
+
+    if body.status in _DEPOSIT_DONE_STATUSES:
+        _approve_payment(payment, db)
+        db.commit()
+    elif body.status in _DEPOSIT_FAILED_STATUSES:
+        payment.status = "failed"
+        payment.fail_reason = f"가상계좌 입금 취소/만료 (status={body.status})"[:200]
+        db.commit()
+
+    return {"received": True}

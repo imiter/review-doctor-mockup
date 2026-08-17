@@ -280,3 +280,68 @@ def test_billing_history_returns_users_payments_newest_first(client, db_session,
     assert res.status_code == 200
     order_ids = [p["order_id"] for p in res.json()]
     assert order_ids == ["new", "old"]
+
+
+def _make_waiting_payment(db_session, seeded_user, order_id="va-order-1", secret="va-secret-abc"):
+    payment = Payment(
+        user_id=seeded_user["user"].id, order_id=order_id, plan="pro", amount=19900,
+        status="pending", virtual_account_secret=secret,
+        requested_at=datetime.now(timezone.utc),
+    )
+    db_session.add(payment)
+    db_session.commit()
+    return payment
+
+
+def test_webhook_approves_subscription_on_correct_secret_and_done_status(client, db_session, seeded_user):
+    _make_waiting_payment(db_session, seeded_user)
+
+    res = client.post("/billing/webhook", json={"orderId": "va-order-1", "secret": "va-secret-abc", "status": "DONE"})
+    assert res.status_code == 200
+
+    payment = db_session.query(Payment).filter_by(order_id="va-order-1").one()
+    assert payment.status == "approved"
+
+    sub = db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).one()
+    assert sub.plan == "pro"
+
+
+def test_webhook_ignores_wrong_secret(client, db_session, seeded_user):
+    _make_waiting_payment(db_session, seeded_user, order_id="va-order-2")
+
+    res = client.post("/billing/webhook", json={"orderId": "va-order-2", "secret": "wrong-secret", "status": "DONE"})
+    assert res.status_code == 200  # 조용히 무시 — 4xx 안 줌
+
+    payment = db_session.query(Payment).filter_by(order_id="va-order-2").one()
+    assert payment.status == "pending"  # 안 바뀜
+
+
+def test_webhook_ignores_unknown_order_id(client):
+    res = client.post("/billing/webhook", json={"orderId": "no-such-order", "secret": "x", "status": "DONE"})
+    assert res.status_code == 200
+
+
+def test_webhook_is_idempotent_for_already_approved_payment(client, db_session, seeded_user):
+    payment = _make_waiting_payment(db_session, seeded_user, order_id="va-order-3")
+    from app.routers.billing import _approve_payment
+    _approve_payment(payment, db_session)
+    db_session.commit()
+    sub_before = db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).one()
+    expires_before = sub_before.expires_at
+
+    # 같은 웹훅이 중복 발송돼도 구독이 또 연장되면 안 됨
+    res = client.post("/billing/webhook", json={"orderId": "va-order-3", "secret": "va-secret-abc", "status": "DONE"})
+    assert res.status_code == 200
+
+    sub_after = db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).one()
+    assert sub_after.expires_at == expires_before
+
+
+def test_webhook_marks_failed_on_cancel_status(client, db_session, seeded_user):
+    _make_waiting_payment(db_session, seeded_user, order_id="va-order-4")
+
+    res = client.post("/billing/webhook", json={"orderId": "va-order-4", "secret": "va-secret-abc", "status": "CANCELED"})
+    assert res.status_code == 200
+
+    payment = db_session.query(Payment).filter_by(order_id="va-order-4").one()
+    assert payment.status == "failed"
