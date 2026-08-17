@@ -66,6 +66,16 @@ plan.py`의 `effective_plan`)이고, 모든 날짜 경계는 KST(Asia/Seoul)
 `docs/superpowers/specs/2026-08-17-toss-payments-subscription-design.md`
 참고.
 
+가상계좌 결제수단은 즉시 승인되지 않고 입금을 기다려야 한다 — 토스 결제승인
+API가 `WAITING_FOR_DEPOSIT` 상태를 돌려주면 `POST /billing/confirm`은 실패
+처리하지 않고 가상계좌 정보와 `secret`을 저장한 채 대기 상태로 남긴다. 실제
+입금이 완료되면 토스가 `POST /billing/webhook`(`DEPOSIT_CALLBACK` 이벤트)을
+호출하고, 저장해둔 `secret`과 대조해서 맞으면 그때 구독을 Pro로 승인한다.
+승인 로직(`_approve_payment`, `backend/app/routers/billing.py`)은 즉시결제
+경로와 가상계좌 경로가 공유한다. 설계 상세는
+`docs/superpowers/specs/2026-08-18-toss-virtual-account-webhook-design.md`
+참고.
+
 ### 카카오 소셜 로그인 (예외 허용)
 원래 "이메일 기반 간단 로그인 구현 (소셜 로그인 제외, 추후 추가)"였으나, 실
 SaaS 전환의 첫 단계로 카카오 로그인을 실제로 붙이기로 결정했다(위 "방향 전환"
