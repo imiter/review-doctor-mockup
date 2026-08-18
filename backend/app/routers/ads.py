@@ -12,6 +12,7 @@ import os
 import pathlib
 import subprocess
 import threading
+import time
 from datetime import date, timedelta
 
 import httpx
@@ -36,6 +37,7 @@ from app.models import (
     User,
 )
 from app.plan import require_pro_plan
+from scrapers.baemin_ads import submit_cpc_bid
 from scrapers.baemin_auth import login as baemin_login
 from scrapers.baemin_stats import fetch_shop_info
 from scripts.ingest_rank_snapshots import ingest as ingest_csv
@@ -46,6 +48,7 @@ _CRAWLER_DIR = pathlib.Path(__file__).resolve().parents[3] / "crawler"
 _CRAWLER_PYTHON = _CRAWLER_DIR / ".venv" / "bin" / "python"
 _CRAWL_TIMEOUT_SEC = 900  # 지점 3개 * 지점당 1분 안팎 + 여유
 _BID_STEP_WON = 30  # 순위 미달 시 다음 시도 추천 증액폭(설계 문서 — 사용자 제안 10~50원 중 기본값)
+_BID_APPLY_WAIT_SEC = 30  # 배민 쪽 반영 시차 대기(설계 문서 — 화면 안내문구 확인, 구현 시 조정 가능)
 _crawl_lock = threading.Lock()  # 에뮬레이터는 한 번에 하나만 조작 가능 — 동시 실행 방지
 
 _CRAWL_WORKER_URL = os.getenv("CRAWL_WORKER_URL")  # 배포 환경에서만 설정 (예: 터널 URL)
@@ -303,6 +306,61 @@ def _run_local_crawl(campaign_id: int) -> tuple[int, int]:
     return ingest_csv(csv_path, campaign_id)
 
 
+def _apply_bid_then_crawl(campaign_id: int, amount: int) -> tuple[int, int]:
+    """입찰가를 배민에 실제로 반영한 뒤(쓰기, submit_cpc_bid), 배민 쪽 반영
+    시차를 기다렸다가(_BID_APPLY_WAIT_SEC) 기존 _run_local_crawl로 순위를
+    재측정한다. 반드시 백그라운드 스레드에서만 호출한다(로그인+제출+대기+
+    크롤이 합쳐 수십 초~수 분 걸리는 블로킹 호출)."""
+    db = SessionLocal()
+    try:
+        campaign = db.get(AdCampaign, campaign_id)
+        if campaign is None or not campaign.shop_no:
+            raise HTTPException(500, f"캠페인 {campaign_id}은 실데이터 캠페인이 아니라 입찰가를 반영할 수 없습니다")
+        baemin_platform = db.scalar(select(Platform).where(Platform.code == "baemin"))
+        conn = db.scalar(
+            select(StorePlatformConnection).where(
+                StorePlatformConnection.store_id == campaign.store_id,
+                StorePlatformConnection.platform_id == baemin_platform.id,
+            )
+        ) if baemin_platform else None
+        if conn is None:
+            raise HTTPException(500, f"캠페인 {campaign_id}의 배민 연결을 찾을 수 없습니다")
+        try:
+            credential = decrypt_credential(conn.credential_ciphertext)
+            session = baemin_login(credential["login_id"], credential["password"])
+            try:
+                submit_cpc_bid(session.page, campaign.shop_no, amount)
+            finally:
+                session.close()
+        except Exception as e:
+            raise HTTPException(502, f"입찰가 반영에 실패했습니다: {e}") from e
+
+        campaign.current_cpc = amount
+        db.commit()
+    finally:
+        db.close()
+
+    time.sleep(_BID_APPLY_WAIT_SEC)
+    return _run_local_crawl(campaign_id)
+
+
+def _execute_bid_apply_job(campaign_id: int, amount: int) -> None:
+    """백그라운드 스레드에서 실행된다. _crawl_lock은 호출부(apply-bid 엔드포인트)가
+    이미 잡아뒀고, 끝나면 이 함수가 반드시 놓아준다(_execute_crawl_job과 동일 계약)."""
+    try:
+        inserted, skipped = _apply_bid_then_crawl(campaign_id, amount)
+        with _job_state_lock:
+            _job_state.update(campaign_id=campaign_id, status="done", inserted=inserted, skipped=skipped, error=None)
+    except HTTPException as e:
+        with _job_state_lock:
+            _job_state.update(campaign_id=campaign_id, status="error", inserted=None, skipped=None, error=e.detail)
+    except Exception as e:  # noqa: BLE001
+        with _job_state_lock:
+            _job_state.update(campaign_id=campaign_id, status="error", inserted=None, skipped=None, error=str(e))
+    finally:
+        _crawl_lock.release()
+
+
 def _execute_crawl_job(campaign_id: int) -> None:
     """백그라운드 스레드에서 실행된다. _crawl_lock은 호출부(_start_crawl_job)가
     이미 잡아뒀고, 끝나면 이 함수가 반드시 놓아준다."""
@@ -408,6 +466,32 @@ def ads_update_campaign(
     campaign.target_rank = body.target_rank
     db.commit()
     return {"campaign_id": campaign.id, "target_rank": campaign.target_rank}
+
+
+@router.post("/ads/rank-by-distance/apply-bid")
+def ads_apply_bid(
+    campaign_id: int,
+    amount: int,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_pro_plan),
+    db: Session = Depends(get_db),
+):
+    """사용자가 목표 금액을 직접 확인·클릭했을 때만 호출된다(프론트엔드가
+    "OO원으로 배민에 실제 반영됩니다" 확인 다이얼로그를 거친다). 성공하면
+    기존 POST /ads/rank-by-distance/run과 동일한 {"status": "started"} 계약으로
+    응답하고, 진행 상황/결과는 기존 GET /ads/rank-by-distance/run/status를
+    그대로 폴링해서 확인한다(새 상태 엔드포인트를 만들지 않는다)."""
+    campaign = _campaign_for_user(campaign_id, user, db)
+    if not campaign.shop_no:
+        raise HTTPException(400, "실데이터 캠페인만 입찰가를 반영할 수 있습니다")
+    if amount < 1:
+        raise HTTPException(400, "입찰 금액은 1원 이상이어야 합니다")
+    if not _crawl_lock.acquire(blocking=False):
+        raise HTTPException(409, "이미 다른 순위 확인이 진행 중입니다. 잠시 후 다시 시도하세요.")
+    with _job_state_lock:
+        _job_state.update(campaign_id=campaign_id, status="running", inserted=None, skipped=None, error=None)
+    background_tasks.add_task(_execute_bid_apply_job, campaign_id, amount)
+    return {"status": "started"}
 
 
 @router.post("/ads/rank-by-distance/run")

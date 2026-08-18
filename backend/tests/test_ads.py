@@ -473,3 +473,68 @@ def test_update_campaign_target_rank_rejects_below_one(client, db_session, seede
     res = client.patch(f"/ads/campaigns/{campaign.id}", json={"target_rank": 0}, headers=auth_headers)
 
     assert res.status_code == 422
+
+
+def test_apply_bid_updates_current_cpc_and_starts_crawl(
+    db_session, seeded_user, platforms, monkeypatch, tmp_path
+):
+    """입찰 제출 성공 → current_cpc 갱신 → 기존 크롤 인프라(_run_local_crawl)로
+    이어지는 흐름을 검증한다. submit_cpc_bid/baemin_login/subprocess.run을
+    전부 mock해 실제 Playwright/배민 접근 없이 로직만 확인한다."""
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    campaign = make_campaign(db_session, seeded_user["store"], current_cpc=95, shop_no="14804318")
+    _bind_run_local_crawl_to_test_db(db_session, monkeypatch)
+
+    monkeypatch.setattr(ads_module, "baemin_login", lambda login_id, password: Mock(page=Mock(), close=Mock()))
+    monkeypatch.setattr(ads_module, "submit_cpc_bid", lambda page, shop_no, amount: None)
+    monkeypatch.setattr(ads_module, "time", Mock(sleep=Mock()))
+    # _apply_bid_then_crawl은 성공하면 이어서 _run_local_crawl을 호출하고,
+    # shop_no가 있는 캠페인이라 그 안에서 다시 로그인 + fetch_shop_info를
+    # 부른다(입찰가 제출용 로그인과는 별개 호출) — 이것도 mock해야
+    # _run_local_crawl이 실제 배민 응답을 기다리다 502로 죽지 않는다.
+    monkeypatch.setattr(ads_module, "fetch_shop_info", lambda page, shop_no: {
+        "name": "치밥대장", "category": "치킨", "road_address": "서울시 노원구",
+        "latitude": 37.6, "longitude": 127.0,
+    })
+    fake_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(ads_module.subprocess, "run", Mock(return_value=fake_proc))
+    monkeypatch.setattr(ads_module, "ingest_csv", lambda csv_path, campaign_id: (1, 0))
+
+    inserted, skipped = ads_module._apply_bid_then_crawl(campaign.id, 125)
+
+    assert (inserted, skipped) == (1, 0)
+    db_session.refresh(campaign)
+    assert campaign.current_cpc == 125
+    ads_module.time.sleep.assert_called_once_with(ads_module._BID_APPLY_WAIT_SEC)
+
+
+def test_apply_bid_rejects_campaign_without_shop_no(db_session, seeded_user, monkeypatch):
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no=None)
+    _bind_run_local_crawl_to_test_db(db_session, monkeypatch)
+
+    with pytest.raises(HTTPException) as exc_info:
+        ads_module._apply_bid_then_crawl(campaign.id, 125)
+
+    assert exc_info.value.status_code == 500
+
+
+def test_apply_bid_endpoint_blocked_for_basic_plan(client, db_session, seeded_user, auth_headers):
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+    res = client.post(
+        f"/ads/rank-by-distance/apply-bid?campaign_id={campaign.id}&amount=125", headers=auth_headers
+    )
+    assert res.status_code == 403
+    assert res.json()["detail"]["error_code"] == "pro_required"
+
+
+def test_apply_bid_endpoint_rejects_non_positive_amount(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+    res = client.post(
+        f"/ads/rank-by-distance/apply-bid?campaign_id={campaign.id}&amount=0", headers=auth_headers
+    )
+    assert res.status_code == 400

@@ -218,3 +218,153 @@ def fetch_cpc_booking(page, shop_no: str) -> dict:
         }
     except (KeyError, TypeError) as e:
         raise BaeminAdsScrapeError(f"CPC 입찰가 응답 형태가 예상과 다릅니다: {e}") from e
+
+
+def submit_cpc_bid(page, shop_no: str, amount: int) -> None:
+    """"광고 금액 수정" 모달에서 "클릭당 희망 광고금액"을 amount(원)로 실제
+    반영한다. 배민 계정에 진짜 쓰기가 발생하는 함수 — POST /ads/rank-by-distance/apply-bid만
+    호출한다(사용자가 실제 반영 확인 다이얼로그를 거친 뒤에만 도달하는 경로).
+
+    실 계정 라이브 캡처(2026-08-18, 치밥대장 shop_no=14804318)로 확인한 실제 흐름:
+    1. GET /v2/ad-center/ad-campaigns/operating-ad-campaign/by-shop-number?shopNumber={shop_no}
+       에서 adKind.adKindKey == "WOORI_SHOP_CLICK"인 항목의 id가 우리가게클릭 캠페인 ID다
+       (GET /v4/cpc/bookings/by-shop-number 응답에는 이 ID가 없어 별도로 조회해야 한다).
+    2. "우리가게클릭" 행 펼치기 -> "광고·서비스" 섹션의 "수정" 클릭 -> 모달에서
+       "클릭당 희망 광고금액" 입력 후 "적용" 클릭. "수동 설정 모드"는 이미 기본
+       선택돼 있어 건드리지 않는다("스마트 모드"로 전환하지 않는다).
+    3. 입력액이 현재값보다 낮으면 "클릭당 광고금액을 낮추면 가게 노출에 영향을 줄 수
+       있어요. 적용하시겠어요?" 확인 팝업이 뜬다(그 팝업의 "적용"을 다시 눌러야 함) —
+       금액을 낮출 때만 나타나며, 예측 불가하므로 있으면 처리하고 없으면 건너뛴다.
+    4. 그 다음(또는 그 대신) 스마트 모드 전환을 유도하는 팝업("스마트 모드를 사용하면
+       예산 내에서 자동으로 최적의 희망가로 운영돼요")이 뜰 수 있다 — "설정 유지"를
+       눌러 수동 설정 모드를 유지해야 한다("스마트 모드 켜기"를 누르면 절대 안 됨,
+       이 프로젝트는 항상 수동 설정 모드를 전제로 한다).
+    5. 실제 쓰기는 PUT /v4/cpc/bookings/{campaignId}/bid-budget,
+       바디 {"adCampaignId": campaignId, "newBid": amount, "newBudget": <현재 월예산>,
+       "maxBid": null, "isAutoBidding": false}, 응답 {"isSuccess": bool, "errors": [...]}.
+
+    페이지 컨텍스트 밖에서의 직접 API 호출(Playwright APIRequestContext, page.evaluate 내
+    fetch)은 둘 다 403/CORS로 실패함을 라이브로 확인했다 — 반드시 실제 UI 클릭을
+    통해서만 성공한다. 그래서 이 함수는 다른 이 파일의 함수들과 달리 단순 GET 인터셉트가
+    아니라 여러 단계의 실제 클릭 시퀀스로 구현된다.
+    """
+    state = {"campaigns": None}
+
+    def _on_campaigns_response(response) -> None:
+        if urlparse(response.url).path != "/v2/ad-center/ad-campaigns/operating-ad-campaign/by-shop-number":
+            return
+        if response.status == 200:
+            try:
+                state["campaigns"] = response.json()
+            except Exception:
+                pass
+
+    page.on("response", _on_campaigns_response)
+    try:
+        try:
+            page.goto(f"https://self.baemin.com/shops/{shop_no}/ad/campaign")
+        except Exception as e:
+            raise BaeminAdsScrapeError(f"광고·서비스관리 페이지 이동에 실패했습니다: {e}") from e
+        page.wait_for_timeout(3_000)
+        _dismiss_backdrop_if_present(page)
+        page.wait_for_timeout(1_000)
+    finally:
+        page.remove_listener("response", _on_campaigns_response)
+
+    if state["campaigns"] is None:
+        raise BaeminAdsScrapeError("캠페인 목록 API 응답을 확인하지 못했습니다")
+
+    campaign = next(
+        (c for c in state["campaigns"] if c.get("adKind", {}).get("adKindKey") == "WOORI_SHOP_CLICK"),
+        None,
+    )
+    if campaign is None:
+        raise BaeminAdsScrapeError(f"shop_no={shop_no}에서 우리가게클릭 캠페인을 찾지 못했습니다")
+    campaign_id = campaign["id"]
+
+    try:
+        row_id_el = page.get_by_text(str(campaign_id)).first
+        box = row_id_el.bounding_box(timeout=5_000)
+    except Exception as e:
+        raise BaeminAdsScrapeError(f"우리가게클릭 행(캠페인ID={campaign_id})을 찾지 못했습니다: {e}") from e
+    if box is None:
+        raise BaeminAdsScrapeError(f"우리가게클릭 행(캠페인ID={campaign_id}) 위치를 확인하지 못했습니다")
+    page.mouse.click(box["x"] - 55, box["y"] + box["height"] / 2)
+    page.wait_for_timeout(1_500)
+
+    try:
+        bid_label = page.get_by_text("클릭당 희망 광고금액").first
+        bid_box = bid_label.bounding_box(timeout=5_000)
+        edit_links = page.get_by_text("수정", exact=True).all()
+        candidates = sorted(
+            (
+                (bid_box["y"] - b["y"], el)
+                for el in edit_links
+                if (b := el.bounding_box()) and b["y"] < bid_box["y"]
+            ),
+            key=lambda t: t[0],
+        )
+        if not candidates:
+            raise BaeminAdsScrapeError("광고·서비스 '수정' 링크를 찾지 못했습니다")
+        candidates[0][1].click(timeout=5_000)
+        page.wait_for_timeout(1_500)
+    except BaeminAdsScrapeError:
+        raise
+    except Exception as e:
+        raise BaeminAdsScrapeError(f"광고 금액 수정 모달을 여는 데 실패했습니다: {e}") from e
+
+    try:
+        modal_bid_label = page.get_by_text("클릭당 희망 광고금액").last
+        mb_box = modal_bid_label.bounding_box(timeout=5_000)
+        target_input = None
+        for inp in page.locator("input").all():
+            ib = inp.bounding_box()
+            if ib and abs(ib["y"] - mb_box["y"]) < 15:
+                target_input = inp
+                break
+        if target_input is None:
+            raise BaeminAdsScrapeError("클릭당 희망 광고금액 입력창을 찾지 못했습니다")
+        target_input.click()
+        target_input.fill("")
+        target_input.type(str(amount))
+        page.wait_for_timeout(500)
+    except BaeminAdsScrapeError:
+        raise
+    except Exception as e:
+        raise BaeminAdsScrapeError(f"입찰가 입력에 실패했습니다: {e}") from e
+
+    write_result = {"status": None, "body": None}
+
+    def _on_write_response(response) -> None:
+        if f"/v4/cpc/bookings/{campaign_id}/bid-budget" not in response.url:
+            return
+        write_result["status"] = response.status
+        try:
+            write_result["body"] = response.json()
+        except Exception:
+            pass
+
+    page.on("response", _on_write_response)
+    try:
+        page.get_by_role("button", name="적용").first.click(timeout=5_000)
+        page.wait_for_timeout(1_500)
+
+        if page.get_by_text("클릭당 광고금액을 낮추면").count() > 0:
+            page.get_by_role("button", name="적용").last.click(timeout=5_000)
+            page.wait_for_timeout(2_000)
+
+        keep_btn = page.get_by_role("button", name="설정 유지")
+        if keep_btn.count() > 0:
+            keep_btn.first.click(timeout=5_000)
+            page.wait_for_timeout(2_000)
+
+        page.wait_for_timeout(1_500)
+    finally:
+        page.remove_listener("response", _on_write_response)
+
+    if write_result["status"] is None:
+        raise BaeminAdsScrapeError("입찰가 반영 요청 응답을 확인하지 못했습니다")
+    if write_result["status"] != 200 or not (write_result["body"] or {}).get("isSuccess"):
+        raise BaeminAdsScrapeError(
+            f"입찰가 반영 요청이 실패했습니다 (status={write_result['status']}, body={write_result['body']})"
+        )
