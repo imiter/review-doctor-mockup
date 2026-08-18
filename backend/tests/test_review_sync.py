@@ -5,7 +5,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.credential_crypto import CredentialCryptoError, encrypt_credential
-from app.models import BaeminShopBrand, BrandAdClickMetric, DailySettlement, Order, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
+from app.models import AdCampaign, BaeminShopBrand, BrandAdClickMetric, DailySettlement, Order, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
 from app.review_sync import sync_reviews_for_job, upsert_brand_ad_click_metric, upsert_daily_settlement, upsert_order, upsert_repurchase_metric
 from scrapers.baemin_ads import BaeminAdsScrapeError
 from scrapers.baemin_auth import BaeminLoginError
@@ -1586,3 +1586,79 @@ def test_sync_raises_page_click_cap_for_deep_order_backfill(db_session, sync_set
     assert ORDER_BACKFILL_PAGE_CLICKS >= 155
     # 이번 달 매출 보완은 기본 상한을 그대로 쓴다(명시적으로 넘기지 않는다).
     assert calls[0]["max_page_clicks"] is None
+
+
+def test_sync_updates_campaign_current_cpc_from_real_bid(db_session, sync_setup, monkeypatch):
+    """브랜드별로 fetch_cpc_booking이 반환한 bid로 ad_campaigns.current_cpc가
+    갱신돼야 한다 — 브랜드마다 다른 값을 줘서 취급이 뒤섞이지 않는지도 함께
+    확인한다. shop_no 11111/22222는 _FakeMultiShopSession의 값과 맞춘다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    campaign_a = AdCampaign(
+        store_id=job.store_id, category="치킨", current_cpc=1, target_rank=3,
+        status="active", shop_no="11111",
+    )
+    campaign_b = AdCampaign(
+        store_id=job.store_id, category="찜·탕·찌개", current_cpc=1, target_rank=10,
+        status="active", shop_no="22222",
+    )
+    db_session.add_all([campaign_a, campaign_b])
+    db_session.commit()
+
+    fake_session = _FakeMultiShopSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+
+    def fake_fetch_cpc_booking(page, shop_no):
+        return {
+            11111: {"bid": 95, "max_bid": 860, "monthly_budget": 1_000_000, "spent_budget": 150_065, "is_auto_bidding": False},
+            22222: {"bid": 60, "max_bid": 500, "monthly_budget": 500_000, "spent_budget": 20_000, "is_auto_bidding": False},
+        }[shop_no]
+
+    monkeypatch.setattr(review_sync_mod, "fetch_cpc_booking", fake_fetch_cpc_booking)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    db_session.refresh(campaign_a)
+    db_session.refresh(campaign_b)
+    assert campaign_a.current_cpc == 95
+    assert campaign_b.current_cpc == 60
+
+
+def test_sync_isolates_cpc_booking_failure_from_click_metrics(db_session, sync_setup, monkeypatch):
+    """CPC 입찰가 조회 실패가 같은 브랜드의 우리가게클릭 수집 성공까지
+    막으면 안 된다 — 브랜드별 독립 실패 격리 원칙(리뷰/매출과 동일)."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    campaign = AdCampaign(
+        store_id=job.store_id, category="치킨", current_cpc=1, target_rank=3,
+        status="active", shop_no="99999001",
+    )
+    db_session.add(campaign)
+    db_session.commit()
+
+    fake_session = _FakeSession()  # shop_no=99999001
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_brand_click_metrics",
+        lambda page, shop_no, months: [_CLICK_RESP_AUGUST],
+    )
+
+    def _raise_cpc(page, shop_no):
+        raise BaeminAdsScrapeError("CPC 입찰가 API 응답을 한 번도 확인하지 못했습니다")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_cpc_booking", _raise_cpc)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    db_session.refresh(campaign)
+    assert campaign.current_cpc == 1  # 실패했으니 갱신 안 됨
+    row = db_session.query(BrandAdClickMetric).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, shop_no="99999001", metric_date="2026-08-01",
+    ).one()
+    assert row.ad_spend == 95  # 클릭 성과는 CPC 실패와 무관하게 정상 수집됨

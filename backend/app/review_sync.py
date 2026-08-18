@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.credential_crypto import CredentialCryptoError, decrypt_credential
 from app.db import SessionLocal
 from app.models import (
+    AdCampaign,
     BaeminShopBrand,
     BrandAdClickMetric,
     DailySettlement,
@@ -24,7 +25,7 @@ from app.models import (
     ReviewSyncJob,
     StorePlatformConnection,
 )
-from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics, map_click_metrics_by_date
+from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics, fetch_cpc_booking, map_click_metrics_by_date
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 from scrapers.baemin_reviews import BaeminScrapeError, extract_owner_reply, fetch_all_reviews, map_review
 from scrapers.baemin_stats import (
@@ -502,6 +503,19 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                     stats_succeeded_any = True
             except Exception as e:
                 stats_errors.append(f"{shop_name} 우리가게클릭 동기화 실패: {e}")
+
+            # CPC 입찰가는 캠페인이 실제로 이 shop_no에 연결돼 있을 때만 갱신한다
+            # (ad_campaigns에 아직 이 브랜드의 캠페인이 없으면 조용히 건너뛴다 —
+            # Task 2로 4브랜드 캠페인이 이미 있는 게 보통이지만, 신규 브랜드가
+            # 연결 직후(캠페인 미생성) 동기화되는 경우까지 방어한다).
+            campaign = db.scalar(select(AdCampaign).where(AdCampaign.shop_no == str(shop_no)))
+            if campaign is not None:
+                try:
+                    booking = fetch_cpc_booking(session.page, shop_no)
+                    campaign.current_cpc = booking["bid"]
+                    stats_succeeded_any = True
+                except Exception as e:
+                    stats_errors.append(f"{shop_name} CPC 입찰가 동기화 실패: {e}")
     finally:
         session.close()
 
