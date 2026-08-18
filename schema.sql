@@ -285,6 +285,7 @@ CREATE TABLE ad_rank_snapshots (
     point_label        VARCHAR(20),                            -- '0km', '1.5~2.5km' 등 화면 표시용 (실측 전용)
     total_scanned      SMALLINT    CHECK (total_scanned >= 0), -- 실측 시 스캔된 리스트 항목 수
     ads_above          SMALLINT    CHECK (ads_above >= 0),     -- 실측 시 내 가게보다 위에 있던 광고 개수
+    bid_at_snapshot    INT         CHECK (bid_at_snapshot >= 0), -- 실측 당시 ad_campaigns.current_cpc 스냅샷(이력/추천 근거용)
     UNIQUE (campaign_id, snapshot_at)
 );
 

@@ -308,6 +308,7 @@ class AdRankSnapshot(Base):
     point_label: Mapped[str | None] = mapped_column(String(20))
     total_scanned: Mapped[int | None]
     ads_above: Mapped[int | None]
+    bid_at_snapshot: Mapped[int | None]
 
 
 class Alert(Base):

@@ -60,6 +60,7 @@ def ingest(csv_path: pathlib.Path, campaign_id: int) -> tuple[int, int]:
                     point_label=row["point_label"],
                     total_scanned=int(row["total_scanned"]),
                     ads_above=int(row["ads_above"]),
+                    bid_at_snapshot=campaign.current_cpc,
                 )
                 db.add(snapshot)
                 inserted += 1
