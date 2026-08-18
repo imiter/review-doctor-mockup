@@ -335,13 +335,26 @@ def _apply_bid_then_crawl(campaign_id: int, amount: int) -> tuple[int, int]:
         except Exception as e:
             raise HTTPException(502, f"입찰가 반영에 실패했습니다: {e}") from e
 
-        campaign.current_cpc = amount
-        db.commit()
+        try:
+            campaign.current_cpc = amount
+            db.commit()
+        except Exception as e:
+            raise HTTPException(
+                500,
+                f"입찰가는 배민에 실제로 반영됐지만({amount}원), 내부 기록 갱신에 실패했습니다. "
+                f"화면에 표시되는 현재 CPC가 실제 값과 다를 수 있습니다: {e}",
+            ) from e
     finally:
         db.close()
 
     time.sleep(_BID_APPLY_WAIT_SEC)
-    return _run_local_crawl(campaign_id)
+    try:
+        return _run_local_crawl(campaign_id)
+    except HTTPException as e:
+        raise HTTPException(
+            e.status_code,
+            f"입찰가({amount}원)는 이미 배민에 정상 반영됐습니다. 다만 순위 재측정에는 실패했습니다: {e.detail}",
+        ) from e
 
 
 def _execute_bid_apply_job(campaign_id: int, amount: int) -> None:

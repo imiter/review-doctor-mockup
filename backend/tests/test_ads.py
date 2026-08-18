@@ -512,6 +512,39 @@ def test_apply_bid_updates_current_cpc_and_starts_crawl(
     ads_module.time.sleep.assert_called_once_with(ads_module._BID_APPLY_WAIT_SEC)
 
 
+def test_apply_bid_leaves_current_cpc_unchanged_when_submit_cpc_bid_fails(
+    db_session, seeded_user, platforms, monkeypatch
+):
+    """submit_cpc_bid(배민 실제 반영 API)가 실패하면 campaign.current_cpc는
+    절대 갱신되면 안 된다 — _apply_bid_then_crawl은 코드 순서상 submit_cpc_bid가
+    끝난 뒤에야 current_cpc를 쓰지만, 이 정합성은 향후 리팩터링으로 조용히
+    깨질 수 있으니 회귀 테스트로 고정해둔다. submit_cpc_bid에서 바로 죽으므로
+    _run_local_crawl(fetch_shop_info/subprocess.run/ingest_csv)까지는 절대
+    도달하지 않는다 — 그래서 이 테스트는 그것들을 mock하지 않는다."""
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    campaign = make_campaign(db_session, seeded_user["store"], current_cpc=95, shop_no="14804318")
+    original_cpc = campaign.current_cpc
+    _bind_run_local_crawl_to_test_db(db_session, monkeypatch)
+
+    monkeypatch.setattr(ads_module, "baemin_login", lambda login_id, password: Mock(page=Mock(), close=Mock()))
+
+    def _raise_submit(page, shop_no, amount):
+        raise RuntimeError("배민 입찰 제출 실패(테스트로 유발)")
+
+    monkeypatch.setattr(ads_module, "submit_cpc_bid", _raise_submit)
+
+    with pytest.raises(HTTPException) as exc_info:
+        ads_module._apply_bid_then_crawl(campaign.id, 999)
+
+    assert exc_info.value.status_code == 502
+    db_session.refresh(campaign)
+    assert campaign.current_cpc == original_cpc  # 시도한 새 금액(999)이 아니라 원래 값 그대로
+
+
 def test_apply_bid_rejects_campaign_without_shop_no(db_session, seeded_user, monkeypatch):
     campaign = make_campaign(db_session, seeded_user["store"], shop_no=None)
     _bind_run_local_crawl_to_test_db(db_session, monkeypatch)
