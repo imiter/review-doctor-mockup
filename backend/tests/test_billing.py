@@ -222,6 +222,7 @@ def test_confirm_waiting_for_deposit_does_not_fail_or_approve(client, db_session
     def fake_confirm(payment_key, order_id, amount):
         return {
             "status": "WAITING_FOR_DEPOSIT",
+            "totalAmount": 19900,
             "virtualAccount": {
                 "secret": "va-secret-abc",
                 "bankCode": "20",
@@ -345,3 +346,95 @@ def test_webhook_marks_failed_on_cancel_status(client, db_session, seeded_user):
 
     payment = db_session.query(Payment).filter_by(order_id="va-order-4").one()
     assert payment.status == "failed"
+
+
+def test_confirm_second_call_after_waiting_for_deposit_does_not_recall_toss(client, db_session, seeded_user, auth_headers, monkeypatch):
+    """입금 대기 화면 새로고침/StrictMode 이중마운트 회귀 테스트: 이미 virtual_account_secret이
+    채워진(=한 번 WAITING_FOR_DEPOSIT 응답을 받은) 결제에 대해 confirm()이 다시 호출되면,
+    토스 confirm API를 재호출하지 않고(재호출하면 ALREADY_PROCESSED_PAYMENT로 거절당해 결제가
+    failed로 확정돼버린다) 같은 대기 응답을 그대로 돌려줘야 한다."""
+    checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
+    payment = db_session.query(Payment).filter_by(order_id=checkout["order_id"]).one()
+    payment.virtual_account_secret = "already-issued-secret"
+    db_session.commit()
+
+    called = []
+    monkeypatch.setattr(
+        "app.routers.billing.confirm_payment",
+        lambda **kw: called.append(kw) or {"status": "DONE", "totalAmount": 19900},
+    )
+
+    res = client.post(
+        "/billing/confirm",
+        json={"order_id": checkout["order_id"], "payment_key": "second-pk", "amount": 19900},
+        headers=auth_headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["status"] == "waiting_for_deposit"
+    assert called == []  # 토스 API를 다시 호출하지 않아야 함
+
+    payment = db_session.query(Payment).filter_by(order_id=checkout["order_id"]).one()
+    assert payment.status == "pending"
+
+
+def test_confirm_waiting_for_deposit_rejects_amount_mismatch(client, db_session, seeded_user, auth_headers, monkeypatch):
+    checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
+
+    monkeypatch.setattr(
+        "app.routers.billing.confirm_payment",
+        lambda **kw: {
+            "status": "WAITING_FOR_DEPOSIT",
+            "totalAmount": 1,
+            "virtualAccount": {"secret": "va-secret", "bankCode": "20", "accountNumber": "123", "dueDate": "2026-08-25"},
+        },
+    )
+
+    res = client.post(
+        "/billing/confirm",
+        json={"order_id": checkout["order_id"], "payment_key": "pk", "amount": 19900},
+        headers=auth_headers,
+    )
+    assert res.status_code == 402
+
+    payment = db_session.query(Payment).filter_by(order_id=checkout["order_id"]).one()
+    assert payment.status == "failed"
+
+
+def test_webhook_rejects_non_ascii_secret_without_500(client, db_session, seeded_user):
+    """hmac.compare_digest는 str 인자에 비ASCII 문자가 있으면 TypeError를 던진다.
+    이게 그대로 500으로 새면 "이 order_id가 존재하고 가상계좌 상태다"를 알아내는
+    오라클이 된다 — 반드시 조용한 200으로 처리돼야 한다."""
+    _make_waiting_payment(db_session, seeded_user, order_id="va-order-nonascii")
+
+    res = client.post(
+        "/billing/webhook",
+        json={"orderId": "va-order-nonascii", "secret": "시크릿é", "status": "DONE"},
+    )
+    assert res.status_code == 200
+
+    payment = db_session.query(Payment).filter_by(order_id="va-order-nonascii").one()
+    assert payment.status == "pending"  # 상태 변화 없음
+
+
+def test_webhook_missing_status_field_returns_200(client):
+    """status 필드가 아예 없는 요청도(Pydantic 필수 필드였다면 422였을 것) 조용히 200을
+    돌려줘야 한다 — 토스가 다른 이벤트 구조를 이 URL로 보내도 재시도 폭탄이 나지 않도록."""
+    res = client.post("/billing/webhook", json={"orderId": "x", "secret": "y"})
+    assert res.status_code == 200
+
+
+def test_webhook_completely_different_shape_returns_200(client):
+    res = client.post("/billing/webhook", json={"eventType": "payout.changed", "data": {}})
+    assert res.status_code == 200
+
+
+def test_webhook_logs_warning_on_secret_mismatch(client, db_session, seeded_user, caplog):
+    _make_waiting_payment(db_session, seeded_user, order_id="va-order-logtest")
+
+    with caplog.at_level("WARNING"):
+        res = client.post(
+            "/billing/webhook",
+            json={"orderId": "va-order-logtest", "secret": "wrong", "status": "DONE"},
+        )
+    assert res.status_code == 200
+    assert any("secret 불일치" in r.message and "va-order-logtest" in r.message for r in caplog.records)
