@@ -348,13 +348,45 @@ def _apply_bid_then_crawl(campaign_id: int, amount: int) -> tuple[int, int]:
         db.close()
 
     time.sleep(_BID_APPLY_WAIT_SEC)
-    try:
-        return _run_local_crawl(campaign_id)
-    except HTTPException as e:
-        raise HTTPException(
-            e.status_code,
-            f"입찰가({amount}원)는 이미 배민에 정상 반영됐습니다. 다만 순위 재측정에는 실패했습니다: {e.detail}",
-        ) from e
+    if _CRAWLER_PYTHON.exists():
+        try:
+            return _run_local_crawl(campaign_id)
+        except HTTPException as e:
+            raise HTTPException(
+                e.status_code,
+                f"입찰가({amount}원)는 이미 배민에 정상 반영됐습니다. 다만 순위 재측정에는 실패했습니다: {e.detail}",
+            ) from e
+
+    if _CRAWL_WORKER_URL:
+        try:
+            resp = httpx.post(
+                f"{_CRAWL_WORKER_URL}/internal/run-crawl",
+                params={"campaign_id": campaign_id},
+                headers={"X-Worker-Secret": _CRAWL_WORKER_SECRET},
+                timeout=15,
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                502,
+                f"입찰가({amount}원)는 이미 배민에 정상 반영됐습니다. 다만 크롤 워커에 연결할 수 없어 순위 재측정을 시작하지 못했습니다: {e}",
+            ) from e
+        if resp.status_code != 200:
+            raise HTTPException(
+                resp.status_code,
+                f"입찰가({amount}원)는 이미 배민에 정상 반영됐습니다. 다만 크롤 워커 실행에 실패해 순위 재측정을 시작하지 못했습니다: {resp.text[:500]}",
+            )
+        # 워커에 위임한 뒤에는 이 백그라운드 스레드가 결과를 기다리지 않는다 —
+        # 진행상황/결과는 GET /ads/rank-by-distance/run/status가 이미 _CRAWL_WORKER_URL이
+        # 설정된 경우 이 프로세스의 _job_state를 보지 않고 워커에 직접 물어보도록 돼
+        # 있으므로(ads_rank_by_distance_run_status 참고), 여기서는 위임 성공만 확인하면
+        # 충분하다. 반환값은 이 프로세스 기준으로는 의미가 없다(워커가 실제 값을 안다).
+        return (0, 0)
+
+    raise HTTPException(
+        500,
+        f"입찰가({amount}원)는 이미 배민에 정상 반영됐습니다. 다만 이 환경에서는 순위 재측정을 실행할 수 없습니다 "
+        f"(로컬 crawler venv도 CRAWL_WORKER_URL도 없음).",
+    )
 
 
 def _execute_bid_apply_job(campaign_id: int, amount: int) -> None:

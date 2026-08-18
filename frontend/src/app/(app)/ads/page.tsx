@@ -300,7 +300,8 @@ export default function AdsPage() {
                     const n = Number(bidValue);
                     if (Number.isInteger(n) && n >= 1) handleApplyBid(c.campaign_id, n);
                   }}
-                  disabled={runningCampaignId !== null}
+                  disabled={!LIVE_CRAWL_ENABLED || runningCampaignId !== null}
+                  title={LIVE_CRAWL_ENABLED ? undefined : "이 환경에서는 실측 크롤링을 실행할 수 없습니다"}
                   className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   적용하기

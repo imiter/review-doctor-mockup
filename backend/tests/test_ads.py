@@ -1,3 +1,4 @@
+import pathlib
 import subprocess
 from datetime import date, datetime, timezone
 from unittest.mock import Mock
@@ -9,8 +10,9 @@ from sqlalchemy.orm import sessionmaker
 from fastapi import HTTPException
 
 import app.routers.ads as ads_module
+from app.auth import hash_password
 from app.credential_crypto import encrypt_credential
-from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order, StorePlatformConnection, Subscription
+from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order, Store, StorePlatformConnection, Subscription, User
 
 
 def make_campaign(db_session, store, current_cpc=400, target_rank=3, shop_no=None):
@@ -453,13 +455,24 @@ def test_update_campaign_target_rank(client, db_session, seeded_user, auth_heade
 
 
 def test_update_campaign_target_rank_rejects_other_users_campaign(client, db_session, seeded_user, auth_headers):
+    """_campaign_for_user의 소유권 검사(store.user_id != user.id) 자체를
+    검증한다 — 존재하지 않는 store_id로 흉내내면 "캠페인 못 찾음" 분기와
+    "소유권 불일치" 분기가 똑같이 404를 내서 구분이 안 되므로, 실제로 다른
+    유저 + 다른 스토어 + 그 스토어 소유 캠페인을 만들어 진짜 소유권
+    불일치 상황을 재현한다."""
     _upgrade_to_pro(db_session, seeded_user["user"].id)
-    other_campaign = make_campaign(db_session, seeded_user["store"], target_rank=5, shop_no="14804318")
-    # _campaign_for_user는 store.user_id로 소유권을 확인한다 — 다른 유저 소유
-    # 캠페인이면 404여야 한다. 여기서는 store_id를 존재하지 않는 값으로 바꿔
-    # 같은 효과(소유권 불일치)를 낸다.
-    other_campaign.store_id = other_campaign.store_id + 99999
+
+    other_user = User(
+        email="other@dris.kr", password_hash=hash_password("other1234!"), nickname="박사장",
+        phone_hash="b" * 64, marketing_agreed=True, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(other_user)
+    db_session.flush()
+    other_store = Store(user_id=other_user.id, name="다른가게", category="치킨", created_at=datetime.now(timezone.utc))
+    db_session.add(other_store)
     db_session.commit()
+
+    other_campaign = make_campaign(db_session, other_store, target_rank=5, shop_no="99999999")
 
     res = client.patch(f"/ads/campaigns/{other_campaign.id}", json={"target_rank": 2}, headers=auth_headers)
 
@@ -553,6 +566,76 @@ def test_apply_bid_rejects_campaign_without_shop_no(db_session, seeded_user, mon
         ads_module._apply_bid_then_crawl(campaign.id, 125)
 
     assert exc_info.value.status_code == 500
+
+
+def test_apply_bid_delegates_crawl_to_worker_when_no_local_crawler(
+    db_session, seeded_user, platforms, monkeypatch
+):
+    """Railway 배포 환경(로컬 crawler venv 없음)에서는 입찰가 반영 후
+    재측정 크롤을 _run_local_crawl로 직접 돌릴 수 없다 — ads_rank_by_distance_run과
+    동일하게 CRAWL_WORKER_URL로 위임해야 한다(/internal/run-crawl POST). 위임에
+    성공하면 실제 크롤 결과는 이 프로세스가 알 수 없으므로(워커가 안다) (0, 0)을
+    반환하는 것만 확인한다 — 진짜 결과는 GET .../run/status가 워커에 직접 물어본다."""
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    campaign = make_campaign(db_session, seeded_user["store"], current_cpc=95, shop_no="14804318")
+    _bind_run_local_crawl_to_test_db(db_session, monkeypatch)
+
+    monkeypatch.setattr(ads_module, "baemin_login", lambda login_id, password: Mock(page=Mock(), close=Mock()))
+    monkeypatch.setattr(ads_module, "submit_cpc_bid", lambda page, shop_no, amount: None)
+    monkeypatch.setattr(ads_module, "time", Mock(sleep=Mock()))
+    monkeypatch.setattr(ads_module, "_CRAWLER_PYTHON", pathlib.Path("/nonexistent/crawler/venv/bin/python"))
+    monkeypatch.setattr(ads_module, "_CRAWL_WORKER_URL", "http://worker.example.com")
+    monkeypatch.setattr(ads_module, "_CRAWL_WORKER_SECRET", "test-secret")
+
+    fake_response = Mock(status_code=200)
+    mock_post = Mock(return_value=fake_response)
+    monkeypatch.setattr(ads_module.httpx, "post", mock_post)
+
+    result = ads_module._apply_bid_then_crawl(campaign.id, 125)
+
+    assert result == (0, 0)
+    db_session.refresh(campaign)
+    assert campaign.current_cpc == 125  # 입찰가 반영 자체는 워커 위임 여부와 무관하게 성공
+    mock_post.assert_called_once_with(
+        "http://worker.example.com/internal/run-crawl",
+        params={"campaign_id": campaign.id},
+        headers={"X-Worker-Secret": "test-secret"},
+        timeout=15,
+    )
+
+
+def test_apply_bid_raises_clear_error_when_neither_local_crawler_nor_worker_available(
+    db_session, seeded_user, platforms, monkeypatch
+):
+    """로컬 crawler venv도 CRAWL_WORKER_URL도 없는 환경(설정 누락)에서는
+    재측정을 시작할 방법이 없다는 걸 명확한 500으로 알려야 한다 — 이때도
+    입찰가 자체는 이미 배민에 반영됐다는 사실을 에러 메시지에 반드시
+    남겨야 한다(사용자가 "입찰 실패"로 오해해 재시도하지 않도록)."""
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    campaign = make_campaign(db_session, seeded_user["store"], current_cpc=95, shop_no="14804318")
+    _bind_run_local_crawl_to_test_db(db_session, monkeypatch)
+
+    monkeypatch.setattr(ads_module, "baemin_login", lambda login_id, password: Mock(page=Mock(), close=Mock()))
+    monkeypatch.setattr(ads_module, "submit_cpc_bid", lambda page, shop_no, amount: None)
+    monkeypatch.setattr(ads_module, "time", Mock(sleep=Mock()))
+    monkeypatch.setattr(ads_module, "_CRAWLER_PYTHON", pathlib.Path("/nonexistent/crawler/venv/bin/python"))
+    monkeypatch.setattr(ads_module, "_CRAWL_WORKER_URL", "")
+
+    with pytest.raises(HTTPException) as exc_info:
+        ads_module._apply_bid_then_crawl(campaign.id, 125)
+
+    assert exc_info.value.status_code == 500
+    assert "이미 배민에 정상 반영" in exc_info.value.detail
+    db_session.refresh(campaign)
+    assert campaign.current_cpc == 125  # 입찰가는 이미 반영된 채로 남아 있어야 한다
 
 
 def test_apply_bid_endpoint_blocked_for_basic_plan(client, db_session, seeded_user, auth_headers):
