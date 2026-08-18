@@ -193,23 +193,41 @@ export default function BillingPage() {
       </div>
 
       {checkoutOpen && !isPro && (
-        <Card title="결제하기">
-          {!clientKey && (
-            <p className="mb-3 text-sm text-danger">
-              토스페이먼츠 클라이언트키가 설정되지 않았습니다. NEXT_PUBLIC_TOSS_CLIENT_KEY를 확인해주세요.
-            </p>
-          )}
-          {error && <p className="mb-3 text-sm text-danger">{error}</p>}
-          <div id="toss-payment-method" />
-          <div id="toss-agreement" className="mt-3" />
-          <button
-            onClick={handlePay}
-            disabled={!widgetsReady}
-            className="mt-4 w-full rounded-lg bg-accent py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
-          >
-            {won(PRO_PRICE)} 결제하기
-          </button>
-        </Card>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setCheckoutOpen(false)}
+        >
+          <div className="max-h-[90vh] w-full max-w-md overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <Card
+              title="결제하기"
+              action={
+                <button
+                  onClick={() => setCheckoutOpen(false)}
+                  className="text-muted transition hover:text-foreground"
+                  aria-label="닫기"
+                >
+                  ✕
+                </button>
+              }
+            >
+              {!clientKey && (
+                <p className="mb-3 text-sm text-danger">
+                  토스페이먼츠 클라이언트키가 설정되지 않았습니다. NEXT_PUBLIC_TOSS_CLIENT_KEY를 확인해주세요.
+                </p>
+              )}
+              {error && <p className="mb-3 text-sm text-danger">{error}</p>}
+              <div id="toss-payment-method" />
+              <div id="toss-agreement" className="mt-3" />
+              <button
+                onClick={handlePay}
+                disabled={!widgetsReady}
+                className="mt-4 w-full rounded-lg bg-accent py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+              >
+                {won(PRO_PRICE)} 결제하기
+              </button>
+            </Card>
+          </div>
+        </div>
       )}
     </div>
   );

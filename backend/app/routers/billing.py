@@ -98,8 +98,20 @@ def confirm(body: ConfirmRequest, user: User = Depends(get_current_user), db: Se
     payment = db.scalar(select(Payment).where(Payment.order_id == body.order_id).with_for_update())
     if payment is None or payment.user_id != user.id:
         raise HTTPException(404, "결제 요청을 찾을 수 없습니다")
-    if payment.status != "pending":
-        raise HTTPException(400, "이미 처리된 결제입니다")
+    if payment.status == "approved":
+        # 이미 승인된 주문 — 새로고침이나 StrictMode 이중 마운트로 같은 확인 요청이
+        # 다시 온 것뿐, 에러가 아니다. 같은 성공 응답을 그대로 돌려줘야 프론트의 성공
+        # 처리(구독 상태 새로고침 등)가 어느 요청이 이기든 안정적으로 실행된다 — 이걸
+        # 400으로 취급하면 실제로는 결제가 성공했는데 사용자에게 실패로 보이고, 구독
+        # 상태 새로고침도 안 불려서 화면이 안 풀리는 문제가 생긴다.
+        sub = db.scalar(select(Subscription).where(Subscription.user_id == user.id))
+        return ConfirmResponse(
+            status="approved",
+            plan=sub.plan if sub else None,
+            expires_at=sub.expires_at if sub else None,
+        )
+    if payment.status == "failed":
+        raise HTTPException(400, "이미 실패 처리된 결제입니다")
     if payment.amount != body.amount:
         raise HTTPException(400, "결제 금액이 일치하지 않습니다")
 

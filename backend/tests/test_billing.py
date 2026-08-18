@@ -92,10 +92,18 @@ def test_confirm_rejects_amount_mismatch_without_calling_toss(client, db_session
 
 def test_confirm_second_call_for_same_order_id_does_not_double_extend(client, db_session, seeded_user, auth_headers, monkeypatch):
     """동시성 레이스(TOCTOU) 회귀 테스트: 같은 order_id로 confirm이 두 번 들어와도
-    두 번째 호출이 status != "pending" 체크에 걸려 거부되고, 구독이 1회분만 연장돼야 한다.
-    실제 동시 요청(멀티스레드)은 이 하네스로 재현하기 어려워 순차 호출로 대신 검증한다."""
+    구독이 1회분만 연장돼야 한다. 두 번째 호출은 이미 승인된 주문이라 토스를 다시
+    호출하지 않고 같은 성공 응답을 그대로 돌려준다(에러 아님 — success/page.tsx의
+    새로고침/StrictMode 이중 마운트에서 실제로 발생하는 케이스). 실제 동시 요청
+    (멀티스레드)은 이 하네스로 재현하기 어려워 순차 호출로 대신 검증한다."""
     checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
-    monkeypatch.setattr("app.routers.billing.confirm_payment", lambda **kw: {"status": "DONE", "totalAmount": 19900})
+    call_count = {"n": 0}
+
+    def fake_confirm(**kw):
+        call_count["n"] += 1
+        return {"status": "DONE", "totalAmount": 19900}
+
+    monkeypatch.setattr("app.routers.billing.confirm_payment", fake_confirm)
 
     first = client.post(
         "/billing/confirm",
@@ -110,13 +118,39 @@ def test_confirm_second_call_for_same_order_id_does_not_double_extend(client, db
         json={"order_id": checkout["order_id"], "payment_key": "pk2", "amount": 19900},
         headers=auth_headers,
     )
-    assert second.status_code == 400
+    assert second.status_code == 200  # 에러 아님 — 이미 성공한 주문의 재확인
+    assert second.json()["status"] == "approved"
+    assert second.json()["expires_at"] == first_expires_at  # 두 번째 호출로 추가 연장되지 않음
+    assert call_count["n"] == 1  # 토스 API는 딱 한 번만 호출됨
 
     sub = db_session.query(Subscription).filter_by(user_id=seeded_user["user"].id).one()
-    assert sub.expires_at.isoformat() == first_expires_at  # 두 번째 호출로 추가 연장되지 않음
+    assert sub.expires_at.isoformat() == first_expires_at
 
     payment = db_session.query(Payment).filter_by(order_id=checkout["order_id"]).one()
     assert payment.toss_payment_key == "pk1"  # 두 번째 payment_key로 덮어써지지 않음
+
+
+def test_confirm_already_failed_payment_returns_400(client, db_session, seeded_user, auth_headers, monkeypatch):
+    """이미 실패로 확정된 결제를 재confirm하면 (승인과 달리) 여전히 400이어야 한다 —
+    성공했던 것처럼 착각하게 만들면 안 된다."""
+    checkout = client.post("/billing/checkout", json={}, headers=auth_headers).json()
+    monkeypatch.setattr(
+        "app.routers.billing.confirm_payment",
+        lambda **kw: {"status": "ABORTED", "totalAmount": 19900},
+    )
+    first = client.post(
+        "/billing/confirm",
+        json={"order_id": checkout["order_id"], "payment_key": "pk1", "amount": 19900},
+        headers=auth_headers,
+    )
+    assert first.status_code == 402
+
+    second = client.post(
+        "/billing/confirm",
+        json={"order_id": checkout["order_id"], "payment_key": "pk2", "amount": 19900},
+        headers=auth_headers,
+    )
+    assert second.status_code == 400
 
 
 def test_confirm_rejects_other_users_order_id(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
