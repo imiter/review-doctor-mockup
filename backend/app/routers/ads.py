@@ -16,6 +16,7 @@ from datetime import date, timedelta
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -44,6 +45,7 @@ router = APIRouter(tags=["ads"])
 _CRAWLER_DIR = pathlib.Path(__file__).resolve().parents[3] / "crawler"
 _CRAWLER_PYTHON = _CRAWLER_DIR / ".venv" / "bin" / "python"
 _CRAWL_TIMEOUT_SEC = 900  # 지점 3개 * 지점당 1분 안팎 + 여유
+_BID_STEP_WON = 30  # 순위 미달 시 다음 시도 추천 증액폭(설계 문서 — 사용자 제안 10~50원 중 기본값)
 _crawl_lock = threading.Lock()  # 에뮬레이터는 한 번에 하나만 조작 가능 — 동시 실행 방지
 
 _CRAWL_WORKER_URL = os.getenv("CRAWL_WORKER_URL")  # 배포 환경에서만 설정 (예: 터널 URL)
@@ -391,6 +393,23 @@ def _campaign_for_user(campaign_id: int, user: User, db: Session) -> AdCampaign:
     return campaign
 
 
+class UpdateCampaignRequest(BaseModel):
+    target_rank: int = Field(ge=1)
+
+
+@router.patch("/ads/campaigns/{campaign_id}")
+def ads_update_campaign(
+    campaign_id: int,
+    body: UpdateCampaignRequest,
+    user: User = Depends(require_pro_plan),
+    db: Session = Depends(get_db),
+):
+    campaign = _campaign_for_user(campaign_id, user, db)
+    campaign.target_rank = body.target_rank
+    db.commit()
+    return {"campaign_id": campaign.id, "target_rank": campaign.target_rank}
+
+
 @router.post("/ads/rank-by-distance/run")
 def ads_rank_by_distance_run(
     campaign_id: int,
@@ -490,7 +509,7 @@ def ads_rank_monitoring(
             current_rank = real_latest.current_rank if real_latest else None
             rank_status = ("rank_dropped" if current_rank > c.target_rank else "normal") if current_rank is not None else None
             recommended_action = "raise_cpc" if rank_status == "rank_dropped" else "keep"
-            competitor_est_cpc = round(c.current_cpc * 1.15) if current_rank is not None and rank_status == "rank_dropped" else None
+            suggested_cpc = c.current_cpc + _BID_STEP_WON if rank_status == "rank_dropped" else None
             result.append({
                 "campaign_id": c.id,
                 "category": c.category,
@@ -498,10 +517,10 @@ def ads_rank_monitoring(
                 "target_rank": c.target_rank,
                 "status": c.status,
                 "current_rank": current_rank,
-                "competitor_est_cpc": competitor_est_cpc,
+                "competitor_est_cpc": None,  # 배민이 노출하지 않아 실측 불가 — 항상 None(프론트가 컬럼 자체를 제거)
                 "rank_status": rank_status,
                 "recommended_action": recommended_action,
-                "suggested_cpc": None,  # 경쟁 CPC를 실측할 방법이 없어 구체적 액수는 안 줌
+                "suggested_cpc": suggested_cpc,
                 "snapshot_at": real_latest.snapshot_at.isoformat() if real_latest else None,
             })
             continue

@@ -387,7 +387,8 @@ def test_rank_monitoring_uses_real_distance_snapshot_when_shop_no_set(client, db
     assert row["current_rank"] == 36  # 가장 최신인 Mock(1위)도, 가장 최신인 1.5~2.5km(9위)도 아니라 distance_km=0(36위)
     assert row["rank_status"] == "rank_dropped"  # 36 > target_rank(3)
     assert row["recommended_action"] == "raise_cpc"
-    assert row["suggested_cpc"] is None  # 경쟁 CPC를 몰라 구체적 액수는 못 줌
+    assert row["competitor_est_cpc"] is None  # 배민이 노출하지 않아 항상 None(추정치 계산 제거)
+    assert row["suggested_cpc"] == campaign.current_cpc + 30  # 실제 현재 CPC 기준 +30원 추천(campaign 기본 current_cpc=400)
 
 
 def test_rank_monitoring_no_real_snapshot_yet_when_shop_no_set(client, db_session, seeded_user, auth_headers):
@@ -437,3 +438,38 @@ def test_ads_performance_blocked_for_basic_plan(client, db_session, seeded_user,
     res = client.get("/ads/performance", headers=auth_headers)
     assert res.status_code == 403
     assert res.json()["detail"]["error_code"] == "pro_required"
+
+
+def test_update_campaign_target_rank(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
+    campaign = make_campaign(db_session, seeded_user["store"], target_rank=5, shop_no="14804318")
+
+    res = client.patch(f"/ads/campaigns/{campaign.id}", json={"target_rank": 2}, headers=auth_headers)
+
+    assert res.status_code == 200
+    assert res.json() == {"campaign_id": campaign.id, "target_rank": 2}
+    db_session.refresh(campaign)
+    assert campaign.target_rank == 2
+
+
+def test_update_campaign_target_rank_rejects_other_users_campaign(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
+    other_campaign = make_campaign(db_session, seeded_user["store"], target_rank=5, shop_no="14804318")
+    # _campaign_for_user는 store.user_id로 소유권을 확인한다 — 다른 유저 소유
+    # 캠페인이면 404여야 한다. 여기서는 store_id를 존재하지 않는 값으로 바꿔
+    # 같은 효과(소유권 불일치)를 낸다.
+    other_campaign.store_id = other_campaign.store_id + 99999
+    db_session.commit()
+
+    res = client.patch(f"/ads/campaigns/{other_campaign.id}", json={"target_rank": 2}, headers=auth_headers)
+
+    assert res.status_code == 404
+
+
+def test_update_campaign_target_rank_rejects_below_one(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
+    campaign = make_campaign(db_session, seeded_user["store"], target_rank=5, shop_no="14804318")
+
+    res = client.patch(f"/ads/campaigns/{campaign.id}", json={"target_rank": 0}, headers=auth_headers)
+
+    assert res.status_code == 422
