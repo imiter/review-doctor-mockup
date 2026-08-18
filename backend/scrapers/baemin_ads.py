@@ -162,3 +162,59 @@ def fetch_brand_click_metrics(page, shop_no: int, months: list[str]) -> list[dic
         raise BaeminAdsScrapeError("우리가게클릭 성과 API 응답을 한 번도 확인하지 못했습니다")
 
     return responses
+
+
+def fetch_cpc_booking(page, shop_no: str) -> dict:
+    """사장님광장 "광고·서비스관리" 화면(`/shops/{shop_no}/ad/campaign`)에서
+    `GET /v4/cpc/bookings/by-shop-number?shopNumber={shop_no}` organic 응답을
+    가로채 현재 CPC 입찰가 등을 반환한다. `fetch_shop_info`(baemin_stats.py)와
+    동일한 단발성 GET 인터셉트 패턴 — 화면 진입만으로 호출되는 API라
+    `fetch_brand_click_metrics`처럼 명시적 상호작용을 기다릴 필요가 없다.
+
+    반환 키: `bid`(int, 클릭당 희망 광고금액=현재 CPC), `max_bid`(int),
+    `monthly_budget`(int), `spent_budget`(int), `is_auto_bidding`(bool).
+    """
+    state = {"observed_any": False, "body": None}
+
+    def _on_response(response) -> None:
+        url = response.url
+        if "self-api.baemin.com" not in url:
+            return
+        if urlparse(url).path != "/v4/cpc/bookings/by-shop-number":
+            return
+        state["observed_any"] = True
+        if response.status == 200:
+            try:
+                state["body"] = response.json()
+            except Exception:
+                pass
+
+    page.on("response", _on_response)
+    try:
+        try:
+            page.goto(f"https://self.baemin.com/shops/{shop_no}/ad/campaign")
+        except Exception as e:
+            raise BaeminAdsScrapeError(f"광고·서비스관리 페이지 이동에 실패했습니다: {e}") from e
+
+        page.wait_for_timeout(3_000)
+        _dismiss_backdrop_if_present(page)
+        page.wait_for_timeout(1_000)
+    finally:
+        page.remove_listener("response", _on_response)
+
+    if not state["observed_any"]:
+        raise BaeminAdsScrapeError("CPC 입찰가 API 응답을 한 번도 확인하지 못했습니다")
+    if state["body"] is None:
+        raise BaeminAdsScrapeError("CPC 입찰가 API 응답을 받았지만 파싱하지 못했습니다")
+
+    body = state["body"]
+    try:
+        return {
+            "bid": int(body["bid"]),
+            "max_bid": int(body["maxBid"]),
+            "monthly_budget": int(body["monthlyBudget"]),
+            "spent_budget": int(body["spentBudget"]),
+            "is_auto_bidding": bool(body["isAutoBidding"]),
+        }
+    except (KeyError, TypeError) as e:
+        raise BaeminAdsScrapeError(f"CPC 입찰가 응답 형태가 예상과 다릅니다: {e}") from e
