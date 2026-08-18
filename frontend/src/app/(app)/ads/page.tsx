@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Card } from "@/components/Card";
-import { ApiError, apiGet, apiPost, won } from "@/lib/api";
+import { ApiError, apiGet, apiPatch, apiPost, won } from "@/lib/api";
 import { useStoreContext } from "@/lib/store-context";
 
 type RankRow = {
@@ -13,7 +13,6 @@ type RankRow = {
   target_rank: number;
   status: "active" | "paused";
   current_rank: number | null;
-  competitor_est_cpc: number | null;
   rank_status: "normal" | "rank_dropped" | null;
   recommended_action: "keep" | "raise_cpc" | "lower_cpc";
   suggested_cpc: number | null;
@@ -69,6 +68,8 @@ export default function AdsPage() {
   const [performance, setPerformance] = useState<PerformanceRow[]>([]);
   const [runningCampaignId, setRunningCampaignId] = useState<number | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
+  const [bidInputs, setBidInputs] = useState<Record<number, string>>({});
+  const [targetRankInputs, setTargetRankInputs] = useState<Record<number, string>>({});
 
   useEffect(() => {
     if (!storeId || (billing && !billing.is_pro)) return;
@@ -85,38 +86,73 @@ export default function AdsPage() {
   // 없다 — 대신 시작만 요청하고(POST), 5초 간격으로 상태를 조회(GET)한다.
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  type CrawlStatus = {
+    status: "idle" | "running" | "done" | "error";
+    inserted?: number;
+    skipped?: number;
+    points?: DistancePoint[];
+    error?: string;
+  };
+
+  async function waitForCrawlResult(campaignId: number): Promise<CrawlStatus> {
+    while (true) {
+      await sleep(5000);
+      const status = await apiGet<CrawlStatus>(`/ads/rank-by-distance/run/status?campaign_id=${campaignId}`);
+
+      if (status.status === "done") {
+        setDistanceRanks((prev) =>
+          prev.map((c) => (c.campaign_id === campaignId ? { ...c, points: status.points ?? c.points } : c))
+        );
+        return status;
+      }
+      if (status.status === "error") {
+        setRunError(status.error ?? "순위 확인 중 오류가 발생했습니다.");
+        return status;
+      }
+      // "running" 또는 "idle"(막 시작해서 아직 상태가 안 잡힌 순간)이면 계속 폴링
+    }
+  }
+
   async function handleRunCheck(campaignId: number) {
     setRunningCampaignId(campaignId);
     setRunError(null);
     try {
       await apiPost<{ status: string }>(`/ads/rank-by-distance/run?campaign_id=${campaignId}`);
-
-      while (true) {
-        await sleep(5000);
-        const status = await apiGet<{
-          status: "idle" | "running" | "done" | "error";
-          inserted?: number;
-          skipped?: number;
-          points?: DistancePoint[];
-          error?: string;
-        }>(`/ads/rank-by-distance/run/status?campaign_id=${campaignId}`);
-
-        if (status.status === "done") {
-          setDistanceRanks((prev) =>
-            prev.map((c) => (c.campaign_id === campaignId ? { ...c, points: status.points ?? c.points } : c))
-          );
-          break;
-        }
-        if (status.status === "error") {
-          setRunError(status.error ?? "순위 확인 중 오류가 발생했습니다.");
-          break;
-        }
-        // "running" 또는 "idle"(막 시작해서 아직 상태가 안 잡힌 순간)이면 계속 폴링
-      }
+      await waitForCrawlResult(campaignId);
     } catch (e) {
       setRunError(e instanceof ApiError ? e.message : "순위 확인 중 오류가 발생했습니다.");
     } finally {
       setRunningCampaignId(null);
+    }
+  }
+
+  async function handleApplyBid(campaignId: number, amount: number) {
+    if (!window.confirm(`${won(amount)}으로 배민에 실제 반영됩니다. 계속할까요?`)) return;
+    setRunningCampaignId(campaignId);
+    setRunError(null);
+    try {
+      await apiPost<{ status: string }>(
+        `/ads/rank-by-distance/apply-bid?campaign_id=${campaignId}&amount=${amount}`
+      );
+      const result = await waitForCrawlResult(campaignId);
+      if (result.status === "done") {
+        apiGet<RankRow[]>(`/ads/rank-monitoring?store_id=${storeId}`).then(setRanks).catch(() => {});
+      }
+    } catch (e) {
+      setRunError(e instanceof ApiError ? e.message : "입찰가 반영 중 오류가 발생했습니다.");
+    } finally {
+      setRunningCampaignId(null);
+    }
+  }
+
+  async function handleUpdateTargetRank(campaignId: number, targetRank: number) {
+    try {
+      await apiPatch<{ campaign_id: number; target_rank: number }>(
+        `/ads/campaigns/${campaignId}`, { target_rank: targetRank }
+      );
+      setRanks((prev) => prev.map((r) => (r.campaign_id === campaignId ? { ...r, target_rank: targetRank } : r)));
+    } catch (e) {
+      setRunError(e instanceof ApiError ? e.message : "목표 순위 저장 중 오류가 발생했습니다.");
     }
   }
 
@@ -143,10 +179,12 @@ export default function AdsPage() {
       <div>
         <h1 className="text-xl font-semibold">광고 순위 모니터링</h1>
         <p className="text-sm text-muted">
-          치밥대장은 실제 배민 데이터 기반입니다 — 현재 순위는 아래 반경별 실측(실기기
-          자동화) 중 가게 주소 지점(0km) 결과, 광고 성과는 우리가게클릭 실데이터입니다.
-          경쟁 가게 CPC만은 배민이 노출하지 않아 추정치입니다. 나머지 캠페인은 수집됐다고
-          가정한 Mock 스냅샷입니다. CPC 자동 입찰은 하지 않습니다.
+          4개 브랜드(치밥대장/곱도리탕/블랙닭갈비/행복가성비) 모두 실제 배민 데이터
+          기반입니다 — 현재 CPC는 배민 우리가게클릭 실제 입찰가, 순위는 아래 반경별
+          실측(실기기 자동화) 중 가게 주소 지점(0km) 결과, 광고 성과는 우리가게클릭
+          실데이터입니다. 경쟁 가게의 CPC는 배민이 노출하지 않아 알 수 없습니다. CPC
+          자동 입찰은 하지 않으며, 배민에 실제로 반영되는 건 아래에서 직접
+          &quot;적용하기&quot;를 눌렀을 때뿐입니다.
         </p>
       </div>
 
@@ -159,7 +197,6 @@ export default function AdsPage() {
                 <th className="font-medium">현재 CPC</th>
                 <th className="font-medium">목표 순위</th>
                 <th className="font-medium">현재 순위</th>
-                <th className="font-medium">경쟁 예상 CPC (추정)</th>
                 <th className="font-medium">상태</th>
                 <th className="font-medium">추천 액션</th>
               </tr>
@@ -175,7 +212,6 @@ export default function AdsPage() {
                     <td className={`font-semibold ${dropped ? "text-danger" : "text-success"}`}>
                       {r.current_rank === null ? "—" : `${r.current_rank}위`}
                     </td>
-                    <td>{r.competitor_est_cpc === null ? "—" : won(r.competitor_est_cpc)}</td>
                     <td>
                       <span
                         className={`rounded px-2 py-0.5 text-xs font-medium ${
@@ -194,7 +230,7 @@ export default function AdsPage() {
               })}
               {ranks.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-6 text-center text-sm text-muted">등록된 광고 캠페인이 없습니다.</td>
+                  <td colSpan={6} className="py-6 text-center text-sm text-muted">등록된 광고 캠페인이 없습니다.</td>
                 </tr>
               )}
             </tbody>
@@ -213,9 +249,13 @@ export default function AdsPage() {
           <p className="mb-3 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">{runError}</p>
         )}
         <div className="space-y-4">
-          {distanceRanks.map((c) => (
+          {distanceRanks.map((c) => {
+            const rank = ranks.find((r) => r.campaign_id === c.campaign_id);
+            const bidValue = bidInputs[c.campaign_id] ?? (rank ? String(rank.current_cpc) : "");
+            const targetRankValue = targetRankInputs[c.campaign_id] ?? String(c.target_rank);
+            return (
             <div key={c.campaign_id}>
-              <div className="mb-2 flex items-center justify-between">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <p className="text-sm font-medium">{c.category}</p>
                 <button
                   onClick={() => handleRunCheck(c.campaign_id)}
@@ -229,6 +269,51 @@ export default function AdsPage() {
                       ? "순위 확인 중… (수 분 소요)"
                       : "우리가게 순위 확인"}
                 </button>
+              </div>
+              <div className="mb-3 flex flex-wrap items-end gap-3 rounded-lg bg-surface-2 p-3">
+                <label className="text-xs text-muted">
+                  목표 순위
+                  <input
+                    type="number"
+                    min={1}
+                    value={targetRankValue}
+                    onChange={(e) => setTargetRankInputs((prev) => ({ ...prev, [c.campaign_id]: e.target.value }))}
+                    onBlur={() => {
+                      const n = Number(targetRankValue);
+                      if (Number.isInteger(n) && n >= 1) handleUpdateTargetRank(c.campaign_id, n);
+                    }}
+                    className="mt-1 block w-20 rounded border border-border-subtle bg-surface px-2 py-1 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-muted">
+                  시도할 CPC 금액(원)
+                  <input
+                    type="number"
+                    min={1}
+                    value={bidValue}
+                    onChange={(e) => setBidInputs((prev) => ({ ...prev, [c.campaign_id]: e.target.value }))}
+                    className="mt-1 block w-28 rounded border border-border-subtle bg-surface px-2 py-1 text-sm"
+                  />
+                </label>
+                <button
+                  onClick={() => {
+                    const n = Number(bidValue);
+                    if (Number.isInteger(n) && n >= 1) handleApplyBid(c.campaign_id, n);
+                  }}
+                  disabled={runningCampaignId !== null}
+                  className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  적용하기
+                </button>
+                {rank?.suggested_cpc != null && (
+                  <p className="text-xs text-muted">
+                    아직 목표({rank.target_rank}위)보다 낮아요({rank.current_rank}위). {won(rank.suggested_cpc)}으로
+                    시도해보는 걸 추천해요.
+                  </p>
+                )}
+                {rank?.rank_status === "normal" && (
+                  <p className="text-xs text-success">목표를 달성했어요!</p>
+                )}
               </div>
               {c.points.length === 0 ? (
                 <p className="text-sm text-muted">아직 실측 데이터가 없습니다.</p>
@@ -267,7 +352,8 @@ export default function AdsPage() {
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
           {distanceRanks.length === 0 && (
             <p className="text-sm text-muted">등록된 광고 캠페인이 없습니다.</p>
           )}
