@@ -8,6 +8,7 @@ crawler venv가 있으면 직접 실행하고(로컬 개발), 없으면 CRAWL_WO
 사이트는 어느 쪽이든 결과를 동일하게 조회한다."""
 
 import hmac
+import logging
 import os
 import pathlib
 import subprocess
@@ -41,6 +42,8 @@ from scrapers.baemin_ads import submit_cpc_bid
 from scrapers.baemin_auth import login as baemin_login
 from scrapers.baemin_stats import fetch_shop_info
 from scripts.ingest_rank_snapshots import ingest as ingest_csv
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["ads"])
 
@@ -333,6 +336,7 @@ def _apply_bid_then_crawl(campaign_id: int, amount: int) -> tuple[int, int]:
             finally:
                 session.close()
         except Exception as e:
+            logger.exception("submit_cpc_bid 실패 campaign_id=%s amount=%s", campaign_id, amount)
             raise HTTPException(502, f"입찰가 반영에 실패했습니다: {e}") from e
 
         try:
@@ -397,9 +401,11 @@ def _execute_bid_apply_job(campaign_id: int, amount: int) -> None:
         with _job_state_lock:
             _job_state.update(campaign_id=campaign_id, status="done", inserted=inserted, skipped=skipped, error=None)
     except HTTPException as e:
+        logger.warning("apply-bid 실패 campaign_id=%s: %s", campaign_id, e.detail)
         with _job_state_lock:
             _job_state.update(campaign_id=campaign_id, status="error", inserted=None, skipped=None, error=e.detail)
     except Exception as e:  # noqa: BLE001
+        logger.exception("apply-bid 처리 중 예상치 못한 예외 campaign_id=%s", campaign_id)
         with _job_state_lock:
             _job_state.update(campaign_id=campaign_id, status="error", inserted=None, skipped=None, error=str(e))
     finally:
