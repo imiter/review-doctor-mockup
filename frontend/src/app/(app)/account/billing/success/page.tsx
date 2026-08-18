@@ -88,11 +88,17 @@ export default function BillingSuccessPage() {
       {state === "waiting" && bankInfo && (
         <>
           <p className="text-lg font-semibold">가상계좌가 발급됐어요</p>
-          <div className="rounded-lg border border-border-subtle p-4 text-left text-sm">
-            <p className="text-muted">은행 코드: {bankInfo.bankCode}</p>
-            <p className="text-muted">계좌번호: {bankInfo.accountNumber}</p>
-            {bankInfo.dueDate && <p className="text-muted">입금기한: {bankInfo.dueDate}</p>}
-          </div>
+          {bankInfo.accountNumber ? (
+            <div className="rounded-lg border border-border-subtle p-4 text-left text-sm">
+              <p className="text-muted">은행 코드: {bankInfo.bankCode}</p>
+              <p className="text-muted">계좌번호: {bankInfo.accountNumber}</p>
+              {bankInfo.dueDate && <p className="text-muted">입금기한: {bankInfo.dueDate}</p>}
+            </div>
+          ) : (
+            <p className="text-sm text-muted">
+              이미 발급된 계좌 정보는 토스 앱 또는 결제 시 받은 안내를 확인해주세요.
+            </p>
+          )}
           <p className="text-sm text-muted">입금이 완료되면 자동으로 Pro로 전환돼요.</p>
           <button
             onClick={() => refreshBilling()}
