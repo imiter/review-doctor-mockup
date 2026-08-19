@@ -562,3 +562,28 @@ def test_sync_status_forbidden_for_other_users_job(client, db_session, seeded_us
 
     res = client.get(f"/store-connections/baemin/sync-status/{other_job.id}", headers=auth_headers)
     assert res.status_code == 404
+
+
+def test_sync_reviews_manual_dispatch_records_triggered_by_manual(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    from app.credential_crypto import encrypt_credential
+    from app.models import ReviewSyncJob, StorePlatformConnection
+    from app.routers import store_connections as sc
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    db_session.commit()
+
+    monkeypatch.setattr(sc, "run_review_sync_job", lambda job_id: None)
+
+    res = client.post("/store-connections/baemin/sync-reviews", headers=auth_headers)
+    assert res.status_code == 202
+    job_id = res.json()["job_id"]
+
+    job = db_session.query(ReviewSyncJob).filter_by(id=job_id).one()
+    assert job.triggered_by == "manual"

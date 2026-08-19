@@ -190,6 +190,63 @@ def baemin_login_endpoint(
     return {"connected": True, "shop_name": shop_name, "platform_store_id": conn.platform_store_id}
 
 
+def _dispatch_sync_job(
+    sid: int, platform: Platform, conn: StorePlatformConnection, db: Session,
+    *, triggered_by: str,
+    background_tasks: BackgroundTasks | None = None,
+) -> ReviewSyncJob | None:
+    """이미 진행 중인 잡이 있으면 None을 반환하고 아무 것도 하지 않는다.
+    아니면 잡을 만들고 워커(설정돼 있으면) 또는 이 프로세스의 백그라운드
+    작업으로 동기화를 시작시킨 뒤 그 잡을 반환한다.
+
+    CRAWL_WORKER_URL도 없고 background_tasks도 None인 경로(스케줄러가
+    워커 없는 로컬 개발 환경에서 도는 경우)에서는 이 함수가 잡을 만들기만
+    하고 status="pending"인 채로 반환한다 — 실제로 동기화를 실행하는 건
+    호출부 책임이다(app/scheduler.py의 run_scheduled_sync_cycle 참고)."""
+    existing_job = db.scalar(
+        select(ReviewSyncJob).where(
+            ReviewSyncJob.store_id == sid,
+            ReviewSyncJob.platform_id == platform.id,
+            ReviewSyncJob.status.in_(("pending", "running")),
+        )
+    )
+    if existing_job is not None:
+        return None
+
+    job = ReviewSyncJob(
+        store_id=sid, platform_id=platform.id, status="pending",
+        started_at=datetime.now(timezone.utc), triggered_by=triggered_by,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    if _CRAWL_WORKER_URL:
+        try:
+            resp = httpx.post(
+                f"{_CRAWL_WORKER_URL}/internal/sync-reviews",
+                params={"job_id": job.id},
+                headers={"X-Worker-Secret": _CRAWL_WORKER_SECRET},
+                timeout=15,
+            )
+        except httpx.RequestError as e:
+            job.status = "failed"
+            job.error_message = f"크롤 워커에 연결할 수 없습니다: {e}"
+            job.finished_at = datetime.now(timezone.utc)
+            db.commit()
+            return job
+        if resp.status_code != 200:
+            job.status = "failed"
+            job.error_message = f"크롤 워커 실행 실패: {resp.text[:500]}"
+            job.finished_at = datetime.now(timezone.utc)
+            db.commit()
+        return job
+
+    if background_tasks is not None:
+        background_tasks.add_task(run_review_sync_job, job.id)
+    return job
+
+
 @router.post("/store-connections/baemin/sync-reviews", status_code=202)
 def start_review_sync(
     background_tasks: BackgroundTasks, store_id: int | None = None,
@@ -209,46 +266,9 @@ def start_review_sync(
     if conn is None or conn.credential_ciphertext is None:
         raise HTTPException(400, "먼저 배민 로그인이 필요합니다")
 
-    existing_job = db.scalar(
-        select(ReviewSyncJob).where(
-            ReviewSyncJob.store_id == sid,
-            ReviewSyncJob.platform_id == platform.id,
-            ReviewSyncJob.status.in_(("pending", "running")),
-        )
-    )
-    if existing_job is not None:
+    job = _dispatch_sync_job(sid, platform, conn, db, triggered_by="manual", background_tasks=background_tasks)
+    if job is None:
         raise HTTPException(409, "이미 진행 중인 동기화가 있습니다")
-
-    job = ReviewSyncJob(
-        store_id=sid, platform_id=platform.id, status="pending",
-        started_at=datetime.now(timezone.utc),
-    )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-
-    if _CRAWL_WORKER_URL:
-        try:
-            resp = httpx.post(
-                f"{_CRAWL_WORKER_URL}/internal/sync-reviews",
-                params={"job_id": job.id},
-                headers={"X-Worker-Secret": _CRAWL_WORKER_SECRET},
-                timeout=15,
-            )
-        except httpx.RequestError as e:
-            job.status = "failed"
-            job.error_message = f"크롤 워커에 연결할 수 없습니다: {e}"
-            job.finished_at = datetime.now(timezone.utc)
-            db.commit()
-            return {"job_id": job.id}
-        if resp.status_code != 200:
-            job.status = "failed"
-            job.error_message = f"크롤 워커 실행 실패: {resp.text[:500]}"
-            job.finished_at = datetime.now(timezone.utc)
-            db.commit()
-        return {"job_id": job.id}
-
-    background_tasks.add_task(run_review_sync_job, job.id)
     return {"job_id": job.id}
 
 
