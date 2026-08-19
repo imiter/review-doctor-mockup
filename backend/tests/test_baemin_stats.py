@@ -3,6 +3,7 @@ from scrapers.baemin_stats import (
     compute_order_sync_range,
     compute_repurchase_rates,
     compute_settlement_sync_range,
+    filter_months_needing_sync,
     map_deposits_by_date,
     map_orders_to_daily_sales,
     map_repurchase_by_date,
@@ -504,6 +505,37 @@ def test_compute_settlement_sync_range_cursor_today_does_not_go_past_start():
     start, end = compute_settlement_sync_range(today, today, backfill_days=90)
     assert end == today
     assert start == date(2026, 8, 17)  # 오늘 - 2일
+
+
+def test_filter_months_needing_sync_keeps_only_unsynced_months():
+    months = ["2026-06", "2026-07", "2026-08"]
+    synced = {"2026-06"}
+    assert filter_months_needing_sync(months, synced) == ["2026-07", "2026-08"]
+
+
+def test_filter_months_needing_sync_returns_all_when_nothing_synced():
+    months = ["2026-06", "2026-07", "2026-08"]
+    assert filter_months_needing_sync(months, set()) == months
+
+
+def test_filter_months_needing_sync_returns_empty_when_everything_synced():
+    months = ["2026-06", "2026-07", "2026-08"]
+    synced = {"2026-06", "2026-07", "2026-08"}
+    assert filter_months_needing_sync(months, synced) == []
+
+
+def test_filter_months_needing_sync_always_include_overrides_synced():
+    # 우가클의 진행 중인 이번 달은 이미 동기화됐어도 항상 포함해야 한다.
+    months = ["2026-06", "2026-07", "2026-08"]
+    synced = {"2026-06", "2026-07", "2026-08"}
+    result = filter_months_needing_sync(months, synced, always_include={"2026-08"})
+    assert result == ["2026-08"]
+
+
+def test_filter_months_needing_sync_preserves_input_order():
+    months = ["2026-06", "2026-07", "2026-08"]
+    synced = {"2026-07"}
+    assert filter_months_needing_sync(months, synced) == ["2026-06", "2026-08"]
 
 
 def test_parse_applied_range_reads_same_year_range():

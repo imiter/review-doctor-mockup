@@ -478,6 +478,18 @@ def compute_settlement_sync_range(
     return latest_settled_date - timedelta(days=2), today
 
 
+def filter_months_needing_sync(
+    months: list[str], synced_months: set[str], *, always_include: set[str] | None = None,
+) -> list[str]:
+    """이미 동기화된 달(`synced_months`)을 `months`에서 제외한다.
+    `always_include`에 있는 달은 `synced_months`에 있어도 항상 포함한다
+    (예: 우가클의 진행 중인 이번 달 — 완료된 달과 달리 매번 최신 상태로
+    갱신돼야 한다). 어떤 컬럼 기준으로 "동기화됨"을 판단할지는 호출부의
+    책임이다 — 이 함수는 그 판단 결과(집합)만 받아 필터링만 한다."""
+    always_include = always_include or set()
+    return [m for m in months if m not in synced_months or m in always_include]
+
+
 def map_deposits_by_date(responses: list[dict]) -> dict[str, int]:
     """`GET /v3/settle/history/summary` 응답들의 `contents[].{giveId,
     depositDueDate, giveAmount}`를 날짜별로 합산한다. `giveStatus`(예정/확정)는
