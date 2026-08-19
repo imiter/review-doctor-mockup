@@ -8,7 +8,7 @@
 import hmac
 import os
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
@@ -32,6 +32,21 @@ router = APIRouter(tags=["store-connections"])
 _CRAWL_WORKER_URL = os.getenv("CRAWL_WORKER_URL")
 _CRAWL_WORKER_SECRET = os.getenv("CRAWL_WORKER_SECRET", "")
 
+# 프로세스가 죽거나(워커 크래시, 맥북 재부팅, kill) 중간에 잘리면 잡이
+# pending/running 상태로 영원히 남아 _dispatch_sync_job이 이후 모든 호출
+# (수동 버튼 + 스케줄러)에서 계속 "이미 진행 중"으로 판단해 그 매장의
+# 동기화를 무기한 막는다 — 사용자에게는 어떤 에러도 안 보이고 그냥 영원히
+# "진행 중"으로만 보인다. 정상적인 동기화는 아무리 커도 1시간을 넘지
+# 않으므로(가장 큰 매장 기준 실측) 6시간이면 충분히 넉넉한 안전 마진이다.
+_STALE_JOB_THRESHOLD = timedelta(hours=6)
+
+
+def _as_aware(dt: datetime) -> datetime:
+    """SQLite(테스트)는 datetime을 tz 정보 없이 되돌려줄 수 있어서, naive면
+    UTC로 간주한다. Postgres(TIMESTAMPTZ, 운영)는 항상 tz-aware라 이 변환이
+    필요 없다(app/routers/auth.py의 동일한 헬퍼와 같은 이유)."""
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
 
 def _require_worker_secret(x_worker_secret: str) -> None:
     if not _CRAWL_WORKER_SECRET or not hmac.compare_digest(x_worker_secret, _CRAWL_WORKER_SECRET):
@@ -42,7 +57,7 @@ def _latest_sync_by_store(db: Session, store_id: int, platform_id: int) -> dict 
     job = db.scalar(
         select(ReviewSyncJob)
         .where(ReviewSyncJob.store_id == store_id, ReviewSyncJob.platform_id == platform_id)
-        .order_by(ReviewSyncJob.started_at.desc())
+        .order_by(ReviewSyncJob.started_at.desc(), ReviewSyncJob.id.desc())
         .limit(1)
     )
     if job is None:
@@ -223,7 +238,11 @@ def _dispatch_sync_job(
     CRAWL_WORKER_URL도 없고 background_tasks도 None인 경로(스케줄러가
     워커 없는 로컬 개발 환경에서 도는 경우)에서는 이 함수가 잡을 만들기만
     하고 status="pending"인 채로 반환한다 — 실제로 동기화를 실행하는 건
-    호출부 책임이다(app/scheduler.py의 run_scheduled_sync_cycle 참고)."""
+    호출부 책임이다(app/scheduler.py의 run_scheduled_sync_cycle 참고).
+
+    진행 중인 잡이 있어도 _STALE_JOB_THRESHOLD보다 오래됐으면 죽은 프로세스가
+    남긴 것으로 보고 failed로 마감한 뒤 새 잡을 만든다 — 아니면 그 매장의
+    동기화가 영원히 막힌다(위 _STALE_JOB_THRESHOLD 주석 참고)."""
     existing_job = db.scalar(
         select(ReviewSyncJob).where(
             ReviewSyncJob.store_id == sid,
@@ -232,7 +251,13 @@ def _dispatch_sync_job(
         )
     )
     if existing_job is not None:
-        return None
+        if datetime.now(timezone.utc) - _as_aware(existing_job.started_at) > _STALE_JOB_THRESHOLD:
+            existing_job.status = "failed"
+            existing_job.error_message = "동기화가 비정상 종료되었습니다 (응답 없음)"
+            existing_job.finished_at = datetime.now(timezone.utc)
+            db.commit()
+        else:
+            return None
 
     job = ReviewSyncJob(
         store_id=sid, platform_id=platform.id, status="pending",

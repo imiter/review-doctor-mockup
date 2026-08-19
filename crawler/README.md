@@ -172,6 +172,14 @@ cd crawler
 `DATABASE_PUBLIC_URL`)와 `railway variable list --service backend`로
 다시 확인할 수 있다.
 
+`ENABLE_SYNC_SCHEDULER`는 `crawler/.env.worker`에 절대 설정하면 안 된다.
+이 워커 백엔드는 `backend/`와 완전히 같은 `app.main:app`을 같은 Railway
+프로덕션 DB에 대고 실행하지만 `CRAWL_WORKER_URL`은 없다(이 프로세스 자신이
+워커라 더 위임할 곳이 없어서) — 여기서 스케줄러까지 켜지면 Railway 백엔드와
+이 워커가 같은 KST 04:00 순간에 같은 매장·같은 배민 계정을 향해 각자
+독립적으로 동기화를 실행하는 이중 실행 사고가 난다. 이 플래그는 Railway
+백엔드 서비스에만 설정한다.
+
 macOS 로그인 시 자동 실행되도록 LaunchAgent로 등록돼 있다
 (`~/Library/LaunchAgents/com.reviewdocter.crawler-worker.plist`, 저장소
 밖에 있어 git에는 없음). 재부팅 후 로그인하면 자동으로 4가지가 다시

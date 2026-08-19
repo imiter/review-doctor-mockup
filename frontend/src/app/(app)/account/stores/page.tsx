@@ -128,6 +128,7 @@ export default function StoreConnectionsPage() {
         if (status.status === "success" || status.status === "failed") {
           if (pollRef.current) clearInterval(pollRef.current);
           setSyncingId(null);
+          load(); // last_sync를 방금 끝난 동기화 결과로 갱신
         }
       }, 4000);
     } catch (e) {
@@ -202,13 +203,18 @@ export default function StoreConnectionsPage() {
                 </button>
                 {syncingId !== c.id && c.last_sync && (
                   <p className="mt-2 text-xs text-muted">
-                    마지막 동기화: {c.last_sync.triggered_by === "scheduled" ? "자동" : "수동"} ·{" "}
-                    {c.last_sync.finished_at ? new Date(c.last_sync.finished_at).toLocaleString("ko-KR") : "진행 중"} ·{" "}
-                    {c.last_sync.status === "success" && "성공"}
-                    {c.last_sync.status === "failed" && (
-                      <span className="text-danger">실패: {c.last_sync.error_message}</span>
+                    {c.last_sync.status === "pending" || c.last_sync.status === "running" ? (
+                      <>마지막 동기화: {c.last_sync.triggered_by === "scheduled" ? "자동" : "수동"} · 동기화 진행 중</>
+                    ) : (
+                      <>
+                        마지막 동기화: {c.last_sync.triggered_by === "scheduled" ? "자동" : "수동"} ·{" "}
+                        {c.last_sync.finished_at ? new Date(c.last_sync.finished_at).toLocaleString("ko-KR") : "-"} ·{" "}
+                        {c.last_sync.status === "success" && "성공"}
+                        {c.last_sync.status === "failed" && (
+                          <span className="text-danger">실패: {c.last_sync.error_message}</span>
+                        )}
+                      </>
                     )}
-                    {(c.last_sync.status === "pending" || c.last_sync.status === "running") && "진행 중"}
                   </p>
                 )}
                 {syncStatus && (

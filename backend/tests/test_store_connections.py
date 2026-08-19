@@ -240,6 +240,77 @@ def test_sync_reviews_allowed_after_previous_job_finished(client, db_session, se
     assert res.status_code == 202
 
 
+def test_sync_reviews_allowed_after_stale_running_job_marked_failed(
+    client, db_session, seeded_user, platforms, auth_headers, monkeypatch
+):
+    """6시간 넘게 running으로 남아있는 잡은 죽은 프로세스가 남긴 것으로 보고
+    자동으로 failed 처리한 뒤 새 잡을 만들어야 한다 — 아니면 그 매장의
+    동기화가 영원히 막힌다."""
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography.fernet import Fernet
+
+    from app.credential_crypto import encrypt_credential
+    from app.models import ReviewSyncJob, StorePlatformConnection
+    from app.routers import store_connections as sc
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    stale_job = ReviewSyncJob(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, status="running",
+        started_at=datetime.now(timezone.utc) - timedelta(hours=7),
+    )
+    db_session.add(stale_job)
+    db_session.commit()
+    stale_job_id = stale_job.id
+
+    monkeypatch.setattr(sc, "run_review_sync_job", lambda job_id: None)
+
+    res = client.post("/store-connections/baemin/sync-reviews", headers=auth_headers)
+    assert res.status_code == 202
+    new_job_id = res.json()["job_id"]
+    assert new_job_id != stale_job_id
+
+    db_session.expire_all()
+    stale_job = db_session.get(ReviewSyncJob, stale_job_id)
+    assert stale_job.status == "failed"
+    assert stale_job.error_message == "동기화가 비정상 종료되었습니다 (응답 없음)"
+    assert stale_job.finished_at is not None
+
+
+def test_sync_reviews_rejected_while_recent_running_job_not_yet_stale(
+    client, db_session, seeded_user, platforms, auth_headers, monkeypatch
+):
+    """6시간 미만인 running 잡은 여전히 진행 중일 수 있으므로 stale 처리하지
+    않고 기존처럼 409로 막아야 한다."""
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography.fernet import Fernet
+
+    from app.credential_crypto import encrypt_credential
+    from app.models import ReviewSyncJob, StorePlatformConnection
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    db_session.add(ReviewSyncJob(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, status="running",
+        started_at=datetime.now(timezone.utc) - timedelta(hours=5, minutes=59),
+    ))
+    db_session.commit()
+
+    res = client.post("/store-connections/baemin/sync-reviews", headers=auth_headers)
+    assert res.status_code == 409
+    assert "이미 진행 중" in res.json()["detail"]
+
+
 def test_list_baemin_shop_brands_returns_empty_when_no_brands_synced_yet(client, seeded_user, platforms, auth_headers):
     # seeded_user는 baemin 연결은 있지만(Mock) baemin_shop_brands 행은 없다
     res = client.get("/store-connections/baemin/shops", headers=auth_headers)
