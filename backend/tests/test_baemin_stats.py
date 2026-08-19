@@ -1,6 +1,8 @@
 from scrapers.baemin_stats import (
     _should_count_sales_response,
+    compute_order_sync_range,
     compute_repurchase_rates,
+    compute_settlement_sync_range,
     map_deposits_by_date,
     map_orders_to_daily_sales,
     map_repurchase_by_date,
@@ -471,6 +473,37 @@ def test_compute_order_sync_range_converts_aware_cursor_to_kst():
     assert end == today
     # KST 날짜(8/13) - 2일 = 8/11. UTC 날짜(8/12)를 썼다면 8/10이 됐을 것이다.
     assert start == date(2026, 8, 11)
+
+
+def test_compute_settlement_sync_range_no_cursor_backfills_default_window():
+    today = date(2026, 8, 19)
+    start, end = compute_settlement_sync_range(None, today, backfill_days=90)
+    assert end == today
+    assert start == date(2026, 5, 21)  # 90일 전
+
+
+def test_compute_settlement_sync_range_with_cursor_uses_two_day_buffer():
+    today = date(2026, 8, 19)
+    latest = date(2026, 8, 15)
+    start, end = compute_settlement_sync_range(latest, today, backfill_days=90)
+    assert end == today
+    assert start == date(2026, 8, 13)  # 8/15 - 2일
+
+
+def test_compute_settlement_sync_range_respects_different_backfill_days():
+    # 정산 상세는 30일 기본폭을 쓴다 — 같은 함수를 backfill_days만 바꿔 재사용.
+    today = date(2026, 8, 19)
+    start, end = compute_settlement_sync_range(None, today, backfill_days=30)
+    assert end == today
+    assert start == date(2026, 7, 20)  # 30일 전
+
+
+def test_compute_settlement_sync_range_cursor_today_does_not_go_past_start():
+    # 커서가 오늘이어도 에러 없이 동작해야 한다(퇴화 케이스).
+    today = date(2026, 8, 19)
+    start, end = compute_settlement_sync_range(today, today, backfill_days=90)
+    assert end == today
+    assert start == date(2026, 8, 17)  # 오늘 - 2일
 
 
 def test_parse_applied_range_reads_same_year_range():

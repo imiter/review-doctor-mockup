@@ -459,6 +459,25 @@ def compute_order_sync_range(latest_ordered_at: datetime | None, today: date) ->
     return latest_ordered_at.date() - timedelta(days=2), today
 
 
+def compute_settlement_sync_range(
+    latest_settled_date: date | None, today: date, *, backfill_days: int,
+) -> tuple[date, date]:
+    """정산 계열(입금/정산 상세) 증분 조회 범위를 계산한다.
+    `compute_order_sync_range`와 같은 패턴이지만 커서 타입이 다르다 —
+    `DailySettlement.settle_date`는 순수 `date` 컬럼이라(orders의
+    `ordered_at`과 달리 TIMESTAMPTZ가 아님) 타임존 변환이 필요 없다.
+
+    `latest_settled_date`가 없으면(최초 동기화, 또는 아직 이 소스가 한
+    번도 성공한 적 없음) `backfill_days` 전부터 오늘까지 전체를 반환한다
+    (입금은 90일, 정산 상세는 30일 — 호출부가 다르게 넘긴다). 있으면 그
+    날짜에서 이틀 여유를 두고 오늘까지만 반환한다 — 정산 배치 상태가
+    동기화 시점 이후 확정될 수 있어서다(설계 문서 참고, orders와 동일한
+    이유)."""
+    if latest_settled_date is None:
+        return today - timedelta(days=backfill_days), today
+    return latest_settled_date - timedelta(days=2), today
+
+
 def map_deposits_by_date(responses: list[dict]) -> dict[str, int]:
     """`GET /v3/settle/history/summary` 응답들의 `contents[].{giveId,
     depositDueDate, giveAmount}`를 날짜별로 합산한다. `giveStatus`(예정/확정)는
