@@ -5,10 +5,13 @@
 아이디/사업자번호가 즉석에서 만들어질 뿐, 실제 계정 연동은 하지 않는다.
 """
 
+import hmac
+import os
 import random
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
@@ -21,6 +24,18 @@ from app.review_sync import run_review_sync_job, upsert_shop_brand
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 
 router = APIRouter(tags=["store-connections"])
+
+# Railway처럼 이 프로세스에서 배민 로그인을 직접 실행하면 클라우드 IP가 봇
+# 탐지에 걸려 로그인 폼 자체가 안 뜬다(app/routers/ads.py의 apply-bid와 동일한
+# 원인, 2026-08-18 실측 확인). CRAWL_WORKER_URL이 설정된 배포 환경에서는
+# 로그인/동기화 전체를 홈 IP 워커(맥북)에 위임한다.
+_CRAWL_WORKER_URL = os.getenv("CRAWL_WORKER_URL")
+_CRAWL_WORKER_SECRET = os.getenv("CRAWL_WORKER_SECRET", "")
+
+
+def _require_worker_secret(x_worker_secret: str) -> None:
+    if not _CRAWL_WORKER_SECRET or not hmac.compare_digest(x_worker_secret, _CRAWL_WORKER_SECRET):
+        raise HTTPException(403, "워커 비밀키가 일치하지 않습니다")
 
 
 def _row(c: StorePlatformConnection) -> dict:
@@ -117,12 +132,33 @@ def baemin_login_endpoint(
     if platform is None:
         raise HTTPException(500, "배민 플랫폼이 등록되어 있지 않습니다")
 
-    try:
-        session = baemin_login(body.platform_login_id, body.platform_login_password)
-    except BaeminLoginError as e:
-        raise HTTPException(400, str(e))
-    shop_no, shop_name, shops = session.shop_no, session.shop_name, session.shops
-    session.close()
+    if _CRAWL_WORKER_URL:
+        try:
+            resp = httpx.post(
+                f"{_CRAWL_WORKER_URL}/internal/baemin-login",
+                json={"login_id": body.platform_login_id, "password": body.platform_login_password},
+                headers={"X-Worker-Secret": _CRAWL_WORKER_SECRET},
+                timeout=60,
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(502, f"크롤 워커에 연결할 수 없습니다: {e}")
+        if resp.status_code != 200:
+            try:
+                detail = resp.json()["detail"]
+            except Exception:
+                detail = resp.text[:500]
+            raise HTTPException(400, detail)
+        data = resp.json()
+        shop_no = data["shop_no"]
+        shop_name = data["shop_name"]
+        shops = [(s["shop_no"], s["shop_name"]) for s in data["shops"]]
+    else:
+        try:
+            session = baemin_login(body.platform_login_id, body.platform_login_password)
+        except BaeminLoginError as e:
+            raise HTTPException(400, str(e))
+        shop_no, shop_name, shops = session.shop_no, session.shop_name, session.shops
+        session.close()
 
     ciphertext = encrypt_credential(body.platform_login_id, body.platform_login_password)
 
@@ -191,6 +227,27 @@ def start_review_sync(
     db.commit()
     db.refresh(job)
 
+    if _CRAWL_WORKER_URL:
+        try:
+            resp = httpx.post(
+                f"{_CRAWL_WORKER_URL}/internal/sync-reviews",
+                params={"job_id": job.id},
+                headers={"X-Worker-Secret": _CRAWL_WORKER_SECRET},
+                timeout=15,
+            )
+        except httpx.RequestError as e:
+            job.status = "failed"
+            job.error_message = f"크롤 워커에 연결할 수 없습니다: {e}"
+            job.finished_at = datetime.now(timezone.utc)
+            db.commit()
+            return {"job_id": job.id}
+        if resp.status_code != 200:
+            job.status = "failed"
+            job.error_message = f"크롤 워커 실행 실패: {resp.text[:500]}"
+            job.finished_at = datetime.now(timezone.utc)
+            db.commit()
+        return {"job_id": job.id}
+
     background_tasks.add_task(run_review_sync_job, job.id)
     return {"job_id": job.id}
 
@@ -231,3 +288,48 @@ def get_sync_status(job_id: int, user: User = Depends(get_current_user), db: Ses
         "reviews_fetched": job.reviews_fetched, "reviews_inserted": job.reviews_inserted,
         "error_message": job.error_message,
     }
+
+
+class InternalBaeminLoginRequest(BaseModel):
+    login_id: str
+    password: str
+
+
+@router.post("/internal/baemin-login")
+def internal_baemin_login(
+    body: InternalBaeminLoginRequest,
+    x_worker_secret: str = Header(default=""),
+):
+    """Railway가 이 컴퓨터(홈 IP)에게 배민 로그인+매장 목록 조회를 위임하는
+    서비스 간 엔드포인트(app/routers/ads.py의 /internal/apply-bid와 동일한
+    비밀키 계약). 로그인 성공 여부와 매장 목록만 돌려주고, 자격증명 암호화·
+    DB 저장은 계속 Railway(baemin_login_endpoint)가 담당한다 — 이 엔드포인트는
+    평문 자격증명을 어디에도 저장하지 않는다."""
+    _require_worker_secret(x_worker_secret)
+    try:
+        session = baemin_login(body.login_id, body.password)
+    except BaeminLoginError as e:
+        raise HTTPException(400, str(e))
+    shop_no, shop_name, shops = session.shop_no, session.shop_name, session.shops
+    session.close()
+    return {
+        "shop_no": shop_no,
+        "shop_name": shop_name,
+        "shops": [{"shop_no": no, "shop_name": name} for no, name in shops],
+    }
+
+
+@router.post("/internal/sync-reviews")
+def internal_sync_reviews(
+    job_id: int,
+    background_tasks: BackgroundTasks,
+    x_worker_secret: str = Header(default=""),
+):
+    """Railway가 이미 만들어둔 ReviewSyncJob(job_id)의 실행만 이 컴퓨터에
+    위임하는 서비스 간 엔드포인트. run_review_sync_job은 자체 SessionLocal로
+    Railway와 동일한 Postgres에 직접 쓰므로, 진행 상황/결과는 기존
+    GET /store-connections/baemin/sync-status/{job_id} 폴링이 그대로 동작한다
+    (별도 상태 엔드포인트 불필요)."""
+    _require_worker_secret(x_worker_secret)
+    background_tasks.add_task(run_review_sync_job, job_id)
+    return {"status": "started"}

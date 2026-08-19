@@ -132,6 +132,24 @@ baemin_reviews.py`)은 직접 HTTP 호출이 아니다 — 로그인된 페이�
 아래 "배민 매출·입금·재주문율 연동" 절 참고). 설계 상세는
 `docs/superpowers/specs/2026-08-09-baemin-review-scraping-design.md` 참고.
 
+**배포 환경(Railway)에서의 로그인 위임 (2026-08-18/19 수정)**: 이 봇 탐지
+우회는 개발 중 항상 맥북(홈 IP)에서 직접 실행하며 검증됐는데, 실제로
+Railway에 배포한 뒤 처음 "가게 연결" 로그인을 시도해보니 Railway의 클라우드
+IP에서는 로그인 폼 자체가 렌더링되지 않고 `get_by_test_id("id")`의 fill()이
+30초 타임아웃으로 막히는 현상이 실측 확인됐다 — 위 우회 설정을 그대로
+써도 소용없고, 처음부터 이 로그인은 반드시 홈 IP에서 실행돼야 한다.
+그래서 `baemin_login`을 직접 호출하는 세 곳 전부 `CRAWL_WORKER_URL`이
+설정된 배포 환경에서는 크롤 워커(맥북)에 위임하도록 바꿨다: (1)
+`ads.py`의 입찰가 반영(`/internal/apply-bid`), (2) `store_connections.py`의
+최초 로그인(`/internal/baemin-login` — 로그인+매장목록조회만 위임하고
+자격증명 암호화·DB 저장은 계속 Railway가 담당), (3) `store_connections.py`의
+데이터 동기화 시작(`/internal/sync-reviews` — `run_review_sync_job`은
+자체 세션으로 Railway와 동일한 Postgres에 쓰므로 프론트 폴링은 그대로
+동작). `CRAWL_WORKER_URL`이 없으면(로컬 개발) 기존처럼 이 프로세스에서
+직접 로그인한다. 이 발견 과정에서 `crawler/.env.worker`에
+`CREDENTIAL_ENCRYPTION_KEY`가 누락돼 있던 것도 같이 발견해 추가했다(배민
+자격증명 복호화가 이 세 경로 전부와 `_run_local_crawl`에도 필요한 값).
+
 ### 배민 매출·입금·재주문율 연동 (예외 허용)
 원래 "배민의 주문/정산 실데이터 연동은 여전히 범위 밖"이었으나, 리뷰 연동에
 이어 실 SaaS 전환 로드맵 3번의 다음 단계로 대시보드의 매출/입금/재주문율도

@@ -318,6 +318,229 @@ def test_list_baemin_shop_brands_scoped_to_own_connection(client, db_session, se
     assert "남의브랜드" not in [b["shop_name"] for b in body]
 
 
+def test_baemin_login_delegates_to_worker_when_crawl_worker_url_set(client, seeded_user, platforms, auth_headers, monkeypatch):
+    """Railway처럼 클라우드 IP에서 배민 로그인을 직접 실행하면 봇 탐지로
+    로그인 폼 자체가 안 뜨는 현상이 실측 확인됐다(ads.py의 apply-bid와 동일한
+    원인, 2026-08-18) — CRAWL_WORKER_URL이 설정돼 있으면 /internal/baemin-login로
+    전체를 위임해야 한다. baemin_login을 호출되면 실패하는 스파이로 바꿔 이
+    프로세스에서 절대 실행되지 않음을 증명한다."""
+    from unittest.mock import Mock
+
+    from cryptography.fernet import Fernet
+
+    from app.routers import store_connections as sc
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(sc, "_CRAWL_WORKER_URL", "http://worker.example.com")
+    monkeypatch.setattr(sc, "_CRAWL_WORKER_SECRET", "test-secret")
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("이 프로세스에서 직접 로그인을 시도하면 안 된다")
+
+    monkeypatch.setattr(sc, "baemin_login", _fail_if_called)
+
+    fake_response = Mock(
+        status_code=200,
+        json=Mock(return_value={
+            "shop_no": 99999001, "shop_name": "테스트가게",
+            "shops": [{"shop_no": 99999001, "shop_name": "테스트가게"}],
+        }),
+    )
+    mock_post = Mock(return_value=fake_response)
+    monkeypatch.setattr(sc.httpx, "post", mock_post)
+
+    res = client.post(
+        "/store-connections/baemin/login",
+        json={"platform_login_id": "test_id", "platform_login_password": "test_pw_123"},
+        headers=auth_headers,
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["shop_name"] == "테스트가게"
+    assert body["platform_store_id"] == "99999001"
+    mock_post.assert_called_once_with(
+        "http://worker.example.com/internal/baemin-login",
+        json={"login_id": "test_id", "password": "test_pw_123"},
+        headers={"X-Worker-Secret": "test-secret"},
+        timeout=60,
+    )
+
+    listed = client.get("/store-connections", headers=auth_headers).json()
+    baemin_conn = next(c for c in listed if c["platform_code"] == "baemin")
+    assert baemin_conn["has_real_credential"] is True  # 위임 경로에서도 암호화·저장은 Railway가 그대로 수행
+
+
+def test_baemin_login_reports_worker_login_failure_as_400(client, seeded_user, platforms, auth_headers, monkeypatch):
+    from unittest.mock import Mock
+
+    from app.routers import store_connections as sc
+
+    monkeypatch.setattr(sc, "_CRAWL_WORKER_URL", "http://worker.example.com")
+    fake_response = Mock(
+        status_code=400,
+        headers={"content-type": "application/json"},
+        json=Mock(return_value={"detail": "아이디 또는 비밀번호가 일치하지 않습니다"}),
+    )
+    monkeypatch.setattr(sc.httpx, "post", Mock(return_value=fake_response))
+
+    res = client.post(
+        "/store-connections/baemin/login",
+        json={"platform_login_id": "test_id", "platform_login_password": "wrong"},
+        headers=auth_headers,
+    )
+
+    assert res.status_code == 400
+    assert "일치하지 않습니다" in res.json()["detail"]
+
+
+def test_internal_baemin_login_rejects_wrong_worker_secret(client, monkeypatch):
+    from app.routers import store_connections as sc
+
+    monkeypatch.setattr(sc, "_CRAWL_WORKER_SECRET", "correct-secret")
+
+    res = client.post(
+        "/internal/baemin-login",
+        json={"login_id": "test_id", "password": "test_pw"},
+        headers={"X-Worker-Secret": "wrong-secret"},
+    )
+
+    assert res.status_code == 403
+
+
+def test_internal_baemin_login_returns_shop_list_on_success(client, monkeypatch):
+    from app.routers import store_connections as sc
+
+    monkeypatch.setattr(sc, "_CRAWL_WORKER_SECRET", "correct-secret")
+
+    class _FakeSession:
+        shop_no = 12345
+        shop_name = "치밥대장"
+        shops = [(12345, "치밥대장"), (67890, "곱도리탕")]
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(sc, "baemin_login", lambda login_id, password: fake_session)
+
+    res = client.post(
+        "/internal/baemin-login",
+        json={"login_id": "test_id", "password": "test_pw"},
+        headers={"X-Worker-Secret": "correct-secret"},
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "shop_no": 12345, "shop_name": "치밥대장",
+        "shops": [{"shop_no": 12345, "shop_name": "치밥대장"}, {"shop_no": 67890, "shop_name": "곱도리탕"}],
+    }
+    assert fake_session.closed is True
+
+
+def test_sync_reviews_delegates_to_worker_when_crawl_worker_url_set(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
+    from unittest.mock import Mock
+
+    from cryptography.fernet import Fernet
+
+    from app.credential_crypto import encrypt_credential
+    from app.models import StorePlatformConnection
+    from app.routers import store_connections as sc
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    db_session.commit()
+
+    monkeypatch.setattr(sc, "_CRAWL_WORKER_URL", "http://worker.example.com")
+    monkeypatch.setattr(sc, "_CRAWL_WORKER_SECRET", "test-secret")
+
+    def _fail_if_called(job_id):
+        raise AssertionError("이 프로세스에서 직접 동기화를 실행하면 안 된다")
+
+    monkeypatch.setattr(sc, "run_review_sync_job", _fail_if_called)
+
+    fake_response = Mock(status_code=200)
+    mock_post = Mock(return_value=fake_response)
+    monkeypatch.setattr(sc.httpx, "post", mock_post)
+
+    res = client.post("/store-connections/baemin/sync-reviews", headers=auth_headers)
+
+    assert res.status_code == 202
+    job_id = res.json()["job_id"]
+    mock_post.assert_called_once_with(
+        "http://worker.example.com/internal/sync-reviews",
+        params={"job_id": job_id},
+        headers={"X-Worker-Secret": "test-secret"},
+        timeout=15,
+    )
+    status = client.get(f"/store-connections/baemin/sync-status/{job_id}", headers=auth_headers).json()
+    assert status["status"] == "pending"  # 위임 성공 시 job 상태는 워커가 이어서 갱신한다
+
+
+def test_sync_reviews_marks_job_failed_when_worker_unreachable(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    from app.credential_crypto import encrypt_credential
+    from app.models import StorePlatformConnection
+    from app.routers import store_connections as sc
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    conn = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id
+    ).one()
+    conn.credential_ciphertext = encrypt_credential("test_id", "test_pw")
+    db_session.commit()
+
+    monkeypatch.setattr(sc, "_CRAWL_WORKER_URL", "http://worker.example.com")
+
+    def _raise(*args, **kwargs):
+        raise sc.httpx.RequestError("연결 실패")
+
+    monkeypatch.setattr(sc.httpx, "post", _raise)
+
+    res = client.post("/store-connections/baemin/sync-reviews", headers=auth_headers)
+
+    assert res.status_code == 202  # job은 만들어졌으니 job_id는 정상 반환
+    job_id = res.json()["job_id"]
+    status = client.get(f"/store-connections/baemin/sync-status/{job_id}", headers=auth_headers).json()
+    assert status["status"] == "failed"
+    assert "크롤 워커에 연결할 수 없습니다" in status["error_message"]
+
+
+def test_internal_sync_reviews_rejects_wrong_worker_secret(client, monkeypatch):
+    from app.routers import store_connections as sc
+
+    monkeypatch.setattr(sc, "_CRAWL_WORKER_SECRET", "correct-secret")
+
+    res = client.post(
+        "/internal/sync-reviews?job_id=1",
+        headers={"X-Worker-Secret": "wrong-secret"},
+    )
+
+    assert res.status_code == 403
+
+
+def test_internal_sync_reviews_starts_background_job(client, monkeypatch):
+    from app.routers import store_connections as sc
+
+    monkeypatch.setattr(sc, "_CRAWL_WORKER_SECRET", "correct-secret")
+    called = {}
+    monkeypatch.setattr(sc, "run_review_sync_job", lambda job_id: called.setdefault("job_id", job_id))
+
+    res = client.post(
+        "/internal/sync-reviews?job_id=42",
+        headers={"X-Worker-Secret": "correct-secret"},
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "started"}
+    assert called == {"job_id": 42}
+
+
 def test_sync_status_forbidden_for_other_users_job(client, db_session, seeded_user, platforms, auth_headers):
     from datetime import datetime, timezone
 
