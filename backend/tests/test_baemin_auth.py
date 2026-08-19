@@ -11,6 +11,7 @@ BaeminLoginError 하나로 감싸져서 전달되는지를 검증한다. 실제 
 from unittest.mock import MagicMock, patch
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from scrapers.baemin_auth import BaeminLoginError, _discover_all_shops, login
 
@@ -93,6 +94,50 @@ def test_discover_all_shops_skips_non_digit_placeholder_value():
     shops = _discover_all_shops(fake_page)
 
     assert shops == [(99999, "유일한매장")]
+
+
+def test_discover_all_shops_retries_click_once_after_late_modal(monkeypatch):
+    """로그인 직후 Escape 한 번으로는 못 닫는, 뒤늦게 뜨는 프로모션 모달이
+    실 계정에서 재현됐다(2026-08-19, "리뷰관리" 버튼 클릭이 30초 타임아웃).
+    첫 클릭이 타임아웃되면 Escape를 한 번 더 누르고 재시도해야 한다."""
+    fake_page = MagicMock()
+
+    review_button = MagicMock()
+    review_button.click.side_effect = [PlaywrightTimeoutError("timeout"), None]
+    shop_select = MagicMock()
+    shop_select.locator.return_value.all.return_value = [_fake_option("14804318", "테스트 매장")]
+    combobox_locator = MagicMock()
+    combobox_locator.nth.return_value = shop_select
+
+    def _get_by_role(role, name=None):
+        if role == "button":
+            return review_button
+        if role == "combobox":
+            return combobox_locator
+        return MagicMock()
+
+    fake_page.get_by_role.side_effect = _get_by_role
+
+    shops = _discover_all_shops(fake_page)
+
+    assert shops == [(14804318, "테스트 매장")]
+    assert review_button.click.call_count == 2
+    fake_page.keyboard.press.assert_called_once_with("Escape")
+
+
+def test_discover_all_shops_raises_when_retry_also_times_out():
+    fake_page = MagicMock()
+
+    review_button = MagicMock()
+    review_button.click.side_effect = PlaywrightTimeoutError("timeout")
+    fake_page.get_by_role.side_effect = lambda role, name=None: (
+        review_button if role == "button" else MagicMock()
+    )
+
+    with pytest.raises(PlaywrightTimeoutError):
+        _discover_all_shops(fake_page)
+
+    assert review_button.click.call_count == 2
 
 
 def test_login_does_not_close_session_resources_on_success():

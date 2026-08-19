@@ -30,7 +30,10 @@
   모달이 backdrop과 함께 뜰 때가 있다(매번 재현되지는 않아 세션/일자에 따라
   달라지는 것으로 보인다). 이 backdrop이 클릭을 가로채 이후 "리뷰관리" 클릭이
   타임아웃 나므로, `_discover_all_shops` 호출 전에 방어적으로 Escape 키를
-  눌러 닫는다(실 계정으로 재현·해결 확인).
+  눌러 닫는다(실 계정으로 재현·해결 확인). 다만 이 모달이 첫 Escape보다
+  늦게 뜨는 경우도 실 계정에서 재현됐다(2026-08-19, "리뷰관리" 클릭
+  30초 타임아웃) — `_discover_all_shops` 자체도 첫 클릭이 타임아웃되면
+  Escape를 한 번 더 누르고 재시도한다.
 - 리뷰 API(self-api.baemin.com)를 `context.request`(브라우저 밖 `APIRequestContext`)로
   직접 호출하면 쿠키가 실려도 HTTP 403이 난다(실 계정으로 재현 확인). 실제
   요청에는 매 요청마다 값이 바뀌는 `x-e-request` 서명 헤더가 실려 있는데, 이는
@@ -91,7 +94,16 @@ def _extract_login_error(page) -> str | None:
 
 
 def _discover_all_shops(page) -> list[tuple[int, str]]:
-    page.get_by_role("button", name="리뷰관리 리뷰관리").click()
+    review_button = page.get_by_role("button", name="리뷰관리 리뷰관리")
+    try:
+        review_button.click(timeout=15_000)
+    except PlaywrightTimeoutError:
+        # 로그인 직후의 Escape 한 번으로는 못 닫는, 뒤늦게 뜨는 프로모션
+        # 모달이 실 계정에서 재현됨(2026-08-19) — 한 번 더 닫고 재시도한다.
+        # 여기서도 실패하면 진짜 문제(레이아웃 변경 등)이므로 그대로 던진다.
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(1_000)
+        review_button.click(timeout=15_000)
     shop_select = page.get_by_role("combobox").nth(1)
     # click()은 버튼 자체의 등장만 기다린다 — 그 뒤에 렌더링되는 select의
     # <option>들은 별도로 기다려야 한다. Locator.all()은 auto-wait를 하지 않고
