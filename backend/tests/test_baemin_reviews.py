@@ -7,6 +7,7 @@ from scrapers.baemin_reviews import (
     _INITIAL_LOAD_WAIT_MS,
     _LOAD_MORE_WAIT_MS,
     BaeminScrapeError,
+    _consecutive_known_count,
     extract_owner_reply,
     fetch_all_reviews,
     map_review,
@@ -116,6 +117,29 @@ def test_map_review_status_is_unanswered_when_only_hidden_comment_present():
 def test_map_review_handles_empty_content():
     raw = {**_RAW_REVIEW, "contents": ""}
     assert map_review(raw, store_id=7, platform_id=1, platform_shop_no="14804912")["content"] == ""
+
+
+def test_consecutive_known_count_counts_trailing_known_ids():
+    # 끝에서부터(가장 최근 도착 순) known인 개수만 센다.
+    assert _consecutive_known_count([1, 2, 3, 4, 5], {3, 4, 5}) == 3
+
+
+def test_consecutive_known_count_stops_at_first_unknown_from_the_end():
+    # 끝에서 세다가 모르는 id를 만나면 거기서 멈춘다 — 더 앞쪽에 known이
+    # 남아있어도 세지 않는다.
+    assert _consecutive_known_count([1, 2, 3, 4, 5], {1, 2, 4, 5}) == 2
+
+
+def test_consecutive_known_count_returns_zero_when_last_is_unknown():
+    assert _consecutive_known_count([1, 2, 3], {1, 2}) == 0
+
+
+def test_consecutive_known_count_returns_zero_for_empty_list():
+    assert _consecutive_known_count([], {1, 2, 3}) == 0
+
+
+def test_consecutive_known_count_counts_everything_when_all_known():
+    assert _consecutive_known_count([1, 2, 3], {1, 2, 3}) == 3
 
 
 class _FakeMoreButtonLocator:
@@ -445,6 +469,103 @@ def test_fetch_all_reviews_removes_response_listener_when_done():
     p._fired = False
     fetch_all_reviews(p, shop_no=_SHOP_NO)
     assert "response" not in p._handlers
+
+
+def test_fetch_all_reviews_stops_before_any_click_when_initial_load_is_all_known():
+    # 초기 자동 로드 안에서 신규 1건 + 이미 아는 5건이 한 번에 온 경우,
+    # "더보기"를 단 한 번도 클릭하지 않고 끝나야 한다 — 이미 5연속 known을
+    # 확인했으므로 그 이상 조회할 필요가 없다고 판단한다.
+    known_ids = {100, 101, 102, 103, 104}
+
+    class _Page(_FakePage):
+        def wait_for_timeout(self, ms):
+            if not getattr(self, "_fired", False):
+                self._fired = True
+                reviews = [{**_RAW_REVIEW, "id": 999}] + [
+                    {**_RAW_REVIEW, "id": i} for i in (100, 101, 102, 103, 104)
+                ]
+                self._handlers["response"](_review_response(reviews))
+
+    p = _Page()
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO, existing_ids=known_ids)
+
+    assert len(result) == 6
+    assert p.more_button.click_calls == 0
+
+
+def test_fetch_all_reviews_keeps_paginating_when_known_run_is_interrupted():
+    # known id들이 연속되지 않고 중간에 신규 리뷰가 끼어 있으면(전체적으로는
+    # known이 5개 있어도 "연속"은 아님) 정상적으로 계속 페이지네이션해야
+    # 한다 — 기존 "더보기" 종료 조건(연속 2회 무진행)만 적용된다.
+    known_ids = {100, 101, 102, 103, 104}
+
+    class _Page(_FakePage):
+        def __init__(self):
+            super().__init__()
+            self._wait_count = 0
+
+        def wait_for_timeout(self, ms):
+            self._wait_count += 1
+            if self._wait_count == 1:
+                reviews = [
+                    {**_RAW_REVIEW, "id": 100}, {**_RAW_REVIEW, "id": 101},
+                    {**_RAW_REVIEW, "id": 999},  # 연속을 끊는 신규 리뷰
+                    {**_RAW_REVIEW, "id": 102}, {**_RAW_REVIEW, "id": 103},
+                ]
+                self._handlers["response"](_review_response(reviews))
+            # 이후 클릭에서는 응답 없음 — 무진행 카운터로 정상 종료.
+
+    p = _Page()
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO, existing_ids=known_ids)
+
+    assert len(result) == 5
+    assert p.more_button.click_calls == 2  # 연속 2회 무진행으로 종료(기존 규칙)
+
+
+def test_fetch_all_reviews_stops_mid_pagination_once_five_consecutive_known_seen():
+    # 초기 로드는 전부 신규라 계속 진행하다가, 첫 "더보기" 클릭에서 받은
+    # 응답이 이미 아는 리뷰 5개 연속이면 그 시점에서 멈춰야 한다 — 두 번째
+    # 클릭은 일어나면 안 된다.
+    known_ids = {200, 201, 202, 203, 204}
+
+    class _Page(_FakePage):
+        def __init__(self):
+            super().__init__()
+            self._wait_count = 0
+
+        def wait_for_timeout(self, ms):
+            self._wait_count += 1
+            if self._wait_count == 1:
+                self._handlers["response"](_review_response([{**_RAW_REVIEW, "id": 999}]))
+            elif self._wait_count == 2:
+                reviews = [{**_RAW_REVIEW, "id": i} for i in (200, 201, 202, 203, 204)]
+                self._handlers["response"](_review_response(reviews))
+
+    p = _Page()
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO, existing_ids=known_ids)
+
+    assert len(result) == 6
+    assert p.more_button.click_calls == 1  # 초기 로드 + 1번 더보기 클릭 후 조기 종료
+
+
+def test_fetch_all_reviews_with_no_existing_ids_behaves_exactly_as_before():
+    # existing_ids를 안 넘기면(기본값 None) 기존 동작(연속 2회 무진행까지
+    # 계속 페이지네이션)과 완전히 동일해야 한다 — 최초 동기화 경로 회귀 방지.
+    class _Page(_FakePage):
+        def __init__(self):
+            super().__init__()
+            self._wait_count = 0
+
+        def wait_for_timeout(self, ms):
+            self._wait_count += 1
+            if self._wait_count == 1:
+                self._handlers["response"](_review_response([_RAW_REVIEW]))
+
+    p = _Page()
+    result = fetch_all_reviews(p, shop_no=_SHOP_NO)
+
+    assert len(result) == 1
+    assert p.more_button.click_calls == 2
 
 
 def test_fetch_all_reviews_stops_load_more_after_two_consecutive_no_progress_clicks():

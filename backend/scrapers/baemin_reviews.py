@@ -91,6 +91,7 @@ _MAX_LOAD_MORE_CLICKS = 30
 _MAX_CONSECUTIVE_NO_PROGRESS = 2
 _LOAD_MORE_WAIT_MS = 1_500
 _INITIAL_LOAD_WAIT_MS = 3_000
+_KNOWN_ID_STOP_THRESHOLD = 5
 
 
 class BaeminScrapeError(Exception):
@@ -101,13 +102,35 @@ def _review_list_path(shop_no: int) -> str:
     return f"/v1/review/shops/{shop_no}/reviews"
 
 
-def fetch_all_reviews(page, shop_no: int) -> list[dict]:
+def _consecutive_known_count(ids_in_order: list[int], existing_ids: set[int]) -> int:
+    """`ids_in_order`(리뷰가 도착한 순서 — 배민 리뷰 목록이 최신순이므로
+    사실상 최신순)의 끝에서부터, `existing_ids`(이미 DB에 저장된
+    external_review_id)에 있는 id가 연속으로 몇 개인지 센다. 중간에
+    모르는 id를 만나면 그 즉시 멈춘다 — "가장 최근에 본 것들이 전부 이미
+    아는 리뷰"인지만 판단하면 되므로, 앞쪽에 known이 더 있어도 상관없다."""
+    count = 0
+    for review_id in reversed(ids_in_order):
+        if review_id not in existing_ids:
+            break
+        count += 1
+    return count
+
+
+def fetch_all_reviews(page, shop_no: int, existing_ids: set[int] | None = None) -> list[dict]:
     """`page`가 리뷰관리 화면을 로드하며 organically 발생시키는 리뷰 리스트
     응답을 가로채 수집한다. 우리는 요청을 직접 만들지 않는다 (모듈 docstring
     참고 — raw fetch()는 CORS로 차단된다).
-    """
+
+    `existing_ids`(이미 DB에 저장된 external_review_id 집합)를 넘기면,
+    도착 순서(최신순)로 봤을 때 이미 아는 id가 연속 `_KNOWN_ID_STOP_THRESHOLD`개
+    나오는 순간 더 이상 "더보기"를 클릭하지 않고 종료한다 — 두 번째 이후
+    동기화에서 매번 전체 리뷰 이력을 다시 훑지 않기 위한 증분 최적화다
+    (설계 문서 참고). 안 넘기면(기본값 `None`) 기존 동작과 완전히 동일하게
+    끝까지(무진행 2회 또는 하드캡) 페이지네이션한다."""
+    existing_ids = existing_ids or set()
     path = _review_list_path(shop_no)
     collected: dict[int, dict] = {}
+    arrival_order: list[int] = []
     state = {"observed_review_endpoint": False}
 
     def _on_response(response) -> None:
@@ -125,6 +148,8 @@ def fetch_all_reviews(page, shop_no: int) -> list[dict]:
         except Exception:
             return
         for raw in body.get("reviews", []):
+            if raw["id"] not in collected:
+                arrival_order.append(raw["id"])
             collected[raw["id"]] = raw
 
     page.on("response", _on_response)
@@ -146,6 +171,8 @@ def fetch_all_reviews(page, shop_no: int) -> list[dict]:
         # 종료 조건이다.
         consecutive_no_progress = 0
         for _ in range(_MAX_LOAD_MORE_CLICKS):
+            if _consecutive_known_count(arrival_order, existing_ids) >= _KNOWN_ID_STOP_THRESHOLD:
+                break
             more_button = page.get_by_text("더보기", exact=True)
             if more_button.count() == 0:
                 break
