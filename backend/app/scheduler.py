@@ -7,6 +7,7 @@ numReplicas 미지정) 여러 프로세스가 동시에 스케줄을 도는 상�
 """
 
 import asyncio
+import functools
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -51,8 +52,17 @@ async def run_scheduled_sync_cycle(db: Session) -> None:
     ).all()
     for conn in connections:
         try:
-            job = store_connections._dispatch_sync_job(
-                conn.store_id, platform, conn, db, triggered_by="scheduled", background_tasks=None,
+            # _dispatch_sync_job은 동기 함수이고 CRAWL_WORKER_URL이 설정된
+            # 환경에서는 그 안에서 blocking httpx.post(timeout=15)를 직접
+            # 호출한다 — 이벤트 루프를 막지 않도록 스레드에서 돌린다(디스패치
+            # 자체는 스토어마다 순차적으로 await되므로 같은 db 세션을 여러
+            # 스레드가 동시에 건드릴 일은 없다).
+            job = await anyio.to_thread.run_sync(
+                functools.partial(
+                    store_connections._dispatch_sync_job,
+                    conn.store_id, platform, conn, db,
+                    triggered_by="scheduled", background_tasks=None,
+                )
             )
             # CRAWL_WORKER_URL이 설정된 환경(운영)에서는 _dispatch_sync_job이
             # 이미 워커에 위임을 마쳤다 — 여기서 또 로컬로 돌리면 같은
@@ -62,6 +72,10 @@ async def run_scheduled_sync_cycle(db: Session) -> None:
                 await anyio.to_thread.run_sync(run_review_sync_job, job.id)
         except Exception:
             logger.exception("스케줄된 동기화 실패: store_id=%s", conn.store_id)
+            # db.commit()이 여기서 실패했을 수 있다(제약 위반, 커넥션 끊김 등) —
+            # 롤백하지 않으면 세션이 PendingRollbackError 상태로 남아 이후
+            # 매장 전부가 첫 select()에서부터 연쇄로 실패한다.
+            db.rollback()
 
 
 async def run_scheduler_loop() -> None:
