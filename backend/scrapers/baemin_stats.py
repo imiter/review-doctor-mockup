@@ -1186,7 +1186,27 @@ def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]
     구분됨). 이 응답이 결과에 섞이면 우리가 요청한 범위 밖 날짜가
     끼어들거나, 겹치는 날짜의 배치가 이중 집계될 위험이 있다 — 그래서
     `fetch_shop_stats`/`fetch_brand_click_metrics`와 동일한 `collecting`
-    플래그 게이트로 걸러낸다."""
+    플래그 게이트로 걸러낸다.
+
+    **완결성 보장 (2026-08-19, 증분 조회 전환 최종 리뷰 fix round)**: 이
+    함수도 이제 "요청한 범위의 정산 배치를 하나도 빠짐없이 가져왔다"가
+    확인될 때만 정상 반환한다. 원래는 `observed_any`(응답을 한 번이라도
+    봤는가) 하나만 확인해서, 페이지네이션이 도중에 끊기면 첫 페이지 10건만
+    담긴 리스트를 그대로 성공으로 반환했다 — 이 함수가 겪었던 실제 버그
+    (위 "정정" 절: `totalSize=20`인데 10건만 수집)가 정확히 그 형태다.
+    입금 조회가 고정 90일 창에서 커서 기반 증분 조회로 바뀐 뒤로는 이
+    은폐된 실패의 대가가 훨씬 커졌다: 부분 수집을 저장하면
+    `daily_settlements`의 커서가 오늘로 전진해, 수집하지 못한 구간을 이후
+    어떤 동기화도 다시 쳐다보지 않는 영구 유실이 된다("부분 수집을 절대
+    성공으로 취급하지 않는다" — CLAUDE.md).
+
+    판정 근거는 응답 본문의 `totalSize`(실측 확인된 필드)다. 페이지네이션으로
+    모은 **고유 `giveId`** 개수와 대조한다 — 페이지 경계에서 같은 배치가 두
+    페이지에 겹쳐 나오는 현상이 실측으로 확인됐기 때문에(`map_deposits_by_date`
+    docstring 참고) 항목 수를 그대로 세면 부분 수집을 완전 수집으로
+    오판한다. 여러 페이지의 `totalSize`가 서로 다르면(조회 도중 새 배치가
+    생기면 늘어난다) `fetch_orders`와 동일하게 가장 작은 값을 기준으로 삼아
+    false 에러를 막는다."""
     responses: list[dict] = []
     state = {"observed_any": False, "collecting": False}
 
@@ -1223,12 +1243,31 @@ def fetch_account_settlement(page, start_date: str, end_date: str) -> list[dict]
             raise BaeminStatsScrapeError(f"정산내역 날짜 범위 지정에 실패했습니다: {e}") from e
         page.wait_for_timeout(2_000)
 
-        _click_next_page_until_done(page, lambda: len(responses))
+        stop_reason = _click_next_page_until_done(page, lambda: len(responses))
     finally:
         page.remove_listener("response", _on_response)
 
     if not state["observed_any"]:
         raise BaeminStatsScrapeError("정산내역 API 응답을 한 번도 확인하지 못했습니다")
+
+    # 부분 페이지네이션 하드 에러 게이트(docstring "완결성 보장" 절 참고).
+    # `totalSize`가 아예 없는 응답 형태(미실측)라면 판정을 건너뛴다 — 없는
+    # 신호로 false 에러를 만들지는 않는다.
+    total_sizes = [r["totalSize"] for r in responses if isinstance(r.get("totalSize"), int)]
+    if total_sizes:
+        expected_total = min(total_sizes)
+        collected_give_ids = {
+            batch["giveId"]
+            for resp in responses
+            for batch in (resp.get("contents") or [])
+            if "giveId" in batch
+        }
+        if len(collected_give_ids) < expected_total:
+            raise BaeminStatsScrapeError(
+                f"정산내역 {start_date}~{end_date} 총 {expected_total}건 중 "
+                f"{len(collected_give_ids)}건만 수집했습니다(페이지네이션 종료 사유: {stop_reason}) "
+                f"— 부분 수집을 저장하면 커서가 전진해 미수집 구간이 영구 유실되므로 실패로 처리합니다"
+            )
 
     return responses
 

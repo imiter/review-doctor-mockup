@@ -589,3 +589,136 @@ def test_parse_baemin_datetime_respects_existing_offset():
     dt = parse_baemin_datetime("2026-08-13T02:19:37+00:00")
     assert dt.utcoffset() == timedelta(0)
     assert dt == datetime(2026, 8, 13, 2, 19, 37, tzinfo=timezone.utc)
+
+
+import pytest
+
+from scrapers.baemin_stats import BaeminStatsScrapeError, fetch_account_settlement
+
+
+class _FakeSettlementResponse:
+    def __init__(self, url: str, status: int, body: dict):
+        self.url = url
+        self.status = status
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+class _FakeSettlementPage:
+    """`fetch_account_settlement`이 실제로 쓰는 page 인터페이스의 최소 흉내.
+
+    화면 조작(날짜 범위 다이얼로그/페이지네이션)은 이 테스트의 관심사가
+    아니므로 모듈 헬퍼를 monkeypatch로 no-op 처리하고, 페이지네이션 시점에
+    미리 정해둔 응답들을 리스너로 흘려보낸다."""
+
+    def __init__(self):
+        self._handlers: dict[str, object] = {}
+        self.goto_calls: list[str] = []
+
+    def on(self, event, handler):
+        self._handlers[event] = handler
+
+    def remove_listener(self, event, handler):
+        if self._handlers.get(event) is handler:
+            del self._handlers[event]
+
+    def goto(self, url):
+        self.goto_calls.append(url)
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def emit(self, body: dict):
+        self._handlers["response"](_FakeSettlementResponse(
+            "https://self-api.baemin.com/v3/settle/history/summary"
+            "?startDate=2026-05-21&endDate=2026-08-19",
+            200,
+            body,
+        ))
+
+
+@pytest.fixture()
+def settlement_page(monkeypatch):
+    """화면 조작 헬퍼를 전부 무력화하고, 페이지네이션 단계에서 emit할 응답
+    목록만 테스트가 지정하게 한다."""
+    import scrapers.baemin_stats as stats_mod
+
+    monkeypatch.setattr(stats_mod, "_dismiss_backdrop_if_present", lambda page: None)
+    monkeypatch.setattr(stats_mod, "_open_date_range_picker", lambda page: None)
+    monkeypatch.setattr(stats_mod, "_set_date_range", lambda page, start_date, end_date: None)
+
+    page = _FakeSettlementPage()
+    bodies: list[dict] = []
+
+    def _click_next_page_until_done(p, progress_fn, max_clicks=None):
+        for body in bodies:
+            page.emit(body)
+        return "disabled"
+
+    monkeypatch.setattr(stats_mod, "_click_next_page_until_done", _click_next_page_until_done)
+    return page, bodies
+
+
+def test_fetch_account_settlement_returns_all_pages_when_capture_is_complete(settlement_page):
+    """정상 경로: 페이지네이션으로 모은 고유 giveId 개수가 totalSize와 같으면
+    그대로 반환한다(새 게이트가 건강한 경로에서 false-trigger하면 안 된다)."""
+    page, bodies = settlement_page
+    bodies.extend([_SETTLE_PAGE_1, _SETTLE_PAGE_2])  # 2 + 1 = 3건, totalSize=3
+
+    result = fetch_account_settlement(page, "2026-05-21", "2026-08-19")
+
+    assert len(result) == 2  # 응답(페이지) 2개를 그대로 반환
+    assert map_deposits_by_date(result) == {"2026-08-12": 954812, "2026-08-11": 168431}
+
+
+def test_fetch_account_settlement_raises_when_pagination_captured_only_part_of_total_size(settlement_page):
+    """부분 페이지네이션(첫 페이지만 잡히고 나머지는 유실)을 조용히 성공으로
+    반환하면 안 된다 — 입금 조회가 커서 기반 증분으로 바뀐 뒤로는, 부분
+    수집을 저장하는 순간 커서가 오늘로 전진해 미수집 구간을 이후 어떤
+    동기화도 다시 보지 않는 영구 유실이 된다(`fetch_orders`/
+    `fetch_settlement_breakdown_details`와 같은 하드 에러 게이트가 필요)."""
+    page, bodies = settlement_page
+    bodies.append(_SETTLE_PAGE_1)  # 2건만 잡힘, 그런데 totalSize=3
+
+    with pytest.raises(BaeminStatsScrapeError) as exc:
+        fetch_account_settlement(page, "2026-05-21", "2026-08-19")
+
+    assert "3" in str(exc.value) and "2" in str(exc.value)
+
+
+def test_fetch_account_settlement_dedupes_overlapping_give_ids_before_comparing_total_size(settlement_page):
+    """페이지 경계에서 같은 giveId가 두 페이지에 겹쳐 나오는 실측 현상이
+    있으므로(map_deposits_by_date의 dedup 테스트 참고), 완결성 판정도 고유
+    giveId 기준이어야 한다 — 겹침을 그대로 세면 부분 수집을 완전 수집으로
+    오판한다."""
+    page, bodies = settlement_page
+    page_a = {"contents": [
+        {"giveId": 1, "depositDueDate": "2026-08-11", "giveAmount": 100},
+        {"giveId": 2, "depositDueDate": "2026-08-11", "giveAmount": 100},
+    ], "totalSize": 3}
+    page_b = {"contents": [
+        {"giveId": 2, "depositDueDate": "2026-08-11", "giveAmount": 100},
+    ], "totalSize": 3}
+    bodies.extend([page_a, page_b])  # 총 3항목처럼 보이지만 고유 giveId는 2개뿐
+
+    with pytest.raises(BaeminStatsScrapeError):
+        fetch_account_settlement(page, "2026-05-21", "2026-08-19")
+
+
+def test_fetch_account_settlement_allows_total_size_growing_mid_pagination(settlement_page):
+    """조회 도중 새 정산 배치가 생겨 뒤 페이지의 totalSize가 커지는 경우까지
+    실패로 볼 수는 없다 — `fetch_orders`와 같이 가장 작은 totalSize를 기준으로
+    판정해 false 에러를 막는다."""
+    page, bodies = settlement_page
+    page_a = {"contents": [
+        {"giveId": 1, "depositDueDate": "2026-08-11", "giveAmount": 100},
+    ], "totalSize": 2}
+    page_b = {"contents": [
+        {"giveId": 2, "depositDueDate": "2026-08-11", "giveAmount": 100},
+    ], "totalSize": 5}  # 조회 중 늘어난 값
+    bodies.extend([page_a, page_b])
+
+    result = fetch_account_settlement(page, "2026-05-21", "2026-08-19")
+    assert len(result) == 2

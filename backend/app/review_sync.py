@@ -339,34 +339,117 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         # 별도로 재해석하지 않는다(하나의 원인을 두 곳에서 서로 다르게
         # 판단하면 불일치가 생긴다).
         stats_errors: list[str] = []
+        today = date.today()
+
+        # ── 증분 조회 커서/범위를 어떤 쓰기보다도 먼저 한 번에 계산한다 ──
+        # 매출·입금·정산상세 세 소스는 전부 같은 (store_id, platform_id)의
+        # daily_settlements를 커서로 **읽고**, 동시에 같은 테이블에 **쓴다**.
+        # 그래서 "A 소스 upsert → B 소스 커서 읽기" 순서가 섞이면 방금 쓴
+        # 행이 B의 커서로 잡혀 백필 범위가 무너진다 — 2026-08-19 리뷰에서
+        # 실제로 확인된 Critical 버그가 정확히 이 형태였다: 매출/이번달주문
+        # upsert가 오늘 날짜 행을 `deposit_amount=0`으로 INSERT하고
+        # `db.flush()`까지 하는 바람에, 최초 동기화인데도 입금 커서가
+        # "오늘"이 돼 90일 백필이 며칠짜리로 붕괴했다. 세 범위를 여기서
+        # 전부 확정해두면 이 순서 의존 자체가 사라진다(이후 블록 순서를
+        # 어떻게 바꿔도 안전하다).
+        #
+        # "이 소스로 아직 채워진 적 없음" 판정에 `.isnot(None)`을 쓰면 안
+        # 된다: `sales_amount`/`deposit_amount`는 schema.sql/models.py에서
+        # `INT NOT NULL DEFAULT 0`이라 그 조건이 모든 행에 항상 참인
+        # 항등식이다(진짜 nullable인 건 정산상세 4개 컬럼뿐). 대신 `> 0`으로
+        # 판정한다 — 실제로 0원인 날/달을 "미동기화"로 오판할 수는 있지만
+        # 그때의 대가는 "한 번 더 조회한다"뿐이라 안전한 쪽으로 틀린다
+        # (새 컬럼/테이블 추가 없이 가능한 가장 안전한 선택).
+        # 우가클(brand_ad_click_metrics)은 별개 테이블이고 브랜드별
+        # session.shops가 필요해 로그인 이후에나 계산 가능하므로, 이 오염과
+        # 무관하게 자기 블록 안에 그대로 둔다.
         months = recent_months(3)
         synced_sales_dates = db.scalars(
             select(DailySettlement.settle_date).where(
                 DailySettlement.store_id == job.store_id,
                 DailySettlement.platform_id == job.platform_id,
-                DailySettlement.sales_amount.isnot(None),
+                DailySettlement.sales_amount > 0,
             )
         ).all()
         synced_sales_months = {d.strftime("%Y-%m") for d in synced_sales_dates}
-        sales_months_to_fetch = filter_months_needing_sync(months, synced_sales_months)
-        if not sales_months_to_fetch:
-            # crmInfo(재주문율)는 날짜 소급이 안 되는 "최근 7일" 고정
-            # 스냅샷이라, 매출을 전부 건너뛰어도 최소 한 달은 방문해서
-            # 갱신해야 한다. months[-1](이번 달)은 가게통계 화면 구조상
-            # 애초에 선택 불가능하므로(recent_months 문서 참고) 그 앞
-            # 달(가장 최근 완료된 달)을 쓴다.
-            sales_months_to_fetch = [months[-2]]
+        # `months[-2]`(가장 최근 완료된 달)는 이미 동기화됐어도 항상 다시
+        # 조회한다. 이유 두 가지:
+        # (1) 이번 달 매출은 주문내역 경로가 진행분으로 채우는데, 달이 바뀌면
+        #     그 달엔 이미 행이 있어서 필터가 가게통계 재조회를 건너뛴다 —
+        #     그러면 배민이 확정한 월별 수치를 영영 못 받고, 그 달 마지막
+        #     동기화일 이후~말일 매출은 어느 경로로도 안 채워진다. 진행 중이던
+        #     달이 "완료된 달"로 바뀌는 순간 여기서 한 번 확정치로 덮어쓴다.
+        # (2) crmInfo(재주문율)는 날짜 소급이 안 되는 "최근 7일" 고정
+        #     스냅샷이라 매 동기화마다 가게통계 화면을 최소 한 달은 열어야
+        #     한다. `months[-1]`(이번 달)은 화면 구조상 선택 자체가 불가능해
+        #     (`_select_month_dropdown`이 False를 반환 → 하드 에러) 반드시
+        #     완료된 달이어야 한다. always_include가 이 보장을 필터 결과와
+        #     무관하게 항상 성립시키므로, 예전의 "결과가 비면 [months[-2]]로
+        #     대체"하던 특수 분기는 필요 없어져 제거했다 — 그 분기는 완료된
+        #     두 달이 이미 있고 이번 달만 없는 흔한 경우에 `[이번 달]` 하나만
+        #     남겨 (2)의 하드 에러를 그대로 맞는 구멍이 있었다.
+        # 매번 조회하는 달 수는 여전히 최대 1~2개라 증분 조회의 성능 이득은
+        # 그대로 유지된다.
+        sales_months_to_fetch = filter_months_needing_sync(
+            months, synced_sales_months, always_include={months[-2]},
+        )
+
+        latest_deposit_date = db.scalar(
+            select(func.max(DailySettlement.settle_date)).where(
+                DailySettlement.store_id == job.store_id,
+                DailySettlement.platform_id == job.platform_id,
+                DailySettlement.deposit_amount > 0,
+            )
+        )
+        deposit_window_start, deposit_window_end = compute_settlement_sync_range(
+            latest_deposit_date, today, backfill_days=90,
+        )
+
+        # 정산 상세 4개 컬럼은 진짜 nullable이라(요기요/쿠팡이츠 행과 백필
+        # 범위 밖 배민 과거 날짜를 NULL로 남겨 "데이터 없음"과 "0원"을
+        # 구분하는 게 설계 의도) 여기서는 `.isnot(None)`이 올바른 판정이다 —
+        # 위 두 소스와 달리 항등식이 아니다.
+        latest_breakdown_date = db.scalar(
+            select(func.max(DailySettlement.settle_date)).where(
+                DailySettlement.store_id == job.store_id,
+                DailySettlement.platform_id == job.platform_id,
+                DailySettlement.commission_amount.isnot(None),
+            )
+        )
+        detail_window_start, detail_window_end = compute_settlement_sync_range(
+            latest_breakdown_date, today, backfill_days=30,
+        )
+        # ── 여기부터 실제 fetch/upsert. 위에서 확정한 범위만 쓴다. ─────────
+
         sales_responses: list[dict] = []
         crm_responses: list[dict] = []
+        # 매출은 매장별 응답을 계정 전체로 합산해 저장하므로(daily_settlements에
+        # 브랜드 차원이 없다) "일부 매장만 성공"을 저장하면 안 된다 — 아래
+        # 참고. 그래서 이번 회차에 한 매장이라도 실패했는지를 따로 기록한다.
+        sales_fetch_failed = False
         for shop_no, shop_name in session.shops:
             try:
                 s, c = fetch_shop_stats(session.page, shop_no, sales_months_to_fetch)
                 sales_responses.extend(s)
                 crm_responses.extend(c)
             except (BaeminStatsScrapeError, KeyError) as e:
+                sales_fetch_failed = True
                 stats_errors.append(f"{shop_name}: {e}")
 
-        if sales_responses:
+        if sales_fetch_failed:
+            # 브랜드 A는 성공하고 B만 실패했을 때 A만의 합계를 저장하면, 그
+            # 달이 `filter_months_needing_sync` 입장에서 "동기화 완료"로
+            # 굳어 다음 동기화가 통째로 건너뛴다 — B의 몫은 영구 누락되고,
+            # daily_settlements엔 브랜드 차원이 없어 사후 판별조차 못 한다.
+            # 그래서 완전 실패 vs 완전 성공만 인정한다("부분 수집을 성공으로
+            # 취급하지 않는다" 원칙, CLAUDE.md). 재주문율(crm)은 계정 합산이
+            # 아닌 날짜별 스냅샷이고 커서로 굳지도 않으므로 아래에서 독립적으로
+            # 계속 진행한다 — 매출만 이 판단의 대상이다.
+            stats_errors.append(
+                "일부 매장의 가게통계 조회가 실패해 이번 회차 매출 저장을 건너뜁니다"
+                " — 부분 합산을 저장하면 그 달이 동기화 완료로 굳어 실패한 매장 몫이 영구 누락됩니다"
+            )
+        elif sales_responses:
             try:
                 for settle_date, amount in map_sales_by_date(sales_responses).items():
                     upsert_daily_settlement(
@@ -438,20 +521,9 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
             except Exception as e:
                 stats_errors.append(f"재주문율 동기화 실패: {e}")
 
-        today = date.today()
         try:
-            latest_deposit_date = db.scalar(
-                select(func.max(DailySettlement.settle_date)).where(
-                    DailySettlement.store_id == job.store_id,
-                    DailySettlement.platform_id == job.platform_id,
-                    DailySettlement.deposit_amount.isnot(None),
-                )
-            )
-            window_start, window_end = compute_settlement_sync_range(
-                latest_deposit_date, today, backfill_days=90,
-            )
             settlement_responses = fetch_account_settlement(
-                session.page, window_start.isoformat(), window_end.isoformat(),
+                session.page, deposit_window_start.isoformat(), deposit_window_end.isoformat(),
             )
             # 배민 정산은 배치 지급 캘린더라 주말/공휴일 등 실제 배치가 없는
             # 날짜는 fetch 응답에 아예 등장하지 않는다. 그런 갭 날짜의 기존
@@ -469,8 +541,8 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 .where(
                     DailySettlement.store_id == job.store_id,
                     DailySettlement.platform_id == job.platform_id,
-                    DailySettlement.settle_date >= window_start,
-                    DailySettlement.settle_date <= window_end,
+                    DailySettlement.settle_date >= deposit_window_start,
+                    DailySettlement.settle_date <= deposit_window_end,
                 )
                 .values(deposit_amount=0)
             )
@@ -495,16 +567,6 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         # 확인된 결정 — 실제 블랭킷 리셋 구현은 별도 설계 논의가 필요해
         # 범위 밖으로 남긴다).
         try:
-            latest_breakdown_date = db.scalar(
-                select(func.max(DailySettlement.settle_date)).where(
-                    DailySettlement.store_id == job.store_id,
-                    DailySettlement.platform_id == job.platform_id,
-                    DailySettlement.commission_amount.isnot(None),
-                )
-            )
-            detail_window_start, detail_window_end = compute_settlement_sync_range(
-                latest_breakdown_date, today, backfill_days=30,
-            )
             breakdown_details = fetch_settlement_breakdown_details(
                 session.page, detail_window_start.isoformat(), detail_window_end.isoformat(),
             )

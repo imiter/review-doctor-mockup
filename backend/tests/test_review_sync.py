@@ -778,9 +778,17 @@ def test_sync_isolates_settlement_failure_from_stats_success(db_session, sync_se
     assert "정산" in job.error_message
 
 
-def test_sync_isolates_one_shop_stats_failure_from_other_shops(db_session, sync_setup, monkeypatch):
-    """4개 브랜드 중 한 브랜드의 매출/재주문율 조회만 실패해도 나머지
-    브랜드분은 정상 합산돼야 한다(리뷰의 매장별 실패 격리와 동일 원칙)."""
+def test_sync_isolates_one_shop_stats_failure_from_other_sources(db_session, sync_setup, monkeypatch):
+    """한 브랜드의 가게통계 조회가 실패해도 **다른 소스**(입금/재주문율)는
+    정상 저장돼야 한다 — 소스별 실패 격리 원칙은 그대로 유효하다.
+
+    2026-08-19 수정으로 이 테스트의 전제가 하나 바뀌었다. 예전에는 "실패한
+    브랜드를 뺀 나머지 브랜드분 매출 합계는 저장된다"까지 기대했는데, 그게
+    바로 I3에서 지적된 버그였다 — 매출은 계정 전체로 합산해 브랜드 차원 없이
+    한 행에 저장하므로, 부분 합계를 저장하면 그 달이 "동기화 완료"로 굳어
+    실패한 브랜드 몫이 영구 누락된다. 이제 매출만 all-or-nothing이고(전용
+    회귀 테스트: test_sync_skips_sales_upsert_entirely_when_any_shop_stats_fetch_failed),
+    나머지 소스의 격리는 여기서 계속 지킨다."""
     import app.review_sync as review_sync_mod
 
     job, conn = sync_setup
@@ -802,7 +810,11 @@ def test_sync_isolates_one_shop_stats_failure_from_other_shops(db_session, sync_
     settlement = db_session.query(DailySettlement).filter_by(
         store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
     ).one()
-    assert settlement.sales_amount == 50000  # 22222분만 반영, 11111은 실패라 제외
+    assert settlement.deposit_amount == 40000  # 입금은 가게통계 실패와 무관하게 정상 저장
+    assert settlement.sales_amount == 0  # 부분 합계는 저장하지 않는다(I3)
+    assert db_session.query(RepurchaseMetric).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, metric_date="2026-08-10",
+    ).one().new_orders == 1  # 재주문율도 정상 저장
     assert "브랜드A" in job.error_message or "11111" in job.error_message
 
 
@@ -1682,9 +1694,15 @@ def test_sync_skips_already_synced_months_for_sales_but_still_visits_one_month_f
 ):
     """3개월 전부(이번 달 포함 — 이번 달 몫은 "이번 달 매출 보완"이라는
     별도 경로로도 채워질 수 있으므로, 필터 입장에선 이번 달도 이미 동기화된
-    것으로 보일 수 있다) 이미 sales_amount로 채워져 있으면, 필터링 결과가
-    완전히 비어버린다 — 이때 fetch_shop_stats에 빈 목록을 넘기지 않고
-    crmInfo 캡처를 위해 최소 1개월(가장 최근 완료된 달)은 넘겨야 한다."""
+    것으로 보일 수 있다) 이미 sales_amount로 채워져 있어도, fetch_shop_stats에
+    빈 목록을 넘기면 안 된다 — crmInfo(소급 불가능한 최근 7일 스냅샷) 캡처를
+    위해 최소 1개월(가장 최근 완료된 달)은 반드시 방문해야 한다.
+
+    2026-08-19 수정 이후 이 보장은 "결과가 비면 대체한다"는 fallback 분기가
+    아니라 `filter_months_needing_sync(..., always_include={months[-2]})`에서
+    나온다 — 기대 결과는 그대로지만 메커니즘이 바뀌었다(그 fallback은 완료된
+    두 달만 있고 이번 달이 없는 경우 `[이번 달]` 하나만 남겨 가게통계 하드
+    에러를 부르는 구멍이 있었다. I4/I5 참고)."""
     import app.review_sync as review_sync_mod
     from scrapers.baemin_stats import recent_months
 
@@ -1955,6 +1973,215 @@ def test_sync_skips_already_synced_click_metric_months_but_always_includes_curre
     assert job.status == "success"
     # 완료된 2개월은 건너뛰고, 진행 중인 이번 달만 남아야 한다.
     assert received_months == [[current_month]]
+
+
+def test_sync_keeps_full_ninety_day_deposit_window_after_sales_path_wrote_todays_row(
+    db_session, sync_setup, monkeypatch,
+):
+    """Critical 회귀 테스트(2026-08-19): 매출/이번달주문 경로가 먼저 성공해
+    daily_settlements에 오늘 날짜 행을 만들어도, 입금 조회 범위는 여전히
+    90일 전체여야 한다.
+
+    원래 버그는 두 가지가 겹쳐서 났다. (1) 입금 커서 판정이
+    `deposit_amount.isnot(None)`인데 이 컬럼은 `INT NOT NULL DEFAULT 0`이라
+    모든 행에 항상 참인 항등식이고, (2) 매출/이번달주문 upsert가 입금 커서
+    계산보다 먼저 실행되면서 `db.flush()`까지 해서 오늘 날짜 행이 이미
+    존재하게 만들었다 — 그래서 최초 동기화인데도 커서가 "오늘"로 잡혀 90일
+    백필이 며칠짜리로 붕괴했다. 기존 커서 테스트들은 fetch_shop_stats/
+    fetch_orders를 실제로 성공시키지 않아 이 조합을 못 잡았다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+    # 매출(가게통계)과 이번 달 매출(주문내역) 둘 다 실제로 값을 반환하게 해서
+    # 입금 커서를 계산하기 전에 daily_settlements에 행이 실제로 생기게 만든다.
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_shop_stats",
+        lambda page, shop_no, months: ([_SALES_RESP], [_CRM_RESP]),
+    )
+    today = date.today()
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_orders",
+        lambda page, start_date, end_date, **kwargs: [
+            {"order": {
+                "orderNumber": "T-TODAY", "orderDateTime": f"{today.isoformat()}T12:00:00",
+                "payAmount": 12000, "itemsSummary": "치킨", "deliveryType": "DELIVERY",
+            }},
+        ],
+    )
+
+    received = {}
+
+    def _fetch_account_settlement(page, start_date, end_date, **kwargs):
+        received["range"] = (start_date, end_date)
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", _fetch_account_settlement)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    # 매출 경로가 실제로 오늘 날짜 행을 만들었는지부터 확인한다 — 이게 없으면
+    # 이 테스트는 버그를 재현조차 못 한 것이다.
+    assert db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date=today,
+    ).one().sales_amount == 12000
+    assert received["range"][0] == (today - timedelta(days=90)).isoformat()
+
+
+def test_sync_ignores_zero_deposit_rows_when_computing_deposit_cursor(db_session, sync_setup, monkeypatch):
+    """Critical 회귀 테스트(2026-08-19): 매출만 채워지고 입금은 한 번도 안
+    들어온 행(`deposit_amount=0`, NOT NULL 기본값)은 입금 커서가 되면 안
+    된다 — `.isnot(None)`은 이 행도 "입금 동기화됨"으로 잡아 90일 백필을
+    건너뛰게 만들었다. seed.sql의 Mock 행이 섞여 있을 때도 같은 문제다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    today = date.today()
+    db_session.add(DailySettlement(
+        store_id=job.store_id, platform_id=job.platform_id,
+        settle_date=today - timedelta(days=5), sales_amount=100000, deposit_amount=0,
+    ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received = {}
+
+    def _fetch_account_settlement(page, start_date, end_date, **kwargs):
+        received["range"] = (start_date, end_date)
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", _fetch_account_settlement)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert received["range"][0] == (today - timedelta(days=90)).isoformat()
+
+
+def test_sync_treats_zero_sales_month_as_not_yet_synced(db_session, sync_setup, monkeypatch):
+    """Critical 회귀 테스트(2026-08-19): 매출 쪽도 같은 항등식 문제를 겪었다.
+    `sales_amount=0`인 행(예: seed Mock, 또는 입금만 먼저 채워진 행)이 있는
+    달은 "이미 동기화됨"으로 잡히면 안 된다 — 그 달 매출을 영영 안 가져오게
+    된다."""
+    import app.review_sync as review_sync_mod
+    from scrapers.baemin_stats import recent_months
+
+    job, conn = sync_setup
+    months = recent_months(3)
+    db_session.add(DailySettlement(
+        store_id=job.store_id, platform_id=job.platform_id,
+        settle_date=date.fromisoformat(f"{months[0]}-15"), sales_amount=0, deposit_amount=50000,
+    ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received_months = []
+
+    def _fetch_shop_stats(page, shop_no, requested_months):
+        received_months.append(requested_months)
+        return [], []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _fetch_shop_stats)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert received_months == [months]  # sales_amount=0인 달도 여전히 조회 대상
+
+
+def test_sync_always_refetches_most_recent_completed_month_for_sales(db_session, sync_setup, monkeypatch):
+    """Important 회귀 테스트(2026-08-19, I4/I5): 완료된 두 달은 이미 있고
+    이번 달만 없는 흔한 상황에서, 필터 결과가 `[이번 달]` 하나만 남으면 안
+    된다.
+
+    이유 두 가지. (a) 가게통계 화면은 진행 중인 이번 달을 아예 선택할 수
+    없어서(`_select_month_dropdown`이 False 반환) 이번 달만 넘기면
+    `observed_sales_endpoint`가 False로 남아 하드 에러가 나고, 그 호출에서
+    이미 캡처했을 crm 응답까지 예외와 함께 통째로 버려진다. (b) 이번 달
+    매출은 주문내역 경로가 진행분으로 채우는데, 달이 바뀌어도 그 달엔 이미
+    행이 있어 가게통계 재조회를 건너뛰면 배민의 확정 월별 수치를 영영 못
+    받는다. 그래서 `months[-2]`(가장 최근 완료된 달)는 이미 동기화됐어도
+    항상 포함한다."""
+    import app.review_sync as review_sync_mod
+    from scrapers.baemin_stats import recent_months
+
+    job, conn = sync_setup
+    months = recent_months(3)
+    for m in months[:2]:  # 완료된 두 달만 이미 동기화됨, 이번 달은 아직 없음
+        db_session.add(DailySettlement(
+            store_id=job.store_id, platform_id=job.platform_id,
+            settle_date=date.fromisoformat(f"{m}-15"), sales_amount=100000, deposit_amount=0,
+        ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received_months = []
+
+    def _fetch_shop_stats(page, shop_no, requested_months):
+        received_months.append(requested_months)
+        return [], []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _fetch_shop_stats)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    # 이번 달만 남는 게 아니라, 가장 최근 완료된 달(months[-2])이 항상 함께
+    # 포함돼야 한다 — 조회 달 수는 여전히 최대 2개라 성능 이득은 유지된다.
+    assert received_months == [[months[-2], months[-1]]]
+
+
+def test_sync_skips_sales_upsert_entirely_when_any_shop_stats_fetch_failed(
+    db_session, sync_setup, monkeypatch,
+):
+    """Important 회귀 테스트(2026-08-19, I3): 매출은 매장별 응답을 계정 전체로
+    합산해 하나의 행으로 저장하는데(daily_settlements에 브랜드 차원이 없다),
+    브랜드 하나가 실패한 채로 나머지 합계만 저장하면 그 달이 "동기화 완료"로
+    굳어 다음 동기화가 통째로 건너뛴다 — 실패한 브랜드 몫이 영구 누락되고
+    사후 판별도 불가능하다. 그래서 완전 성공일 때만 저장한다.
+
+    재주문율(crm)은 합산 구조가 아니고 커서로 굳지도 않으므로 이 판단과
+    무관하게 계속 저장돼야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeMultiShopSession()  # [(11111, "브랜드A"), (22222, "브랜드B")]
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    def _fetch_stats(page, shop_no, months):
+        if shop_no == 11111:
+            raise BaeminStatsScrapeError("일시적 오류")
+        return [_SALES_RESP], [_CRM_RESP]
+
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _fetch_stats)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    # 성공한 브랜드 몫만의 부분 합계가 저장되면 안 된다 — 아예 행이 없어야 한다.
+    assert db_session.query(DailySettlement).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, settle_date="2026-08-10",
+    ).count() == 0
+    # 재주문율은 독립적으로 정상 저장된다.
+    assert db_session.query(RepurchaseMetric).filter_by(
+        store_id=job.store_id, platform_id=job.platform_id, metric_date="2026-08-10",
+    ).one().new_orders == 1
+    # 왜 매출이 비었는지가 error_message로 드러나야 한다.
+    assert "브랜드A" in job.error_message
+    assert "매출" in job.error_message
 
 
 def test_sync_fetches_all_click_metric_months_on_first_sync(db_session, sync_setup, monkeypatch):
