@@ -1,4 +1,5 @@
 from scrapers.baemin_stats import (
+    _pick_bounce_month,
     _should_count_sales_response,
     compute_order_sync_range,
     compute_repurchase_rates,
@@ -536,6 +537,38 @@ def test_filter_months_needing_sync_preserves_input_order():
     months = ["2026-06", "2026-07", "2026-08"]
     synced = {"2026-07"}
     assert filter_months_needing_sync(months, synced) == ["2026-06", "2026-08"]
+
+
+def test_pick_bounce_month_returns_first_candidate_not_requested():
+    all_months = ["2026-06", "2026-07", "2026-08"]
+    requested = ["2026-07"]
+    assert _pick_bounce_month(all_months, requested) == "2026-06"
+
+
+def test_pick_bounce_month_skips_excluded_months():
+    all_months = ["2026-06", "2026-07", "2026-08"]
+    requested = ["2026-07"]
+    # 2026-06도 exclude에 있으면 다음 후보(2026-08)로 넘어가야 한다.
+    assert _pick_bounce_month(all_months, requested, exclude={"2026-06"}) == "2026-08"
+
+
+def test_pick_bounce_month_returns_none_when_everything_requested_or_excluded():
+    all_months = ["2026-06", "2026-07"]
+    requested = ["2026-06"]
+    assert _pick_bounce_month(all_months, requested, exclude={"2026-07"}) is None
+
+
+def test_pick_bounce_month_returns_none_when_all_candidates_already_requested():
+    all_months = ["2026-06", "2026-07", "2026-08"]
+    requested = ["2026-06", "2026-07", "2026-08"]
+    assert _pick_bounce_month(all_months, requested) is None
+
+
+def test_pick_bounce_month_with_no_exclude_defaults_to_empty_set():
+    # exclude를 아예 안 넘기면(우가클 호출부처럼) 후보 전체를 그대로 쓴다.
+    all_months = ["2026-06", "2026-07", "2026-08"]
+    requested = ["2026-08"]
+    assert _pick_bounce_month(all_months, requested) == "2026-06"
 
 
 def test_parse_applied_range_reads_same_year_range():

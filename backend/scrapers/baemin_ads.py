@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from scrapers.baemin_auth import capture_failure_diagnostics
+from scrapers.baemin_stats import _pick_bounce_month, recent_months
 
 
 def map_click_metrics_by_date(responses: list[dict]) -> dict[str, dict]:
@@ -145,6 +146,22 @@ def fetch_brand_click_metrics(page, shop_no: int, months: list[str]) -> list[dic
             if page.get_by_text(re.compile(r"^\d+월$"), exact=True).count() > 0:
                 break
             page.wait_for_timeout(1_000)
+
+        # "마지막 조회한 달 기억" 문제 방어(baemin_stats.py의
+        # `_pick_bounce_month` docstring 참고, `fetch_shop_stats`와 동일한
+        # 원인·동일한 실측 재현). 우가클은 진행 중인 이번 달도 선택 가능한
+        # 화면이라(가게통계와 달리) 제외할 달이 없다 — `recent_months(3)`
+        # 전부가 튕기기 후보다. 이 튕기기 자체의 응답은 아래
+        # `state["collecting"]`이 아직 False인 시점에 발생하므로
+        # `_should_count_click_metrics_response`가 이미 알아서 무시한다.
+        # 튕기기 자체가 실패해도 본 조회는 그대로 시도한다.
+        bounce_month = _pick_bounce_month(recent_months(3), months)
+        if bounce_month is not None:
+            try:
+                _select_click_metrics_month(page, bounce_month)
+                page.wait_for_timeout(1_000)
+            except PlaywrightTimeoutError:
+                pass
 
         # 여기까지는 화면이 스스로 발생시킨(예측 불가한 기본 달) 응답만
         # 있을 수 있다 — 이제부터 명시적으로 월을 선택하기 시작하므로 그

@@ -643,6 +643,33 @@ def recent_months(count: int = 3) -> list[str]:
     return list(reversed(months))
 
 
+def _pick_bounce_month(
+    all_recent_months: list[str], requested_months: list[str], *, exclude: set[str] | None = None,
+) -> str | None:
+    """`requested_months`(이번에 실제로 조회할 달)에도, `exclude`에도 없는
+    달을 `all_recent_months`에서 순서대로 찾아 하나 반환한다 — 없으면
+    `None`.
+
+    배민 화면은 "이 계정이 마지막으로 조회한 달"을 persist해뒀다가 다음
+    진입 시 기본값으로 보여준다. 그 기억된 달과 이번에 요청할 달이 우연히
+    같으면, "이미 선택된 달을 다시 선택"하는 조작이 되어 배민 프론트가
+    실제 값 변경이 없다고 판단해 API를 재호출하지 않는 현상이 실측
+    확인됐다(2026-08-20, 데모 계정 4개 브랜드 전부 — 가게통계/우가클
+    양쪽에서 재현). 증분 조회가 매번 같은 1~2개 달만 반복 요청하게
+    되면서 처음 드러났다 — 최초 백필은 매번 여러 달을 순회해 항상 직전과
+    다른 달을 선택했으므로 우연히 이 문제를 피해갔을 뿐이다. 이 함수가
+    고르는 "튕기기" 대상으로 먼저 한 번 선택을 갈아치우면, 그 뒤 실제
+    `requested_months` 선택은 항상 진짜 변경이 되어 API 재호출을 보장한다.
+    `exclude`는 가게통계처럼 애초에 선택 불가능한 달(진행 중인 이번 달)을
+    튕기기 후보에서도 빼야 하는 경우에 쓴다 — 우가클처럼 이번 달도 선택
+    가능한 화면은 빈 집합을 넘긴다."""
+    exclude = exclude or set()
+    for m in all_recent_months:
+        if m not in requested_months and m not in exclude:
+            return m
+    return None
+
+
 def _select_month_dropdown(page, month: str) -> bool:
     """가게통계 화면의 월 선택 드롭다운을 `month`("YYYY-MM")로 바꾼다.
     실제 클릭 순서는 모듈 docstring 참고. 목록에 그 달이 없으면(진행 중인
@@ -824,6 +851,21 @@ def fetch_shop_stats(page, shop_no: int, months: list[str]) -> tuple[list[dict],
                 page.wait_for_timeout(2_000)
                 if state["observed_crm_endpoint"]:
                     break
+
+        # "마지막 조회한 달 기억" 문제 방어(_pick_bounce_month docstring
+        # 참고) — 가게통계는 진행 중인 이번 달을 애초에 선택할 수 없으므로
+        # 튕기기 후보에서도 뺀다. 이 튕기기 자체의 응답은 아래
+        # `state["collect_sales"]`가 아직 False인 시점에 발생하므로
+        # `_should_count_sales_response`가 이미 알아서 무시한다(첫 로드의
+        # 예측 불가능한 응답을 무시하는 것과 동일한 게이트) — 별도 처리가
+        # 필요 없다. 튕기기 자체가 실패해도 본 조회는 그대로 시도한다.
+        bounce_month = _pick_bounce_month(recent_months(3), months, exclude={recent_months(1)[0]})
+        if bounce_month is not None:
+            try:
+                _select_month_dropdown(page, bounce_month)
+                page.wait_for_timeout(1_000)
+            except PlaywrightTimeoutError:
+                pass
 
         state["collect_sales"] = True
 
