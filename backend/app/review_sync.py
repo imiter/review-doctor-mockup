@@ -33,10 +33,12 @@ from scrapers.baemin_stats import (
     BaeminStatsScrapeError,
     compute_order_sync_range,
     compute_repurchase_rates,
+    compute_settlement_sync_range,
     fetch_account_settlement,
     fetch_orders,
     fetch_settlement_breakdown_details,
     fetch_shop_stats,
+    filter_months_needing_sync,
     map_deposits_by_date,
     map_order_rows,
     map_orders_to_daily_sales,
@@ -283,7 +285,7 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
             upsert_shop_brand(db, conn.id, shop_no, shop_name)
 
             try:
-                raw_reviews = fetch_all_reviews(session.page, shop_no)
+                raw_reviews = fetch_all_reviews(session.page, shop_no, existing_ids=existing_ids)
                 # raw를 map_review 결과와 함께 들고 있는다 — 신규로 실제
                 # INSERT하는 리뷰에 대해서만 extract_owner_reply()로 이미
                 # 달린 사장님 답글을 review_replies에 같이 적재하기 위해서다
@@ -338,11 +340,27 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         # 판단하면 불일치가 생긴다).
         stats_errors: list[str] = []
         months = recent_months(3)
+        synced_sales_dates = db.scalars(
+            select(DailySettlement.settle_date).where(
+                DailySettlement.store_id == job.store_id,
+                DailySettlement.platform_id == job.platform_id,
+                DailySettlement.sales_amount.isnot(None),
+            )
+        ).all()
+        synced_sales_months = {d.strftime("%Y-%m") for d in synced_sales_dates}
+        sales_months_to_fetch = filter_months_needing_sync(months, synced_sales_months)
+        if not sales_months_to_fetch:
+            # crmInfo(재주문율)는 날짜 소급이 안 되는 "최근 7일" 고정
+            # 스냅샷이라, 매출을 전부 건너뛰어도 최소 한 달은 방문해서
+            # 갱신해야 한다. months[-1](이번 달)은 가게통계 화면 구조상
+            # 애초에 선택 불가능하므로(recent_months 문서 참고) 그 앞
+            # 달(가장 최근 완료된 달)을 쓴다.
+            sales_months_to_fetch = [months[-2]]
         sales_responses: list[dict] = []
         crm_responses: list[dict] = []
         for shop_no, shop_name in session.shops:
             try:
-                s, c = fetch_shop_stats(session.page, shop_no, months)
+                s, c = fetch_shop_stats(session.page, shop_no, sales_months_to_fetch)
                 sales_responses.extend(s)
                 crm_responses.extend(c)
             except (BaeminStatsScrapeError, KeyError) as e:
@@ -422,9 +440,18 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
 
         today = date.today()
         try:
-            window_start = today - timedelta(days=90)
+            latest_deposit_date = db.scalar(
+                select(func.max(DailySettlement.settle_date)).where(
+                    DailySettlement.store_id == job.store_id,
+                    DailySettlement.platform_id == job.platform_id,
+                    DailySettlement.deposit_amount.isnot(None),
+                )
+            )
+            window_start, window_end = compute_settlement_sync_range(
+                latest_deposit_date, today, backfill_days=90,
+            )
             settlement_responses = fetch_account_settlement(
-                session.page, window_start.isoformat(), today.isoformat(),
+                session.page, window_start.isoformat(), window_end.isoformat(),
             )
             # 배민 정산은 배치 지급 캘린더라 주말/공휴일 등 실제 배치가 없는
             # 날짜는 fetch 응답에 아예 등장하지 않는다. 그런 갭 날짜의 기존
@@ -434,14 +461,16 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
             # (store_id+platform_id로 엄격히 스코프, 다른 플랫폼/범위 밖
             # 날짜는 절대 건드리지 않음) 안의 기존 행부터 0으로 초기화한다 —
             # 갭 날짜는 결과적으로 0(입금 없음)으로 남고, 실제 배치가 있는
-            # 날짜만 아래 루프가 다시 실제 금액으로 채운다.
+            # 날짜만 아래 루프가 다시 실제 금액으로 채운다. 이 리셋 범위도
+            # window_start/window_end로 좁아진 증분 조회 범위를 그대로
+            # 따라간다 — 조회 안 한 과거 날짜의 기존 값을 잘못 지우지 않는다.
             db.execute(
                 update(DailySettlement)
                 .where(
                     DailySettlement.store_id == job.store_id,
                     DailySettlement.platform_id == job.platform_id,
                     DailySettlement.settle_date >= window_start,
-                    DailySettlement.settle_date <= today,
+                    DailySettlement.settle_date <= window_end,
                 )
                 .values(deposit_amount=0)
             )
@@ -466,9 +495,18 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         # 확인된 결정 — 실제 블랭킷 리셋 구현은 별도 설계 논의가 필요해
         # 범위 밖으로 남긴다).
         try:
-            detail_window_start = today - timedelta(days=30)
+            latest_breakdown_date = db.scalar(
+                select(func.max(DailySettlement.settle_date)).where(
+                    DailySettlement.store_id == job.store_id,
+                    DailySettlement.platform_id == job.platform_id,
+                    DailySettlement.commission_amount.isnot(None),
+                )
+            )
+            detail_window_start, detail_window_end = compute_settlement_sync_range(
+                latest_breakdown_date, today, backfill_days=30,
+            )
             breakdown_details = fetch_settlement_breakdown_details(
-                session.page, detail_window_start.isoformat(), today.isoformat(),
+                session.page, detail_window_start.isoformat(), detail_window_end.isoformat(),
             )
             breakdown_by_date = map_settlement_breakdown_by_date(breakdown_details)
             for settle_date, amounts in breakdown_by_date.items():
@@ -489,9 +527,21 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         # 브랜드별로 완전히 분리해서 저장한다(설계 문서 스코프 결정).
         # 그래서 fetch_shop_stats처럼 매장 루프 안에서 브랜드마다 upsert도
         # 그 자리에서 바로 한다 — 나중에 합치는 단계가 없다.
+        current_month = date.today().strftime("%Y-%m")
         for shop_no, shop_name in session.shops:
             try:
-                click_responses = fetch_brand_click_metrics(session.page, shop_no, months)
+                synced_click_dates = db.scalars(
+                    select(BrandAdClickMetric.metric_date).where(
+                        BrandAdClickMetric.store_id == job.store_id,
+                        BrandAdClickMetric.platform_id == job.platform_id,
+                        BrandAdClickMetric.shop_no == str(shop_no),
+                    )
+                ).all()
+                synced_click_months = {d.strftime("%Y-%m") for d in synced_click_dates}
+                click_months_to_fetch = filter_months_needing_sync(
+                    months, synced_click_months, always_include={current_month},
+                )
+                click_responses = fetch_brand_click_metrics(session.page, shop_no, click_months_to_fetch)
                 click_by_date = map_click_metrics_by_date(click_responses)
                 for metric_date, m in click_by_date.items():
                     upsert_brand_ad_click_metric(

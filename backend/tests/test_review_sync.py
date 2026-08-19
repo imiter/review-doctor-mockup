@@ -94,7 +94,7 @@ def test_sync_inserts_new_reviews_and_skips_duplicates_and_hidden(db_session, sy
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
     monkeypatch.setattr(
         review_sync_mod, "fetch_all_reviews",
-        lambda page, shop_no: [_RAW_1, _RAW_2, _RAW_HIDDEN],
+        lambda page, shop_no, **kwargs: [_RAW_1, _RAW_2, _RAW_HIDDEN],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -121,7 +121,7 @@ def test_sync_captures_owner_reply_already_on_baemin_as_final_reply(db_session, 
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
     monkeypatch.setattr(
         review_sync_mod, "fetch_all_reviews",
-        lambda page, shop_no: [_RAW_ALREADY_REPLIED],
+        lambda page, shop_no, **kwargs: [_RAW_ALREADY_REPLIED],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -171,7 +171,7 @@ def test_sync_records_mapping_failure_on_missing_field_and_still_closes_session(
     }
     monkeypatch.setattr(
         review_sync_mod, "fetch_all_reviews",
-        lambda page, shop_no: [_raw_missing_nickname],
+        lambda page, shop_no, **kwargs: [_raw_missing_nickname],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -189,7 +189,7 @@ def test_sync_records_fetch_failure_and_still_closes_session(db_session, sync_se
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
 
-    def _raise(page, shop_no):
+    def _raise(page, shop_no, **kwargs):
         raise BaeminScrapeError("리뷰 조회 실패: HTTP 500")
 
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _raise)
@@ -233,7 +233,7 @@ def test_sync_dedupes_duplicate_external_id_within_same_batch(db_session, sync_s
     _raw_dup = {**_RAW_2}  # id=1002, 배치 내에서 두 번 등장하는 상황을 흉내낸다
     monkeypatch.setattr(
         review_sync_mod, "fetch_all_reviews",
-        lambda page, shop_no: [_raw_dup, dict(_raw_dup)],
+        lambda page, shop_no, **kwargs: [_raw_dup, dict(_raw_dup)],
     )
 
     sync_reviews_for_job(job, conn, db_session)
@@ -257,7 +257,7 @@ def test_sync_succeeds_with_zero_reviews_when_fetch_returns_empty_list(db_sessio
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     sync_reviews_for_job(job, conn, db_session)
 
@@ -276,7 +276,7 @@ def test_sync_records_unclassified_fetch_exception_and_still_closes_session(db_s
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
 
-    def _raise(page, shop_no):
+    def _raise(page, shop_no, **kwargs):
         raise RuntimeError("simulated Playwright error")
 
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _raise)
@@ -320,7 +320,7 @@ def test_sync_syncs_all_shops_and_sums_counts_with_distinct_shop_tags(db_session
     fake_session = _FakeMultiShopSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
 
-    def _fetch(page, shop_no):
+    def _fetch(page, shop_no, **kwargs):
         return [_RAW_SHOP_A] if shop_no == 11111 else [_RAW_SHOP_B]
 
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _fetch)
@@ -355,7 +355,7 @@ def test_sync_partial_shop_failure_still_succeeds_with_only_successful_shop_coun
     fake_session = _FakeMultiShopSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
 
-    def _fetch(page, shop_no):
+    def _fetch(page, shop_no, **kwargs):
         if shop_no == 11111:
             raise BaeminScrapeError("일시적 오류")
         return [_RAW_SHOP_B]
@@ -392,7 +392,7 @@ def test_sync_all_shops_failing_marks_job_failed(db_session, sync_setup, monkeyp
     fake_session = _FakeMultiShopSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
 
-    def _raise(page, shop_no):
+    def _raise(page, shop_no, **kwargs):
         raise BaeminScrapeError(f"매장 {shop_no} 조회 실패")
 
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _raise)
@@ -418,7 +418,7 @@ def test_sync_upserts_shop_brand_name_change_without_duplicate(db_session, sync_
 
     fake_session = _FakeMultiShopSession()  # shops = [(11111, "브랜드A"), (22222, "브랜드B")]
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     sync_reviews_for_job(job, conn, db_session)
 
@@ -568,7 +568,7 @@ def test_sync_upserts_sales_deposit_repurchase_when_all_succeed(db_session, sync
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_shop_stats",
         lambda page, shop_no, months: ([_SALES_RESP], [_CRM_RESP]),
@@ -603,7 +603,7 @@ def test_sync_merges_current_month_orders_into_sales_for_a_different_date(db_ses
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_shop_stats",
         lambda page, shop_no, months: ([_SALES_RESP], []),  # 2026-08-10에 50000원 (완료된 달분)
@@ -636,7 +636,7 @@ def test_sync_isolates_current_month_orders_failure_from_completed_months_sales(
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_shop_stats",
         lambda page, shop_no, months: ([_SALES_RESP], []),
@@ -670,7 +670,7 @@ def test_sync_merges_current_month_sales_and_settlement_deposit_on_the_same_date
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", lambda page, shop_no, months: ([], []))
     monkeypatch.setattr(
         review_sync_mod, "fetch_orders",
@@ -699,7 +699,7 @@ def test_sync_sums_stats_across_multiple_shops(db_session, sync_setup, monkeypat
     job, conn = sync_setup
     fake_session = _FakeMultiShopSession()  # shops = [(11111, "브랜드A"), (22222, "브랜드B")]
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     sales_a = {"graph": {"data": [{"x": "2026-08-10", "y": 30000.0}]}, "orderAmount": 30000.0, "orderCount": 1}
     sales_b = {"graph": {"data": [{"x": "2026-08-10", "y": 20000.0}]}, "orderAmount": 20000.0, "orderCount": 1}
@@ -728,7 +728,7 @@ def test_sync_reports_success_with_error_message_when_stats_fail_but_reviews_suc
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [_RAW_1])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
 
     def _raise_stats(page, shop_no, months):
         raise BaeminStatsScrapeError("매출 통계 API 응답을 한 번도 확인하지 못했습니다")
@@ -756,7 +756,7 @@ def test_sync_isolates_settlement_failure_from_stats_success(db_session, sync_se
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_shop_stats",
         lambda page, shop_no, months: ([_SALES_RESP], [_CRM_RESP]),
@@ -786,7 +786,7 @@ def test_sync_isolates_one_shop_stats_failure_from_other_shops(db_session, sync_
     job, conn = sync_setup
     fake_session = _FakeMultiShopSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     def _fetch_stats(page, shop_no, months):
         if shop_no == 11111:
@@ -818,7 +818,7 @@ def test_sync_isolates_malformed_sales_response_from_other_three_sources(db_sess
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [_RAW_1])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
 
     _malformed_sales_resp = {"orderAmount": 50000.0, "orderCount": 2}  # "graph" 키 누락
     monkeypatch.setattr(
@@ -873,7 +873,7 @@ def test_sync_marks_job_success_when_all_reviews_fail_but_stats_succeed(db_sessi
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
 
-    def _raise_reviews(page, shop_no):
+    def _raise_reviews(page, shop_no, **kwargs):
         raise BaeminScrapeError("리뷰 조회 실패: HTTP 500")
 
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _raise_reviews)
@@ -906,7 +906,7 @@ def test_sync_isolates_non_keyerror_malformed_sales_response_from_other_three_so
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [_RAW_1])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
 
     # "graph" 키는 있지만 y가 null — round(None)이 TypeError를 던진다(KeyError가 아님).
     _malformed_sales_resp = {"graph": {"data": [{"x": "2026-08-10", "y": None}]}, "orderAmount": 50000.0, "orderCount": 2}
@@ -961,7 +961,7 @@ def test_sync_zeroes_stale_mock_deposit_on_gap_date_within_fetch_window(db_sessi
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     today = date.today()
     gap_date = today - timedelta(days=5)  # 실제 배치 응답에 없는 갭 날짜(주말 등)를 흉내낸다
@@ -994,16 +994,29 @@ def test_sync_zeroes_stale_mock_deposit_on_gap_date_within_fetch_window(db_sessi
 
 
 def test_sync_leaves_deposit_amount_outside_fetch_window_untouched(db_session, sync_setup, monkeypatch):
-    """조회 범위(today-90일 ~ today) 밖 날짜의 기존 deposit_amount는 이번
-    동기화가 그 날짜를 아예 시도조차 하지 않았으므로 손대면 안 된다."""
+    """조회 범위 밖 날짜의 기존 deposit_amount는 이번 동기화가 그 날짜를
+    아예 시도조차 하지 않았으므로 손대면 안 된다.
+
+    Task 4에서 입금 조회가 고정 90일 창에서 커서 기반 증분 범위
+    (compute_settlement_sync_range)로 바뀌면서, "조회 범위 밖"이 더 이상
+    "today-90일보다 예전"이 아니라 "커서(가장 최근 deposit_amount 확보
+    날짜)-2일보다 예전"이 됐다 — 이 store+platform에 deposit_amount가 채워진
+    행이 old_date 하나뿐이면 그 행 자체가 커서가 되어 조회 범위 안에
+    들어가버린다. 그래서 별도로 최근 커서 행(recent_date)을 둬서 조회
+    범위를 좁혀야 old_date가 실제로 범위 밖에 남는다."""
     import app.review_sync as review_sync_mod
 
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
-    old_date = date.today() - timedelta(days=120)  # 90일 조회 범위 밖
+    recent_date = date.today() - timedelta(days=3)  # 커서 역할 — 조회 범위를 최근으로 좁힌다
+    old_date = date.today() - timedelta(days=120)  # 좁혀진 조회 범위 밖
+    db_session.add(DailySettlement(
+        store_id=job.store_id, platform_id=job.platform_id,
+        settle_date=recent_date, sales_amount=0, deposit_amount=10000,
+    ))
     db_session.add(DailySettlement(
         store_id=job.store_id, platform_id=job.platform_id,
         settle_date=old_date, sales_amount=1000, deposit_amount=55555,
@@ -1027,7 +1040,7 @@ def test_sync_leaves_other_platform_deposit_amount_untouched_within_fetch_window
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     gap_date = date.today() - timedelta(days=5)
     db_session.add(DailySettlement(
@@ -1124,7 +1137,7 @@ def test_sync_upserts_brand_click_metrics_per_shop(db_session, sync_setup, monke
     job, conn = sync_setup
     fake_session = _FakeSession()  # shop_no=99999001
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_brand_click_metrics",
         lambda page, shop_no, months: [_CLICK_RESP_AUGUST],
@@ -1148,7 +1161,7 @@ def test_sync_sums_nothing_across_brands_for_click_metrics(db_session, sync_setu
     job, conn = sync_setup
     fake_session = _FakeMultiShopSession()  # shops = [(11111, "브랜드A"), (22222, "브랜드B")]
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     click_a = {"summary": {}, "metrics": {}, "dailyMetrics": [
         {"date": "2026-08-01", "spentBudget": 100, "displayCount": 10, "clickCount": 1, "orderCount": 0, "orderAmounts": 0},
@@ -1184,7 +1197,7 @@ def test_sync_isolates_one_brand_click_metrics_failure_from_other_brands(db_sess
     job, conn = sync_setup
     fake_session = _FakeMultiShopSession()  # shops = [(11111, "브랜드A"), (22222, "브랜드B")]
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     click_b = {"summary": {}, "metrics": {}, "dailyMetrics": [
         {"date": "2026-08-01", "spentBudget": 200, "displayCount": 20, "clickCount": 2, "orderCount": 0, "orderAmounts": 0},
@@ -1278,7 +1291,7 @@ def test_sync_upserts_settlement_breakdown_columns(db_session, sync_setup, monke
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_settlement_breakdown_details",
         lambda page, start_date, end_date, **kwargs: [_BREAKDOWN_DETAIL],
@@ -1306,7 +1319,7 @@ def test_sync_isolates_settlement_breakdown_failure_from_deposit(db_session, syn
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_account_settlement",
         lambda page, start_date, end_date, **kwargs: [
@@ -1474,7 +1487,7 @@ def test_sync_upserts_individual_orders(db_session, sync_setup, monkeypatch):
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_orders",
         lambda page, start_date, end_date, **kwargs: [_ORDER_ITEM_A, _ORDER_ITEM_B],
@@ -1506,7 +1519,7 @@ def test_sync_uses_incremental_range_when_orders_already_exist(db_session, sync_
 
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     captured_ranges = []
 
@@ -1533,7 +1546,7 @@ def test_sync_isolates_individual_order_failure_from_current_month_sales(db_sess
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     call_count = {"n": 0}
 
@@ -1568,7 +1581,7 @@ def test_sync_raises_page_click_cap_for_deep_order_backfill(db_session, sync_set
     job, conn = sync_setup
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     calls = []
 
@@ -1608,7 +1621,7 @@ def test_sync_updates_campaign_current_cpc_from_real_bid(db_session, sync_setup,
 
     fake_session = _FakeMultiShopSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
 
     def fake_fetch_cpc_booking(page, shop_no):
         return {
@@ -1642,7 +1655,7 @@ def test_sync_isolates_cpc_booking_failure_from_click_metrics(db_session, sync_s
 
     fake_session = _FakeSession()  # shop_no=99999001
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
-    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "fetch_brand_click_metrics",
         lambda page, shop_no, months: [_CLICK_RESP_AUGUST],
@@ -1662,3 +1675,310 @@ def test_sync_isolates_cpc_booking_failure_from_click_metrics(db_session, sync_s
         store_id=job.store_id, platform_id=job.platform_id, shop_no="99999001", metric_date="2026-08-01",
     ).one()
     assert row.ad_spend == 95  # 클릭 성과는 CPC 실패와 무관하게 정상 수집됨
+
+
+def test_sync_skips_already_synced_months_for_sales_but_still_visits_one_month_for_crm(
+    db_session, sync_setup, monkeypatch,
+):
+    """3개월 전부(이번 달 포함 — 이번 달 몫은 "이번 달 매출 보완"이라는
+    별도 경로로도 채워질 수 있으므로, 필터 입장에선 이번 달도 이미 동기화된
+    것으로 보일 수 있다) 이미 sales_amount로 채워져 있으면, 필터링 결과가
+    완전히 비어버린다 — 이때 fetch_shop_stats에 빈 목록을 넘기지 않고
+    crmInfo 캡처를 위해 최소 1개월(가장 최근 완료된 달)은 넘겨야 한다."""
+    import app.review_sync as review_sync_mod
+    from scrapers.baemin_stats import recent_months
+
+    job, conn = sync_setup
+    months = recent_months(3)  # 예: ["2026-06", "2026-07", "2026-08"]
+    for m in months:  # 3개월 전부 이미 있다고 가정 → 필터 결과가 빈 리스트가 됨
+        db_session.add(DailySettlement(
+            store_id=job.store_id, platform_id=job.platform_id,
+            settle_date=date.fromisoformat(f"{m}-15"), sales_amount=100000, deposit_amount=0,
+        ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received_months = []
+
+    def _fetch_shop_stats(page, shop_no, requested_months):
+        received_months.append(requested_months)
+        return [], []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _fetch_shop_stats)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    # 이미 동기화된 2개월은 빠지고, crmInfo 보장용으로 마지막 완료 달(3번째 달
+    # 바로 앞, 즉 months[-2]) 하나만 남아야 한다 — months[-1](이번 달)은
+    # 가게통계 화면 자체가 선택 불가능해서 애초에 대상이 아니다.
+    assert received_months == [[months[-2]]]
+
+
+def test_sync_fetches_only_unsynced_months_when_some_are_missing(db_session, sync_setup, monkeypatch):
+    """3개월 중 1개월만 이미 있으면, 나머지(아직 없는 달)만 fetch_shop_stats에
+    넘겨야 한다 — crmInfo 보장 fallback은 fetch할 달이 이미 있을 때는
+    끼어들지 않는다."""
+    import app.review_sync as review_sync_mod
+    from scrapers.baemin_stats import recent_months
+
+    job, conn = sync_setup
+    months = recent_months(3)
+    db_session.add(DailySettlement(
+        store_id=job.store_id, platform_id=job.platform_id,
+        settle_date=date.fromisoformat(f"{months[0]}-15"), sales_amount=50000, deposit_amount=0,
+    ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received_months = []
+
+    def _fetch_shop_stats(page, shop_no, requested_months):
+        received_months.append(requested_months)
+        return [], []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _fetch_shop_stats)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert received_months == [[months[1], months[2]]]
+
+
+def test_sync_fetches_all_months_on_first_sync_when_nothing_stored_yet(db_session, sync_setup, monkeypatch):
+    """최초 동기화(daily_settlements에 이 store+platform 행이 전혀 없음)는
+    기존과 동일하게 3개월 전부를 fetch_shop_stats에 넘겨야 한다 — 회귀
+    방지용 테스트."""
+    import app.review_sync as review_sync_mod
+    from scrapers.baemin_stats import recent_months
+
+    job, conn = sync_setup
+    months = recent_months(3)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received_months = []
+
+    def _fetch_shop_stats(page, shop_no, requested_months):
+        received_months.append(requested_months)
+        return [], []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_shop_stats", _fetch_shop_stats)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert received_months == [months]
+
+
+def test_sync_passes_existing_review_ids_to_fetch_all_reviews(db_session, sync_setup, monkeypatch):
+    """_run_sync은 이미 이 계정에 저장된 external_review_id 전체 집합을
+    fetch_all_reviews에 그대로 넘겨야 한다 — 리뷰 조기종료가 실제로
+    동작하려면 이 배선이 맞아야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    db_session.add(Review(
+        store_id=job.store_id, platform_id=job.platform_id, menu_summary="기존메뉴",
+        external_review_id=1001, rating=5, content="이미 있는 리뷰", customer_nickname="기존고객",
+        customer_order_count=1, created_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+
+    received = {}
+
+    def _fetch_all_reviews(page, shop_no, existing_ids=None):
+        received["existing_ids"] = existing_ids
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", _fetch_all_reviews)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert received["existing_ids"] == {1001}
+
+
+def test_sync_narrows_deposit_fetch_range_when_cursor_exists(db_session, sync_setup, monkeypatch):
+    """이미 deposit_amount가 채워진 가장 최근 날짜가 있으면, 90일 전체가
+    아니라 그 날짜-2일부터만 fetch_account_settlement에 넘겨야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    db_session.add(DailySettlement(
+        store_id=job.store_id, platform_id=job.platform_id,
+        settle_date=date(2026, 8, 10), sales_amount=0, deposit_amount=50000,
+    ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received = {}
+
+    def _fetch_account_settlement(page, start_date, end_date, **kwargs):
+        received["range"] = (start_date, end_date)
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", _fetch_account_settlement)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert received["range"][0] == "2026-08-08"  # 8/10 - 2일
+
+
+def test_sync_uses_full_ninety_day_window_when_no_deposit_cursor_yet(db_session, sync_setup, monkeypatch):
+    """이 store+platform에 deposit_amount가 채워진 행이 하나도 없으면(최초
+    동기화) 기존과 동일하게 90일 전체를 조회해야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received = {}
+
+    def _fetch_account_settlement(page, start_date, end_date, **kwargs):
+        received["range"] = (start_date, end_date)
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_account_settlement", _fetch_account_settlement)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    expected_start = (date.today() - timedelta(days=90)).isoformat()
+    assert received["range"][0] == expected_start
+
+
+def test_sync_narrows_settlement_breakdown_range_when_cursor_exists(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    db_session.add(DailySettlement(
+        store_id=job.store_id, platform_id=job.platform_id,
+        settle_date=date(2026, 8, 12), sales_amount=0, deposit_amount=0,
+        commission_amount=1000, delivery_fee_amount=500,
+        customer_discount_amount=0, ad_cost_amount=0,
+    ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received = {}
+
+    def _fetch_settlement_breakdown_details(page, start_date, end_date, **kwargs):
+        received["range"] = (start_date, end_date)
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_settlement_breakdown_details", _fetch_settlement_breakdown_details)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert received["range"][0] == "2026-08-10"  # 8/12 - 2일
+
+
+def test_sync_uses_full_thirty_day_window_when_no_breakdown_cursor_yet(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received = {}
+
+    def _fetch_settlement_breakdown_details(page, start_date, end_date, **kwargs):
+        received["range"] = (start_date, end_date)
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_settlement_breakdown_details", _fetch_settlement_breakdown_details)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    expected_start = (date.today() - timedelta(days=30)).isoformat()
+    assert received["range"][0] == expected_start
+
+
+def test_sync_skips_already_synced_click_metric_months_but_always_includes_current_month(
+    db_session, sync_setup, monkeypatch,
+):
+    """브랜드별 우가클도 매출과 같은 원리지만, 진행 중인 이번 달은 이미
+    행이 있어도 항상 재조회 대상에 포함해야 한다."""
+    import app.review_sync as review_sync_mod
+    from scrapers.baemin_stats import recent_months
+
+    job, conn = sync_setup
+    months = recent_months(3)
+    current_month = months[-1]
+    shop_no = "99999001"  # _FakeSession.shops의 shop_no와 동일해야 함
+    for m in months:  # 3개월 전부 이미 있다고 가정(이번 달 포함)
+        db_session.add(BrandAdClickMetric(
+            store_id=job.store_id, platform_id=job.platform_id, shop_no=shop_no,
+            metric_date=date.fromisoformat(f"{m}-10"),
+            ad_spend=100, impressions=10, clicks=1, ad_orders=0, ad_revenue=0,
+        ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received_months = []
+
+    def _fetch_brand_click_metrics(page, shop_no, requested_months):
+        received_months.append(requested_months)
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_brand_click_metrics", _fetch_brand_click_metrics)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    # 완료된 2개월은 건너뛰고, 진행 중인 이번 달만 남아야 한다.
+    assert received_months == [[current_month]]
+
+
+def test_sync_fetches_all_click_metric_months_on_first_sync(db_session, sync_setup, monkeypatch):
+    """이 shop_no에 brand_ad_click_metrics 행이 전혀 없으면(최초 동기화)
+    기존과 동일하게 3개월 전부를 넘겨야 한다."""
+    import app.review_sync as review_sync_mod
+    from scrapers.baemin_stats import recent_months
+
+    job, conn = sync_setup
+    months = recent_months(3)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+
+    received_months = []
+
+    def _fetch_brand_click_metrics(page, shop_no, requested_months):
+        received_months.append(requested_months)
+        return []
+
+    monkeypatch.setattr(review_sync_mod, "fetch_brand_click_metrics", _fetch_brand_click_metrics)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert received_months == [months]
