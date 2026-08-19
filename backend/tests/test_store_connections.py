@@ -587,3 +587,44 @@ def test_sync_reviews_manual_dispatch_records_triggered_by_manual(client, db_ses
 
     job = db_session.query(ReviewSyncJob).filter_by(id=job_id).one()
     assert job.triggered_by == "manual"
+
+
+def test_list_connections_baemin_last_sync_is_none_when_no_job_exists(client, seeded_user, platforms, auth_headers):
+    res = client.get("/store-connections", headers=auth_headers)
+    body = res.json()
+    assert len(body) == 1
+    assert body[0]["last_sync"] is None
+
+
+def test_list_connections_baemin_last_sync_returns_most_recent_job(client, db_session, seeded_user, platforms, auth_headers):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import ReviewSyncJob
+
+    older = ReviewSyncJob(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, status="success",
+        triggered_by="manual", started_at=datetime.now(timezone.utc) - timedelta(days=1),
+        finished_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    newer = ReviewSyncJob(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id, status="failed",
+        triggered_by="scheduled", started_at=datetime.now(timezone.utc),
+        finished_at=datetime.now(timezone.utc), error_message="크롤 워커에 연결할 수 없습니다",
+    )
+    db_session.add_all([older, newer])
+    db_session.commit()
+
+    res = client.get("/store-connections", headers=auth_headers)
+    last_sync = res.json()[0]["last_sync"]
+    assert last_sync["status"] == "failed"
+    assert last_sync["triggered_by"] == "scheduled"
+    assert last_sync["error_message"] == "크롤 워커에 연결할 수 없습니다"
+
+
+def test_list_connections_non_baemin_connection_last_sync_is_always_none(client, seeded_user, platforms, auth_headers):
+    res = client.post("/store-connections", json={"platform_id": platforms["yogiyo"].id}, headers=auth_headers)
+    assert res.status_code == 201
+
+    body = client.get("/store-connections", headers=auth_headers).json()
+    yogiyo_row = next(r for r in body if r["platform_code"] == "yogiyo")
+    assert yogiyo_row["last_sync"] is None

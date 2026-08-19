@@ -38,7 +38,24 @@ def _require_worker_secret(x_worker_secret: str) -> None:
         raise HTTPException(403, "워커 비밀키가 일치하지 않습니다")
 
 
-def _row(c: StorePlatformConnection) -> dict:
+def _latest_sync_by_store(db: Session, store_id: int, platform_id: int) -> dict | None:
+    job = db.scalar(
+        select(ReviewSyncJob)
+        .where(ReviewSyncJob.store_id == store_id, ReviewSyncJob.platform_id == platform_id)
+        .order_by(ReviewSyncJob.started_at.desc())
+        .limit(1)
+    )
+    if job is None:
+        return None
+    return {
+        "status": job.status,
+        "triggered_by": job.triggered_by,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "error_message": job.error_message,
+    }
+
+
+def _row(c: StorePlatformConnection, *, last_sync: dict | None = None) -> dict:
     return {
         "id": c.id,
         "platform_id": c.platform_id,
@@ -49,6 +66,7 @@ def _row(c: StorePlatformConnection) -> dict:
         "business_number": c.business_number,
         "has_real_credential": c.credential_ciphertext is not None,
         "connected_at": c.connected_at.isoformat(),
+        "last_sync": last_sync,
     }
 
 
@@ -69,7 +87,10 @@ def list_connections(
         .options(joinedload(StorePlatformConnection.platform))
         .order_by(StorePlatformConnection.connected_at)
     ).all()
-    return [_row(c) for c in connections]
+    return [
+        _row(c, last_sync=_latest_sync_by_store(db, sid, c.platform_id) if c.platform.code == "baemin" else None)
+        for c in connections
+    ]
 
 
 class ConnectRequest(BaseModel):

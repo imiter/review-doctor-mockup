@@ -16,6 +16,12 @@ type Connection = {
   business_number: string | null;
   has_real_credential: boolean;
   connected_at: string;
+  last_sync: {
+    status: "pending" | "running" | "success" | "failed";
+    triggered_by: "manual" | "scheduled";
+    finished_at: string | null;
+    error_message: string | null;
+  } | null;
 };
 type PlatformOption = { id: number; code: string; name: string; brand_color: string | null };
 type SyncStatus = {
@@ -194,6 +200,17 @@ export default function StoreConnectionsPage() {
                 >
                   {syncingId === c.id ? "동기화 중..." : "데이터 동기화"}
                 </button>
+                {syncingId !== c.id && c.last_sync && (
+                  <p className="mt-2 text-xs text-muted">
+                    마지막 동기화: {c.last_sync.triggered_by === "scheduled" ? "자동" : "수동"} ·{" "}
+                    {c.last_sync.finished_at ? new Date(c.last_sync.finished_at).toLocaleString("ko-KR") : "진행 중"} ·{" "}
+                    {c.last_sync.status === "success" && "성공"}
+                    {c.last_sync.status === "failed" && (
+                      <span className="text-danger">실패: {c.last_sync.error_message}</span>
+                    )}
+                    {(c.last_sync.status === "pending" || c.last_sync.status === "running") && "진행 중"}
+                  </p>
+                )}
                 {syncStatus && (
                   <>
                     <p className="mt-2 text-xs text-muted">
