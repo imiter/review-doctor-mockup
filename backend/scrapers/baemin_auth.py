@@ -48,9 +48,14 @@
 """
 
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+_DIAGNOSTICS_DIR = Path(__file__).resolve().parents[2] / "crawler" / "logs" / "diagnostics"
+_BOT_BLOCK_TEXT = "비정상 동작이 감지되어"
 
 _DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -91,6 +96,47 @@ def _extract_login_error(page) -> str | None:
             if text:
                 return text
     return None
+
+
+def capture_failure_diagnostics(page, label: str) -> str:
+    """원인 불명(API 응답을 한 번도 못 받는 등)으로 스크래핑이 실패하기
+    직전에 호출한다. 스크린샷과 현재 URL을 `crawler/logs/diagnostics/`에
+    남기고, 화면에 배민의 봇 탐지 차단 문구("비정상 동작이 감지되어...")가
+    보이는지 확인해 사람이 읽을 한 줄 요약을 반환한다 — 실패 원인이 (a)
+    우리 쪽 네비게이션/타이밍 문제인지 (b) 배민의 일시적 접근 제한인지
+    사후에 구분하기 위한 목적으로, 2026-08-20 가게통계/우가클 원인불명
+    완전 실패 이후 추가됐다. 이 함수 자체가 진단 목적이라, 스크린샷 저장이
+    실패해도(디스크 문제 등) 그 예외로 원래 에러를 가리면 안 된다 —
+    각 단계를 개별적으로 try/except로 감싸 부분 실패도 요약에 그대로
+    드러낸다."""
+    current_url = "알 수 없음"
+    try:
+        current_url = page.url
+    except Exception:
+        pass
+
+    bot_blocked = False
+    try:
+        bot_blocked = page.get_by_text(_BOT_BLOCK_TEXT).count() > 0
+    except Exception:
+        pass
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_label = "".join(c if c.isalnum() else "-" for c in label)
+    screenshot_path = _DIAGNOSTICS_DIR / f"{timestamp}-{safe_label}.png"
+    screenshot_saved = False
+    try:
+        _DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(screenshot_path), full_page=True)
+        screenshot_saved = True
+    except Exception:
+        pass
+
+    return (
+        f"진단: URL={current_url}, "
+        f"봇차단화면={'감지됨' if bot_blocked else '미감지'}, "
+        f"스크린샷={screenshot_path if screenshot_saved else '저장 실패'}"
+    )
 
 
 def _discover_all_shops(page) -> list[tuple[int, str]]:

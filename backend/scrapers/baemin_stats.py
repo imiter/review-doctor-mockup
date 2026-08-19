@@ -220,6 +220,8 @@ from zoneinfo import ZoneInfo
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from scrapers.baemin_auth import capture_failure_diagnostics
+
 _MAX_LOAD_MORE_CLICKS = 30
 _MAX_CONSECUTIVE_NO_PROGRESS = 2
 _LOAD_MORE_WAIT_MS = 1_500
@@ -838,7 +840,8 @@ def fetch_shop_stats(page, shop_no: int, months: list[str]) -> tuple[list[dict],
         page.remove_listener("response", _on_response)
 
     if not state["observed_sales_endpoint"]:
-        raise BaeminStatsScrapeError("매출 통계 API 응답을 한 번도 확인하지 못했습니다")
+        diagnostics = capture_failure_diagnostics(page, f"shop-stats-{shop_no}")
+        raise BaeminStatsScrapeError(f"매출 통계 API 응답을 한 번도 확인하지 못했습니다 ({diagnostics})")
     # crmInfo는 매출/정산/주문내역과 달리 하드 실패시키지 않는다(fix round
     # 재조사 결론, 모듈 docstring의 "crmInfo 재조사 결과" 절 참고) — 근본
     # 원인(헤딩 텍스트 구분자 불일치로 스크롤 타겟팅 자체가 실패) 하나는

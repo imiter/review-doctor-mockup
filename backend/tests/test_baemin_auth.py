@@ -8,12 +8,13 @@ BaeminLoginError 하나로 감싸져서 전달되는지를 검증한다. 실제 
 확인한다.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from scrapers.baemin_auth import BaeminLoginError, _discover_all_shops, login
+from scrapers.baemin_auth import BaeminLoginError, _discover_all_shops, capture_failure_diagnostics, login
 
 
 def _fake_option(value, text):
@@ -222,3 +223,109 @@ def test_login_sets_legacy_shop_fields_from_first_of_multiple_shops():
     assert (session.shop_no, session.shop_name) == session.shops[0]
     assert session.shop_no == 11111
     assert session.shop_name == "브랜드A"
+
+
+def test_capture_failure_diagnostics_detects_bot_block_screen(tmp_path, monkeypatch):
+    import scrapers.baemin_auth as auth_module
+
+    monkeypatch.setattr(auth_module, "_DIAGNOSTICS_DIR", tmp_path)
+    fake_page = MagicMock()
+    fake_page.url = "https://self.baemin.com/shops/123/stat"
+    fake_page.get_by_text.return_value.count.return_value = 1  # 차단 문구 발견됨
+
+    summary = capture_failure_diagnostics(fake_page, "shop-stats-123")
+
+    assert "봇차단화면=감지됨" in summary
+    fake_page.get_by_text.assert_called_once_with("비정상 동작이 감지되어")
+
+
+def test_capture_failure_diagnostics_reports_no_block_screen(tmp_path, monkeypatch):
+    import scrapers.baemin_auth as auth_module
+
+    monkeypatch.setattr(auth_module, "_DIAGNOSTICS_DIR", tmp_path)
+    fake_page = MagicMock()
+    fake_page.url = "https://self.baemin.com/shops/123/stat"
+    fake_page.get_by_text.return_value.count.return_value = 0
+
+    summary = capture_failure_diagnostics(fake_page, "shop-stats-123")
+
+    assert "봇차단화면=미감지" in summary
+
+
+def test_capture_failure_diagnostics_includes_current_url(tmp_path, monkeypatch):
+    import scrapers.baemin_auth as auth_module
+
+    monkeypatch.setattr(auth_module, "_DIAGNOSTICS_DIR", tmp_path)
+    fake_page = MagicMock()
+    fake_page.url = "https://self.baemin.com/some/blocked/page"
+    fake_page.get_by_text.return_value.count.return_value = 0
+
+    summary = capture_failure_diagnostics(fake_page, "label")
+
+    assert "URL=https://self.baemin.com/some/blocked/page" in summary
+
+
+def test_capture_failure_diagnostics_saves_screenshot_under_diagnostics_dir(tmp_path, monkeypatch):
+    import scrapers.baemin_auth as auth_module
+
+    monkeypatch.setattr(auth_module, "_DIAGNOSTICS_DIR", tmp_path)
+    fake_page = MagicMock()
+    fake_page.url = "https://self.baemin.com/shops/123/stat"
+    fake_page.get_by_text.return_value.count.return_value = 0
+
+    summary = capture_failure_diagnostics(fake_page, "shop-stats-123")
+
+    fake_page.screenshot.assert_called_once()
+    call_kwargs = fake_page.screenshot.call_args.kwargs
+    assert call_kwargs["full_page"] is True
+    assert str(tmp_path) in call_kwargs["path"]
+    assert "shop-stats-123" in call_kwargs["path"]
+    assert "스크린샷=" in summary
+    assert "저장 실패" not in summary
+
+
+def test_capture_failure_diagnostics_survives_screenshot_failure(tmp_path, monkeypatch):
+    # 스크린샷 저장 자체가 실패해도(디스크 문제 등) 예외를 삼키고 요약에만
+    # 남겨야 한다 — 진단 시도가 원래 에러를 가리면 안 된다.
+    import scrapers.baemin_auth as auth_module
+
+    monkeypatch.setattr(auth_module, "_DIAGNOSTICS_DIR", tmp_path)
+    fake_page = MagicMock()
+    fake_page.url = "https://self.baemin.com/shops/123/stat"
+    fake_page.get_by_text.return_value.count.return_value = 0
+    fake_page.screenshot.side_effect = RuntimeError("disk full")
+
+    summary = capture_failure_diagnostics(fake_page, "shop-stats-123")
+
+    assert "스크린샷=저장 실패" in summary
+
+
+def test_capture_failure_diagnostics_survives_url_and_get_by_text_failures(tmp_path, monkeypatch):
+    # page.url 접근이나 get_by_text 자체가 예외를 던져도(페이지가 이미 닫혔거나
+    # 크래시한 극단적인 경우) 전체 함수가 죽지 않고 "알 수 없음"으로 남긴다.
+    import scrapers.baemin_auth as auth_module
+
+    monkeypatch.setattr(auth_module, "_DIAGNOSTICS_DIR", tmp_path)
+    fake_page = MagicMock()
+    type(fake_page).url = property(lambda self: (_ for _ in ()).throw(RuntimeError("page closed")))
+    fake_page.get_by_text.side_effect = RuntimeError("page closed")
+
+    summary = capture_failure_diagnostics(fake_page, "shop-stats-123")
+
+    assert "URL=알 수 없음" in summary
+    assert "봇차단화면=미감지" in summary
+
+
+def test_capture_failure_diagnostics_sanitizes_label_for_filename(tmp_path, monkeypatch):
+    import scrapers.baemin_auth as auth_module
+
+    monkeypatch.setattr(auth_module, "_DIAGNOSTICS_DIR", tmp_path)
+    fake_page = MagicMock()
+    fake_page.url = "https://self.baemin.com"
+    fake_page.get_by_text.return_value.count.return_value = 0
+
+    capture_failure_diagnostics(fake_page, "click-metrics-14804912/weird name")
+
+    call_kwargs = fake_page.screenshot.call_args.kwargs
+    assert "/" not in Path(call_kwargs["path"]).name
+    assert " " not in Path(call_kwargs["path"]).name

@@ -26,6 +26,8 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from scrapers.baemin_auth import capture_failure_diagnostics
+
 
 def map_click_metrics_by_date(responses: list[dict]) -> dict[str, dict]:
     """`GET /v2/statistics/campaign/cpc/metrics/{shopNumber}` 응답들의
@@ -159,7 +161,8 @@ def fetch_brand_click_metrics(page, shop_no: int, months: list[str]) -> list[dic
         page.remove_listener("response", _on_response)
 
     if not state["observed_any"]:
-        raise BaeminAdsScrapeError("우리가게클릭 성과 API 응답을 한 번도 확인하지 못했습니다")
+        diagnostics = capture_failure_diagnostics(page, f"click-metrics-{shop_no}")
+        raise BaeminAdsScrapeError(f"우리가게클릭 성과 API 응답을 한 번도 확인하지 못했습니다 ({diagnostics})")
 
     return responses
 
