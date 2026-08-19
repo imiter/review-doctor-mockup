@@ -494,6 +494,34 @@ def internal_run_crawl_status(
     return _job_status_response(campaign_id, db, campaign)
 
 
+@router.post("/internal/apply-bid")
+def internal_apply_bid(
+    campaign_id: int,
+    amount: int,
+    background_tasks: BackgroundTasks,
+    x_worker_secret: str = Header(default=""),
+    db: Session = Depends(get_db),
+):
+    """internal_run_crawl과 동일한 서비스 간 엔드포인트 계약이지만, 크롤
+    재측정뿐 아니라 배민 로그인 + 입찰가 제출(submit_cpc_bid) 전체를 이
+    컴퓨터에서 실행한다. Railway(클라우드 IP)에서 직접 배민 로그인을
+    시도하면 로그인 폼 자체가 렌더링되지 않고 fill()이 30초 타임아웃으로
+    죽는 현상이 실측 확인됐다(2026-08-18, 봇 탐지로 추정) — 리뷰/매출
+    스크래핑과 동일하게 이 컴퓨터(홈 IP)에서 로그인부터 실행해야 한다.
+    진행 상황/결과는 기존 GET /internal/run-crawl/status와 같은 _job_state를
+    공유하므로 그대로 폴링된다."""
+    _require_worker_secret(x_worker_secret)
+    campaign = db.get(AdCampaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(404, "캠페인을 찾을 수 없습니다")
+    if not _crawl_lock.acquire(blocking=False):
+        raise HTTPException(409, "이미 다른 순위 확인이 진행 중입니다. 잠시 후 다시 시도하세요.")
+    with _job_state_lock:
+        _job_state.update(campaign_id=campaign_id, status="running", inserted=None, skipped=None, error=None)
+    background_tasks.add_task(_execute_bid_apply_job, campaign_id, amount)
+    return {"status": "started"}
+
+
 def _campaign_for_user(campaign_id: int, user: User, db: Session) -> AdCampaign:
     campaign = db.get(AdCampaign, campaign_id)
     store = db.get(Store, campaign.store_id) if campaign else None
@@ -531,18 +559,42 @@ def ads_apply_bid(
     "OO원으로 배민에 실제 반영됩니다" 확인 다이얼로그를 거친다). 성공하면
     기존 POST /ads/rank-by-distance/run과 동일한 {"status": "started"} 계약으로
     응답하고, 진행 상황/결과는 기존 GET /ads/rank-by-distance/run/status를
-    그대로 폴링해서 확인한다(새 상태 엔드포인트를 만들지 않는다)."""
+    그대로 폴링해서 확인한다(새 상태 엔드포인트를 만들지 않는다).
+
+    실행 주체는 ads_rank_by_distance_run과 동일한 두 갈래다 — 다만 이 경우는
+    배민 로그인 자체(submit_cpc_bid 이전 단계)가 Railway 같은 클라우드 IP에서는
+    봇 탐지로 실패하는 게 실측 확인됐으므로(2026-08-18), 로컬 crawler venv가
+    없으면 크롤만이 아니라 로그인+입찰 제출 전체를 워커에 위임한다(로컬
+    _apply_bid_then_crawl을 이 프로세스에서 절대 실행하지 않는다)."""
     campaign = _campaign_for_user(campaign_id, user, db)
     if not campaign.shop_no:
         raise HTTPException(400, "실데이터 캠페인만 입찰가를 반영할 수 있습니다")
     if amount < 1:
         raise HTTPException(400, "입찰 금액은 1원 이상이어야 합니다")
-    if not _crawl_lock.acquire(blocking=False):
-        raise HTTPException(409, "이미 다른 순위 확인이 진행 중입니다. 잠시 후 다시 시도하세요.")
-    with _job_state_lock:
-        _job_state.update(campaign_id=campaign_id, status="running", inserted=None, skipped=None, error=None)
-    background_tasks.add_task(_execute_bid_apply_job, campaign_id, amount)
-    return {"status": "started"}
+
+    if _CRAWLER_PYTHON.exists():
+        if not _crawl_lock.acquire(blocking=False):
+            raise HTTPException(409, "이미 다른 순위 확인이 진행 중입니다. 잠시 후 다시 시도하세요.")
+        with _job_state_lock:
+            _job_state.update(campaign_id=campaign_id, status="running", inserted=None, skipped=None, error=None)
+        background_tasks.add_task(_execute_bid_apply_job, campaign_id, amount)
+        return {"status": "started"}
+
+    if _CRAWL_WORKER_URL:
+        try:
+            resp = httpx.post(
+                f"{_CRAWL_WORKER_URL}/internal/apply-bid",
+                params={"campaign_id": campaign_id, "amount": amount},
+                headers={"X-Worker-Secret": _CRAWL_WORKER_SECRET},
+                timeout=15,
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(502, f"크롤 워커에 연결할 수 없습니다: {e}")
+        if resp.status_code != 200:
+            raise HTTPException(resp.status_code, f"크롤 워커 실행 실패: {resp.text[:500]}")
+        return resp.json()
+
+    raise HTTPException(500, "이 환경에서는 입찰가 반영을 실행할 수 없습니다 (로컬 crawler venv도 CRAWL_WORKER_URL도 없음)")
 
 
 @router.post("/ads/rank-by-distance/run")

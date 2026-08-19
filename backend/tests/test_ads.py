@@ -654,3 +654,113 @@ def test_apply_bid_endpoint_rejects_non_positive_amount(client, db_session, seed
         f"/ads/rank-by-distance/apply-bid?campaign_id={campaign.id}&amount=0", headers=auth_headers
     )
     assert res.status_code == 400
+
+
+def test_apply_bid_endpoint_delegates_login_and_bid_to_worker_when_no_local_crawler(
+    client, db_session, seeded_user, monkeypatch, auth_headers
+):
+    """Railway처럼 로컬 crawler venv가 없는 배포 환경에서는 이 엔드포인트가
+    배민 로그인/입찰 제출을 직접 실행하면 안 된다 — 클라우드 IP에서 로그인을
+    시도하면 로그인 폼이 렌더링되지 않고 fill()이 타임아웃으로 막히는 현상이
+    실측 확인됐다(2026-08-18, 봇 탐지로 추정). CRAWL_WORKER_URL의
+    /internal/apply-bid로 전체(로그인+제출+재측정)를 위임해야 한다.
+    baemin_login/submit_cpc_bid를 호출되면 실패하는 스파이로 바꿔 이
+    프로세스에서 절대 실행되지 않음을 증명한다."""
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+    monkeypatch.setattr(ads_module, "_CRAWLER_PYTHON", pathlib.Path("/nonexistent/crawler/venv/bin/python"))
+    monkeypatch.setattr(ads_module, "_CRAWL_WORKER_URL", "http://worker.example.com")
+    monkeypatch.setattr(ads_module, "_CRAWL_WORKER_SECRET", "test-secret")
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("이 프로세스에서 직접 로그인/제출을 시도하면 안 된다")
+
+    monkeypatch.setattr(ads_module, "baemin_login", _fail_if_called)
+    monkeypatch.setattr(ads_module, "submit_cpc_bid", _fail_if_called)
+
+    fake_response = Mock(status_code=200, json=Mock(return_value={"status": "started"}))
+    mock_post = Mock(return_value=fake_response)
+    monkeypatch.setattr(ads_module.httpx, "post", mock_post)
+
+    res = client.post(
+        f"/ads/rank-by-distance/apply-bid?campaign_id={campaign.id}&amount=125", headers=auth_headers
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "started"}
+    mock_post.assert_called_once_with(
+        "http://worker.example.com/internal/apply-bid",
+        params={"campaign_id": campaign.id, "amount": 125},
+        headers={"X-Worker-Secret": "test-secret"},
+        timeout=15,
+    )
+
+
+def test_apply_bid_endpoint_reports_worker_connection_failure_as_502(
+    client, db_session, seeded_user, monkeypatch, auth_headers
+):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+    monkeypatch.setattr(ads_module, "_CRAWLER_PYTHON", pathlib.Path("/nonexistent/crawler/venv/bin/python"))
+    monkeypatch.setattr(ads_module, "_CRAWL_WORKER_URL", "http://worker.example.com")
+
+    def _raise(*args, **kwargs):
+        raise ads_module.httpx.RequestError("연결 실패")
+
+    monkeypatch.setattr(ads_module.httpx, "post", _raise)
+
+    res = client.post(
+        f"/ads/rank-by-distance/apply-bid?campaign_id={campaign.id}&amount=125", headers=auth_headers
+    )
+
+    assert res.status_code == 502
+
+
+def test_internal_apply_bid_rejects_wrong_worker_secret(client, db_session, seeded_user, monkeypatch):
+    monkeypatch.setattr(ads_module, "_CRAWL_WORKER_SECRET", "correct-secret")
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+
+    res = client.post(
+        f"/internal/apply-bid?campaign_id={campaign.id}&amount=125",
+        headers={"X-Worker-Secret": "wrong-secret"},
+    )
+
+    assert res.status_code == 403
+
+
+def test_internal_apply_bid_404s_for_missing_campaign(client, monkeypatch):
+    monkeypatch.setattr(ads_module, "_CRAWL_WORKER_SECRET", "correct-secret")
+
+    res = client.post(
+        "/internal/apply-bid?campaign_id=999999&amount=125",
+        headers={"X-Worker-Secret": "correct-secret"},
+    )
+
+    assert res.status_code == 404
+
+
+def test_internal_apply_bid_starts_background_job(client, db_session, seeded_user, monkeypatch):
+    """엔드포인트 계약(비밀키 인증·잠금·상태 초기화·백그라운드 위임)만
+    검증한다 — 실제 로그인/입찰 로직은 _apply_bid_then_crawl 단위 테스트가
+    이미 검증하므로 여기서는 _execute_bid_apply_job 자체를 스파이로
+    바꾼다(반드시 락을 풀어야 다음 테스트가 409로 막히지 않는다 —
+    실제 함수의 finally: _crawl_lock.release() 계약을 그대로 흉내낸다)."""
+    monkeypatch.setattr(ads_module, "_CRAWL_WORKER_SECRET", "correct-secret")
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="14804318")
+    called = {}
+
+    def fake_execute(campaign_id, amount):
+        called["campaign_id"] = campaign_id
+        called["amount"] = amount
+        ads_module._crawl_lock.release()
+
+    monkeypatch.setattr(ads_module, "_execute_bid_apply_job", fake_execute)
+
+    res = client.post(
+        f"/internal/apply-bid?campaign_id={campaign.id}&amount=125",
+        headers={"X-Worker-Secret": "correct-secret"},
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "started"}
+    assert called == {"campaign_id": campaign.id, "amount": 125}

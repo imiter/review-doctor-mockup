@@ -412,6 +412,23 @@ BrandAdClickMetric(우가클 실데이터) 집계, 현재 순위는 아래 반�
   넣으면 한 번도 크롤을 안 돌린 새 환경에서도 실측인 것처럼 보인다. 실측
   전에는 GET /ads/rank-monitoring이 current_rank/rank_status를 null로
   반환하는 게 정상 동작이다.
+- "적용하기"(POST /ads/rank-by-distance/apply-bid, 배민에 실제 CPC 반영)도
+  로컬 crawler venv가 없는 배포 환경에서는 크롤 재측정뿐 아니라 배민
+  로그인+입찰 제출(submit_cpc_bid) 전체를 CRAWL_WORKER_URL의 새 엔드포인트
+  POST /internal/apply-bid로 위임한다(2026-08-18 수정). 원래는 로그인만
+  Railway 프로세스 자신이 직접 실행했는데, Railway의 클라우드 IP에서
+  로그인 폼 자체가 렌더링 안 되고 아이디 입력창 fill()이 30초 타임아웃으로
+  막히는 게 실측 확인됐다(배민 봇 탐지로 추정) — 리뷰/매출/우가클 스크래핑과
+  동일하게 이 로그인도 워커(홈 IP)에서 실행해야 한다. 이 버그는 또 GET
+  .../run/status가 CRAWL_WORKER_URL이 설정된 환경에서 항상 워커의 job state만
+  조회하고 Railway 자신의 로컬 job state는 절대 보지 않는 구조와 겹쳐서,
+  로그인 실패 메시지가 프론트에 전혀 노출되지 않고 무한 폴링("idle")으로만
+  보이는 증상까지 함께 일으켰다 — 로그인 자체를 워커로 옮기면서 이 라우팅
+  불일치도 함께 해소됐다(입찰 반영 경로 전체가 워커의 job state 하나로
+  통일된다). crawler/.env.worker에는 CREDENTIAL_ENCRYPTION_KEY도 없었다는
+  것도 같이 발견했다 — 배민 자격증명 복호화(decrypt_credential)가 리뷰/매출
+  스크래핑뿐 아니라 shop_no 있는 캠페인의 크롤(_run_local_crawl)에도 이미
+  필요했던 값이라, 이전에도 실제로는 누락 상태였을 수 있다.
 
 ## 포함 기능
 대시보드 요약, 매출/입금 기간 토글(1일/1주/1개월/이번달), 리뷰 관리,
