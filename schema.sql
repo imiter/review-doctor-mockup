@@ -349,6 +349,8 @@ CREATE TABLE review_sync_jobs (
     platform_id      INT         NOT NULL REFERENCES platforms(id) ON DELETE RESTRICT,
     status           VARCHAR(10) NOT NULL DEFAULT 'pending'
                      CHECK (status IN ('pending', 'running', 'success', 'failed')),
+    triggered_by     VARCHAR(10) NOT NULL DEFAULT 'manual'
+                     CHECK (triggered_by IN ('manual', 'scheduled')),
     reviews_fetched  INT,
     reviews_inserted INT,
     error_message    TEXT,

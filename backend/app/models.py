@@ -198,6 +198,7 @@ class ReviewSyncJob(Base):
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("stores.id"))
     platform_id: Mapped[int] = mapped_column(ForeignKey("platforms.id"))
     status: Mapped[str] = mapped_column(String(10), default="pending")
+    triggered_by: Mapped[str] = mapped_column(String(10), default="manual")
     reviews_fetched: Mapped[int | None]
     reviews_inserted: Mapped[int | None]
     error_message: Mapped[str | None] = mapped_column(Text)
