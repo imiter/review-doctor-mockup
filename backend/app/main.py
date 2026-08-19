@@ -1,11 +1,22 @@
+import asyncio
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import ads, auth, billing, dashboard, orders, reply_settings, reviews, sales, store_connections
+from app.scheduler import run_scheduler_loop
 
-app = FastAPI(title="Delivery Review & Store Insight MVP")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(run_scheduler_loop())
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="Delivery Review & Store Insight MVP", lifespan=lifespan)
 
 # FRONTEND_ORIGIN: 배포된 프론트엔드 도메인(예: https://xxx.up.railway.app).
 # 로컬 개발은 포트가 매번 달라질 수 있어 정규식으로, 배포본은 고정 도메인 하나만 허용한다.

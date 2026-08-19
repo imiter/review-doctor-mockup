@@ -200,6 +200,30 @@ API에 없어 계정(사업자) 전체 합산으로만 나오는 것을 확인�
 `docs/superpowers/specs/2026-08-19-baemin-sync-incremental-fetch-design.md`
 참고.
 
+### 배민 데이터 자동 동기화 스케줄러 (예외 허용 아님 — 순수 편의 기능)
+원래 데이터 동기화는 "가게 연결" 화면의 "데이터 동기화" 버튼을 사용자가
+직접 눌러야만 실행됐으나(2026-08-19 증분 조회 절 참고), 버튼을 누르지
+않아도 매일 자동으로 최신 데이터가 갱신되도록 스케줄러를 추가했다
+(2026-08-20). Railway 백엔드 FastAPI `lifespan`(`backend/app/main.py`)이
+기동 시 `asyncio` 무한 루프(`backend/app/scheduler.py`의
+`run_scheduler_loop`)를 하나 띄우고, 이 루프는 KST 04:00마다 배민 실계정이
+연결된(`credential_ciphertext IS NOT NULL`) 모든 매장을 순차적으로
+동기화 디스패치한다 — 새 외부 의존성(APScheduler 등) 없이 `asyncio.sleep`
+하나로 구현했다. 잡 생성·워커 위임 로직은 수동 버튼과 완전히 같은 함수
+(`store_connections._dispatch_sync_job`)를 공유하고,
+`review_sync_jobs.triggered_by`(`manual`/`scheduled`) 컬럼으로 어느
+경로로 만들어진 잡인지 구분한다. 워커(맥북)가 꺼져있거나 응답이 없으면
+그 매장의 잡만 실패로 기록되고 다음 날 04시에 다시 시도된다 — 서버가
+죽거나 스케줄러 자체가 멈추지 않는다. Railway 백엔드는 항상 단일
+인스턴스로만 뜨므로(`backend/railway.json`에 `numReplicas` 미지정) 여러
+프로세스가 같은 스케줄을 중복 실행하는 상황은 고려하지 않았다. "가게
+연결" 화면은 배민 카드마다 마지막 동기화가 수동/자동 중 무엇이었는지,
+언제, 성공했는지를 `GET /store-connections`의 `last_sync` 필드로
+보여준다. 쿠팡이츠/요기요는 여전히 Mock이라 이 스케줄러의 대상이 아니다.
+설계 상세는
+`docs/superpowers/specs/2026-08-20-baemin-auto-sync-scheduler-design.md`
+참고.
+
 ### 배민 정산 상세(수수료/배달비/고객할인/우가클비용) 연동 (예외 허용)
 원래 "매출 분석" 카드의 배민 행은 `platforms.default_commission_rate`(요율)
 기반 추정치(중개수수료·결제수수료)만 보여줬으나, 실 SaaS 전환 로드맵 3번의
@@ -357,7 +381,9 @@ brand_ad_click_metrics, payments.
 - review_sync_jobs: 배민 데이터 동기화 작업 상태(pending/running/success/failed).
   리뷰뿐 아니라 매출/입금/재주문율/우리가게클릭도 같은 작업 안에서 함께
   동기화한다. "가게 연결" 화면의 "데이터 동기화" 버튼 → 백그라운드 작업 →
-  폴링에 쓰인다.
+  폴링에 쓰인다. triggered_by(manual/scheduled)로 사용자가 직접 누른
+  건지 매일 04시 자동 스케줄러가 만든 건지 구분한다(위 "배민 데이터
+  자동 동기화 스케줄러" 절 참고).
 - baemin_shop_brands: 배민 계정 하나에 딸린 여러 브랜드(매장) 목록. 로그인
   시 발견되는 shopNo/매장명을 저장해 리뷰 관리 화면의 브랜드 선택
   드롭다운에 쓴다.
