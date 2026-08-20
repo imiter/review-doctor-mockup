@@ -314,3 +314,22 @@ def test_save_final_reply_does_not_promote_no_issue_review(client, db_session, s
     )
 
     assert db_session.query(GoldenExample).count() == 0
+
+
+def test_list_reviews_includes_category_and_sensitivity(client, db_session, seeded_user, platforms, auth_headers):
+    from datetime import datetime, timezone
+
+    from app.models import Review
+
+    db_session.add(Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=1, content="이물질이 나왔어요", customer_nickname="손님",
+        category="hygiene", is_sensitive=True, created_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    res = client.get("/reviews", headers=auth_headers)
+    body = res.json()
+    row = next(r for r in body if r["content"] == "이물질이 나왔어요")
+    assert row["category"] == "hygiene"
+    assert row["is_sensitive"] is True

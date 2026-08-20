@@ -235,6 +235,41 @@ API에 없어 계정(사업자) 전체 합산으로만 나오는 것을 확인�
 `docs/superpowers/specs/2026-08-20-baemin-auto-sync-scheduler-design.md`
 참고.
 
+### LLM 기반 답글 생성 (RAG, 예외 허용)
+원래 답글 생성은 `reply_styles`(4개 페르소나) 고정 템플릿에 문자열
+치환만 하는 Mock이었으나(CLAUDE.md "절대 금지"의 "실제 AI API 호출
+금지" 원칙), 실 SaaS 전환 로드맵 4번으로 실제 Claude API 호출을 처음
+도입했다(2026-08-21 승인, 실비용 발생 인지). 리뷰가 배민에서
+동기화되는 시점(`review_sync.py`)에 Haiku로 불만 유형(`category`:
+food_quality/delivery/hygiene/service/price/missing_or_wrong_item/
+no_issue)과 민감도(`is_sensitive`), 별점-텍스트 불일치
+(`sentiment_conflict`)를 분류해 `reviews`에 저장한다 — 답글 생성
+버튼을 누르기 전에도 민감 리뷰 알림(`alerts`, `sensitive_review`
+타입)이 뜨게 하기 위해서다. `category="no_issue"`(불만 신호 없음)인
+긍정 리뷰는 기존 4-페르소나 템플릿 경로를 그대로 쓰고, 그 외 문제
+리뷰만 새 RAG 경로(`backend/app/llm/`)를 탄다 — 이 가게의 진짜 답글
+사례(`golden_examples`, `category` 필터로만 검색하고 벡터 DB는 쓰지
+않는다)와 매장별 스타일 규칙(`store_style_profile`, Sonnet이 5~7줄로
+요약해 캐싱)을 few-shot으로 반영해 Sonnet이 생성한다. few-shot
+프롬프트에는 "스타일만 참고, 사건 내용 복사 금지" 지시를 반드시
+포함한다(소량 예시의 과적합 방지). 사장님이 AI 초안을 수정하거나
+초안 없이 직접 써서 저장하면 그 답글이 자동으로 새 골든 예시로
+승격되고(`is_manual=true`), 스타일 프로파일이 재생성된다 — 단
+`store_style_profile` 재생성은 반드시 `is_manual=true AND
+is_synthetic=false` 데이터로만 하며, 순수 AI 생성 모범답안을 학습
+소스로 쓰지 않는다(자기 산출물을 자기가 학습하는 순환 오염 방지).
+브레인스토밍 중 프로덕션 데이터를 실측 확인해, 기존 답글 700여 건은
+사장님이 실제 사용 중인 별도 AI 도구 + 직접 작성 결과였고(seed Mock
+아님), 그중 별점 1~2점 답글 5건은 전부 사장님이 직접 썼다고 확인받아
+`backend/scripts/backfill_golden_examples.py`로 골든 예시에 백필했다.
+데이터가 적을 때 AI로 예시를 증강하는 방식("메아리 증폭" — 편향만
+증폭되고 정보량은 그대로)은 명시적으로 채택하지 않았다 — 대신 사장님
+온보딩으로 진짜 예시를 늘리는 별도 계획
+(`docs/superpowers/specs/2026-08-21-llm-rag-reply-design.md`의
+온보딩 절)을 이어서 진행한다. `ANTHROPIC_API_KEY`는 Claude Pro 구독과
+무관한 별도 과금 API 키다(console.anthropic.com 발급). 설계 상세는
+`docs/superpowers/specs/2026-08-21-llm-rag-reply-design.md` 참고.
+
 ### 배민 정산 상세(수수료/배달비/고객할인/우가클비용) 연동 (예외 허용)
 원래 "매출 분석" 카드의 배민 행은 `platforms.default_commission_rate`(요율)
 기반 추정치(중개수수료·결제수수료)만 보여줬으나, 실 SaaS 전환 로드맵 3번의
@@ -347,13 +382,13 @@ Mock 데이터로만 계산됐으나, 실 SaaS 전환 로드맵 3번의 다음 �
 - users 테이블 컬럼은 최소화: id, email, nickname, phone_hash,
   marketing_agreed, created_at.
 
-## DB 설계 (22개 테이블)
+## DB 설계 (24개 테이블)
 users, stores, platforms, store_platform_connections, subscriptions,
-orders, reviews, review_replies, reply_styles, reply_settings,
-daily_settlements, repurchase_metrics, ad_campaigns,
-ad_performance_metrics, ad_rank_snapshots, alerts, social_accounts,
-signup_verifications, review_sync_jobs, baemin_shop_brands,
-brand_ad_click_metrics, payments.
+orders, reviews, golden_examples, store_style_profile, review_replies,
+reply_styles, reply_settings, daily_settlements, repurchase_metrics,
+ad_campaigns, ad_performance_metrics, ad_rank_snapshots, alerts,
+social_accounts, signup_verifications, review_sync_jobs,
+baemin_shop_brands, brand_ad_click_metrics, payments.
 
 ### 테이블 용도
 - users: 사장 계정. 전화번호는 phone_hash로 비식별화.
@@ -369,6 +404,12 @@ brand_ad_click_metrics, payments.
 - reviews: 리뷰(별점, 내용, 고객 닉네임, 주문 횟수, 상태). store_id/platform_id/
   menu_summary를 직접 가진다 — 주문과 독립적으로 적재 가능(배민 리뷰 API에는
   주문과 연결할 공통 키가 없음). order_id는 있으면 연결하는 선택적 FK.
+- golden_examples: RAG few-shot 소스. 사장님이 직접 쓰거나 승인한 진짜
+  답글(is_manual=true)과 예시 부족 시 보충하는 순수 AI 생성 모범답안
+  (is_synthetic=true)을 함께 담는다. 검색은 category 필터만 쓴다(벡터
+  DB 미사용).
+- store_style_profile: 매장별 답글 스타일 규칙(5~7줄) 캐싱. 진짜
+  골든 예시로만 재생성한다.
 - review_replies: AI 추천 답글 Mock과 사장 최종 답글.
 - reply_styles: 답글 말투 스타일 마스터(발랄 이모지 파티, 진중맨, 무난 요정, 진지한 하이개그).
 - reply_settings: 가게별 답글 설정(홍보문구, 닉네임/메뉴/가게명 포함 여부, 부정 리뷰 홍보문구 포함 여부).
@@ -383,7 +424,9 @@ brand_ad_click_metrics, payments.
   (2) 반경별 실측 스냅샷(distance_km NOT NULL): crawler/로 실제 배민 앱을
   스크롤하며 수집한 point_label/거리/순위/스캔개수/위 광고개수. 경쟁 가게
   CPC는 실측 불가능해 이 종류에는 저장하지 않는다(NULL).
-- alerts: 부정 리뷰, 미답변, 순위 하락 알림.
+- alerts: 부정 리뷰, 미답변, 순위 하락, 민감 리뷰(sensitive_review) 알림.
+  민감 리뷰는 실제로 동적 생성되고(review_sync.py), 나머지 세 타입은
+  여전히 seed.sql Mock이다(실동작화는 별도 스코프).
 - social_accounts: 소셜 로그인(카카오 등) 연결. provider 문자열 기반이라 확장 대비.
 - signup_verifications: 이메일 회원가입 인증 코드(Resend 실발송). users를
   참조하지 않는다 — 인증이 끝난 뒤에만 계정이 생성되기 때문. purpose 컬럼은
@@ -411,6 +454,9 @@ brand_ad_click_metrics, payments.
 - orders 1:1 reviews (reviews.order_id, 선택적 FK — 현재 실제로 채워지는 경우 없음)
 - reviews N:1 stores, reviews N:1 platforms (직접 참조, 주문 조인 없이 조회)
 - reviews 1:N review_replies
+- stores 1:N golden_examples, golden_examples는 reviews/review_replies를
+  선택적으로 참조(source_review_id/source_reply_id)
+- stores 1:1 store_style_profile
 - stores 1:1 reply_settings, reply_settings는 reply_styles 참조
 - daily_settlements는 store와 platform 참조, 매출액과 입금액에 더해 배민
   정산 상세 실측 컬럼 4개(nullable)도 함께 가진다

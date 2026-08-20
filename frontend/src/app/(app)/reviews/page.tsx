@@ -19,12 +19,23 @@ type Review = {
   customer_nickname: string;
   customer_order_count: number;
   status: "unanswered" | "pending" | "answered";
+  category: string;
+  is_sensitive: boolean;
   created_at: string;
   final_reply: ReplyRef;
   draft_reply: ReplyRef;
   secondary_replies: SecondaryReply[];
 };
 type Brand = { shop_no: string; shop_name: string };
+
+const CATEGORY_LABELS: Record<string, string> = {
+  food_quality: "음식 품질",
+  delivery: "배달",
+  hygiene: "위생",
+  service: "응대",
+  price: "가격",
+  missing_or_wrong_item: "오배송/누락",
+};
 
 const FILTERS = [
   { key: "unanswered", label: "답글 대기" },
@@ -168,6 +179,16 @@ function ReviewCard({
         <span className="rounded bg-surface px-2 py-0.5 font-medium text-accent">{review.platform_name}</span>
         {brandName && (
           <span className="rounded bg-surface px-2 py-0.5 font-medium text-foreground">{brandName}</span>
+        )}
+        {review.category !== "no_issue" && (
+          <span
+            className={`rounded bg-surface px-2 py-0.5 font-medium ${
+              review.is_sensitive ? "text-danger" : "text-warning"
+            }`}
+          >
+            {review.is_sensitive ? "⚠ " : ""}
+            {CATEGORY_LABELS[review.category] ?? review.category}
+          </span>
         )}
         <span className="text-warning">{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
         <span className="font-medium text-foreground">{review.customer_nickname}</span>

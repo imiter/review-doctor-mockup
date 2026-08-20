@@ -93,6 +93,8 @@ def list_reviews(
             "customer_nickname": r.customer_nickname,
             "customer_order_count": r.customer_order_count,
             "status": r.status,
+            "category": r.category,
+            "is_sensitive": r.is_sensitive,
             "created_at": r.created_at.isoformat(),
             "final_reply": {"content": final_reply.content, "style_id": final_reply.style_id} if final_reply else None,
             "draft_reply": {"content": draft_reply.content, "style_id": draft_reply.style_id} if draft_reply else None,
