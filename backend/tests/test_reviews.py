@@ -184,3 +184,133 @@ def test_generate_reply_unlimited_for_pro_plan(client, db_session, seeded_user, 
     for review in reviews:
         res = client.post(f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers)
         assert res.status_code == 200
+
+
+def test_generate_reply_uses_template_path_for_no_issue_review(client, db_session, seeded_user, platforms, auth_headers, reply_styles):
+    from datetime import datetime, timezone
+
+    from app.models import Review
+
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=5, content="맛있어요", customer_nickname="손님",
+        category="no_issue", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    res = client.post(
+        f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
+    )
+
+    assert res.status_code == 200
+    assert "치킨" in res.json()["content"] or "손님" in res.json()["content"]  # 템플릿 치환 결과
+
+
+def test_generate_reply_uses_ai_path_for_problem_review(client, db_session, seeded_user, platforms, auth_headers, reply_styles, monkeypatch):
+    from datetime import datetime, timezone
+
+    from app.models import Review
+    from app.routers import reviews as reviews_mod
+
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=1, content="이물질이 나왔어요", customer_nickname="손님",
+        category="hygiene", is_sensitive=True, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply", lambda db, review, store: "AI가 만든 답글입니다.")
+
+    res = client.post(
+        f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
+    )
+
+    assert res.status_code == 200
+    assert res.json()["content"] == "AI가 만든 답글입니다."
+
+
+def test_save_final_reply_promotes_edited_problem_review_to_golden_example(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
+    from datetime import datetime, timezone
+
+    from app.models import GoldenExample, Review, ReviewReply
+    from app.routers import reviews as reviews_mod
+
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=1, content="배달이 늦었어요", customer_nickname="손님",
+        category="delivery", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.flush()
+    db_session.add(ReviewReply(
+        review_id=review.id, reply_type="ai_draft", style_id=None,
+        content="AI 초안입니다.", created_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    calls = []
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: calls.append(store_id))
+
+    res = client.post(
+        f"/reviews/{review.id}/reply", json={"style_id": None, "content": "제가 직접 고친 답글입니다."}, headers=auth_headers,
+    )
+
+    assert res.status_code == 200
+    example = db_session.query(GoldenExample).filter_by(source_review_id=review.id).one()
+    assert example.reply_text == "제가 직접 고친 답글입니다."
+    assert example.is_manual is True
+    assert example.source == "organic"
+    assert calls == [seeded_user["store"].id]
+
+
+def test_save_final_reply_does_not_promote_when_final_matches_draft_verbatim(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
+    from datetime import datetime, timezone
+
+    from app.models import GoldenExample, Review, ReviewReply
+    from app.routers import reviews as reviews_mod
+
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=1, content="배달이 늦었어요", customer_nickname="손님",
+        category="delivery", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.flush()
+    db_session.add(ReviewReply(
+        review_id=review.id, reply_type="ai_draft", style_id=None,
+        content="AI 초안 그대로입니다.", created_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+
+    client.post(
+        f"/reviews/{review.id}/reply", json={"style_id": None, "content": "AI 초안 그대로입니다."}, headers=auth_headers,
+    )
+
+    assert db_session.query(GoldenExample).filter_by(source_review_id=review.id).count() == 0
+
+
+def test_save_final_reply_does_not_promote_no_issue_review(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
+    from datetime import datetime, timezone
+
+    from app.models import GoldenExample, Review
+    from app.routers import reviews as reviews_mod
+
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=5, content="맛있어요", customer_nickname="손님",
+        category="no_issue", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+
+    client.post(
+        f"/reviews/{review.id}/reply", json={"style_id": None, "content": "감사합니다!"}, headers=auth_headers,
+    )
+
+    assert db_session.query(GoldenExample).count() == 0

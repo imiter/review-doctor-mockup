@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.db import SessionLocal
 from app.llm import client
 from app.models import GoldenExample, StoreStyleProfile
 
@@ -46,3 +47,15 @@ def refresh_store_style_profile(db: Session, store_id: int) -> None:
         profile.generated_from_count = len(examples)
         profile.updated_at = datetime.now(timezone.utc)
     db.commit()
+
+
+def refresh_store_style_profile_background(store_id: int) -> None:
+    """FastAPI BackgroundTasks가 호출하는 얇은 래퍼 — 요청이 끝나면 요청
+    스코프 세션(app.routers.reviews의 db)은 이미 닫혀 있을 수 있으므로,
+    review_sync.py의 run_review_sync_job과 같은 이유로 자체 SessionLocal을
+    연다."""
+    db = SessionLocal()
+    try:
+        refresh_store_style_profile(db, store_id)
+    finally:
+        db.close()

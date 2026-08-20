@@ -1,15 +1,18 @@
-"""리뷰 관리 + 답글 스타일. 답글 생성은 템플릿 기반 Mock — 실제 AI 호출 없음."""
+"""리뷰 관리 + 답글 스타일. 긍정 리뷰(category="no_issue")는 템플릿 기반
+Mock, 문제 리뷰는 실제 Claude API 기반 RAG 생성이다."""
 
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
-from app.models import ReplyStyle, Review, ReviewReply, Store, Subscription, User
+from app.llm.generate import generate_ai_reply
+from app.llm.style_profile import refresh_store_style_profile_background
+from app.models import GoldenExample, ReplyStyle, Review, ReviewReply, Store, Subscription, User
 from app.plan import effective_plan, replies_used_today
 
 router = APIRouter(tags=["reviews"])
@@ -127,8 +130,11 @@ def generate_reply(
                 detail={"message": "오늘 답글 생성 한도를 모두 사용했어요. Pro는 무제한이에요.", "error_code": "reply_limit_exceeded"},
             )
 
-    template = {"low": style.template_low, "mid": style.template_mid, "high": style.template_high}[_band(review.rating)]
-    content = _fill_template(template, review, review.store)
+    if review.category == "no_issue":
+        template = {"low": style.template_low, "mid": style.template_mid, "high": style.template_high}[_band(review.rating)]
+        content = _fill_template(template, review, review.store)
+    else:
+        content = generate_ai_reply(db, review, review.store)
 
     draft = ReviewReply(
         review_id=review.id, reply_type="ai_draft", style_id=style.id,
@@ -142,13 +148,13 @@ def generate_reply(
 
 
 class SaveReplyRequest(BaseModel):
-    style_id: int
+    style_id: int | None = None
     content: str
 
 
 @router.post("/reviews/{review_id}/reply")
 def save_final_reply(
-    review_id: int, body: SaveReplyRequest,
+    review_id: int, body: SaveReplyRequest, background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     review = db.get(Review, review_id, options=[joinedload(Review.store)])
@@ -163,6 +169,27 @@ def save_final_reply(
     )
     review.status = "answered"
     db.add(reply)
+    db.flush()
+
+    if review.category != "no_issue":
+        draft = db.scalar(
+            select(ReviewReply)
+            .where(ReviewReply.review_id == review.id, ReviewReply.reply_type == "ai_draft")
+            .order_by(ReviewReply.created_at.desc())
+        )
+        # 초안이 아예 없이(직접 작성) 저장했거나, 초안과 다르게 고쳐서
+        # 저장했으면 "진짜 사장님 목소리"로 보고 골든 예시로 승격한다.
+        # 초안을 그대로 복붙했으면(AI 산출물 그대로) 승격하지 않는다.
+        if draft is None or draft.content != reply.content:
+            db.add(GoldenExample(
+                store_id=review.store_id, category=review.category,
+                review_text=review.content, reply_text=reply.content,
+                is_manual=True, is_synthetic=False, source="organic",
+                source_review_id=review.id, source_reply_id=reply.id,
+                created_at=datetime.now(timezone.utc),
+            ))
+            background_tasks.add_task(refresh_store_style_profile_background, review.store_id)
+
     db.commit()
     return {"id": reply.id, "content": reply.content}
 
