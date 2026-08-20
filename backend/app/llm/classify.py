@@ -50,6 +50,8 @@ def classify_review(content: str, rating: int) -> ReviewClassification:
     try:
         raw = client.call_haiku(_SYSTEM_PROMPT, user_message)
         data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError(f"예상치 못한 응답 형식: {data!r}")
     except Exception as e:
         raise ClassificationError(f"리뷰 분류 API 호출 실패: {e}") from e
 

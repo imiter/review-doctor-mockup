@@ -45,3 +45,9 @@ def test_classify_review_raises_when_api_call_fails(monkeypatch):
     monkeypatch.setattr(classify.client, "call_haiku", _raise)
     with pytest.raises(classify.ClassificationError):
         classify.classify_review("...", 3)
+
+
+def test_classify_review_raises_on_valid_json_non_dict(monkeypatch):
+    monkeypatch.setattr(classify.client, "call_haiku", lambda system, user, **kw: "[1, 2, 3]")
+    with pytest.raises(classify.ClassificationError):
+        classify.classify_review("...", 3)
