@@ -1430,13 +1430,24 @@ git commit -m "feat: RAG 기반 답글 생성 조합 함수(generate_ai_reply) �
 
 **Files:**
 - Modify: `backend/app/routers/reviews.py:1-16` (import), `:108-141` (`generate_reply`), `:144-167` (`save_final_reply`)
+- Modify: `backend/app/llm/style_profile.py` (Task 6이 이미 만든 파일에 백그라운드 실행용 래퍼 함수 하나 추가)
 - Test: `backend/tests/test_reviews.py`
 
 **Interfaces:**
 - Consumes: Task 7의 `generate_ai_reply(db, review, store) -> str`;
   Task 6의 `refresh_store_style_profile(db, store_id) -> None`
-- Produces: 없음(통합 태스크) — `POST /reviews/{id}/generate-reply`와
+- Produces: `refresh_store_style_profile_background(store_id: int) -> None`
+  (`backend/app/llm/style_profile.py`에 추가) — `POST /reviews/{id}/generate-reply`와
   `POST /reviews/{id}/reply`의 최종 외부 동작 계약을 확정한다.
+
+> **왜 새 래퍼 함수가 필요한가**: `save_final_reply`의 `db`는 FastAPI가
+> 요청 스코프로 여는 세션이다. `BackgroundTasks`에 등록된 함수는 응답이
+> 전송된 *뒤에* 실행되는데, 그 시점엔 요청 스코프 세션이 이미 닫혀있을
+> 수 있다 — 정확히 `backend/app/review_sync.py`의
+> `run_review_sync_job(job_id)`가 `sync_reviews_for_job(job, conn, db)`를
+> 감싸며 자체 `SessionLocal()`을 여는 것과 같은 이유다. 그래서
+> `background_tasks.add_task(...)`에는 요청의 `db`를 그대로 넘기면 안
+> 되고, 자체 세션을 여는 별도 래퍼를 넘겨야 한다.
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
@@ -1511,7 +1522,7 @@ def test_save_final_reply_promotes_edited_problem_review_to_golden_example(clien
     db_session.commit()
 
     calls = []
-    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile", lambda db, store_id: calls.append(store_id))
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: calls.append(store_id))
 
     res = client.post(
         f"/reviews/{review.id}/reply", json={"style_id": None, "content": "제가 직접 고친 답글입니다."}, headers=auth_headers,
@@ -1544,7 +1555,7 @@ def test_save_final_reply_does_not_promote_when_final_matches_draft_verbatim(cli
     ))
     db_session.commit()
 
-    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile", lambda db, store_id: None)
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
 
     client.post(
         f"/reviews/{review.id}/reply", json={"style_id": None, "content": "AI 초안 그대로입니다."}, headers=auth_headers,
@@ -1567,7 +1578,7 @@ def test_save_final_reply_does_not_promote_no_issue_review(client, db_session, s
     db_session.add(review)
     db_session.commit()
 
-    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile", lambda db, store_id: None)
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
 
     client.post(
         f"/reviews/{review.id}/reply", json={"style_id": None, "content": "감사합니다!"}, headers=auth_headers,
@@ -1583,7 +1594,26 @@ Expected: FAIL — `reviews_mod.generate_ai_reply`/`refresh_store_style_profile`
 아직 라우터에 없어 `AttributeError`, 또는 분기가 없어 항상 템플릿
 경로만 타서 `AI가 만든 답글입니다.` 어서션 실패.
 
-- [ ] **Step 3: `backend/app/routers/reviews.py` 수정**
+- [ ] **Step 3: `backend/app/llm/style_profile.py`에 백그라운드 실행용 래퍼 추가**
+
+Task 6이 만든 `backend/app/llm/style_profile.py` 맨 위 import에
+`from app.db import SessionLocal`을 추가하고, 파일 맨 아래에 함수를
+추가한다:
+
+```python
+def refresh_store_style_profile_background(store_id: int) -> None:
+    """FastAPI BackgroundTasks가 호출하는 얇은 래퍼 — 요청이 끝나면 요청
+    스코프 세션(app.routers.reviews의 db)은 이미 닫혀 있을 수 있으므로,
+    review_sync.py의 run_review_sync_job과 같은 이유로 자체 SessionLocal을
+    연다."""
+    db = SessionLocal()
+    try:
+        refresh_store_style_profile(db, store_id)
+    finally:
+        db.close()
+```
+
+- [ ] **Step 4: `backend/app/routers/reviews.py` 수정**
 
 import 섹션(현재 1-16줄) 교체:
 
@@ -1601,7 +1631,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
 from app.llm.generate import generate_ai_reply
-from app.llm.style_profile import refresh_store_style_profile
+from app.llm.style_profile import refresh_store_style_profile_background
 from app.models import GoldenExample, ReplyStyle, Review, ReviewReply, Store, Subscription, User
 from app.plan import effective_plan, replies_used_today
 
@@ -1672,26 +1702,26 @@ def save_final_reply(
                 source_review_id=review.id, source_reply_id=reply.id,
                 created_at=datetime.now(timezone.utc),
             ))
-            background_tasks.add_task(refresh_store_style_profile, db, review.store_id)
+            background_tasks.add_task(refresh_store_style_profile_background, review.store_id)
 
     db.commit()
     return {"id": reply.id, "content": reply.content}
 ```
 
-- [ ] **Step 4: 테스트 통과 확인**
+- [ ] **Step 5: 테스트 통과 확인**
 
 Run: `cd backend && .venv/bin/pytest tests/test_reviews.py -v`
 Expected: PASS 전체(기존 테스트 포함 회귀 없음)
 
-- [ ] **Step 5: 전체 백엔드 테스트 스위트 회귀 확인**
+- [ ] **Step 6: 전체 백엔드 테스트 스위트 회귀 확인**
 
 Run: `cd backend && .venv/bin/pytest -q`
 Expected: 전부 통과
 
-- [ ] **Step 6: 커밋**
+- [ ] **Step 7: 커밋**
 
 ```bash
-git add backend/app/routers/reviews.py backend/tests/test_reviews.py
+git add backend/app/routers/reviews.py backend/app/llm/style_profile.py backend/tests/test_reviews.py
 git commit -m "feat: 답글 생성/저장에 RAG 분기 + 골든 예시 자동 승격 연동"
 ```
 
