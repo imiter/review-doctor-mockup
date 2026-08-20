@@ -162,12 +162,20 @@ CREATE TABLE reviews (
     customer_order_count INT         NOT NULL DEFAULT 1,  -- 이 고객의 누적 주문 횟수 (n회 주문 표시)
     status               VARCHAR(12) NOT NULL DEFAULT 'unanswered'
                          CHECK (status IN ('unanswered', 'pending', 'answered')),
+    category             VARCHAR(24) NOT NULL DEFAULT 'no_issue'
+                         CHECK (category IN (
+                             'food_quality', 'delivery', 'hygiene', 'service',
+                             'price', 'missing_or_wrong_item', 'no_issue'
+                         )),
+    is_sensitive         BOOLEAN     NOT NULL DEFAULT FALSE,
+    sentiment_conflict   BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at           TIMESTAMPTZ NOT NULL
 );
 
 CREATE INDEX idx_reviews_status ON reviews(status);
 CREATE INDEX idx_reviews_store  ON reviews(store_id);
 CREATE INDEX idx_reviews_platform_shop ON reviews(platform_shop_no);
+CREATE INDEX idx_reviews_category ON reviews(store_id, category);
 
 -- ----------------------------------------------------------------------------
 -- 10. review_replies — 답글. reviews 1:N
@@ -296,13 +304,50 @@ CREATE TABLE alerts (
     id         BIGSERIAL PRIMARY KEY,
     store_id   BIGINT       NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
     alert_type VARCHAR(20)  NOT NULL
-               CHECK (alert_type IN ('negative_review', 'unanswered_review', 'rank_drop')),
+               CHECK (alert_type IN ('negative_review', 'unanswered_review', 'rank_drop', 'sensitive_review')),
     message    VARCHAR(300) NOT NULL,
     is_read    BOOLEAN      NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_alerts_store_unread ON alerts(store_id, is_read);
+
+-- ----------------------------------------------------------------------------
+-- 16-1. golden_examples — RAG few-shot 소스. 사장님이 직접 쓰거나 승인한
+--       진짜 답글(is_manual=true)과, 예시가 부족할 때만 보충하는 순수
+--       AI 생성 모범답안(is_synthetic=true)을 함께 담는다. 검색은 이
+--       테이블 하나만 필터링하면 끝나야 한다(조인 없음).
+-- ----------------------------------------------------------------------------
+CREATE TABLE golden_examples (
+    id               BIGSERIAL PRIMARY KEY,
+    store_id         BIGINT       NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    category         VARCHAR(24)  NOT NULL,
+    review_text      TEXT         NOT NULL,
+    reply_text       TEXT         NOT NULL,
+    is_manual        BOOLEAN      NOT NULL,
+    is_synthetic     BOOLEAN      NOT NULL,
+    source           VARCHAR(16)  NOT NULL
+                     CHECK (source IN ('backfill', 'organic', 'onboarding', 'synthetic')),
+    source_review_id BIGINT       REFERENCES reviews(id) ON DELETE SET NULL,
+    source_reply_id  BIGINT       REFERENCES review_replies(id) ON DELETE SET NULL,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_golden_examples_lookup
+    ON golden_examples(store_id, category, is_manual, is_synthetic, created_at DESC);
+
+-- ----------------------------------------------------------------------------
+-- 16-2. store_style_profile — 매장별 답글 스타일 규칙 캐싱. golden_examples
+--       중 is_manual=true AND is_synthetic=false인 데이터로만 재생성한다
+--       (가상 데이터로 스타일을 뽑으면 AI가 자기 산출물을 학습하는
+--       순환 오염이 생긴다).
+-- ----------------------------------------------------------------------------
+CREATE TABLE store_style_profile (
+    store_id             BIGINT       PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+    rules                TEXT         NOT NULL,
+    generated_from_count INT          NOT NULL,
+    updated_at           TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
 
 -- ----------------------------------------------------------------------------
 -- 17. social_accounts — 소셜 로그인 연결(카카오 등). users 1:N social_accounts

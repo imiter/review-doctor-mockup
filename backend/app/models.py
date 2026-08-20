@@ -183,6 +183,9 @@ class Review(Base):
     customer_nickname: Mapped[str] = mapped_column(String(50))
     customer_order_count: Mapped[int] = mapped_column(default=1)
     status: Mapped[str] = mapped_column(String(12), default="unanswered")
+    category: Mapped[str] = mapped_column(String(24), default="no_issue")
+    is_sensitive: Mapped[bool] = mapped_column(default=False)
+    sentiment_conflict: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime]
 
     order: Mapped[Order | None] = relationship(back_populates="review")
@@ -220,6 +223,31 @@ class ReviewReply(Base):
     created_at: Mapped[datetime]
 
     review: Mapped[Review] = relationship(back_populates="replies")
+
+
+class GoldenExample(Base):
+    __tablename__ = "golden_examples"
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("stores.id"))
+    category: Mapped[str] = mapped_column(String(24))
+    review_text: Mapped[str] = mapped_column(Text)
+    reply_text: Mapped[str] = mapped_column(Text)
+    is_manual: Mapped[bool]
+    is_synthetic: Mapped[bool]
+    source: Mapped[str] = mapped_column(String(16))
+    source_review_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("reviews.id"))
+    source_reply_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("review_replies.id"))
+    created_at: Mapped[datetime]
+
+
+class StoreStyleProfile(Base):
+    __tablename__ = "store_style_profile"
+
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("stores.id"), primary_key=True)
+    rules: Mapped[str] = mapped_column(Text)
+    generated_from_count: Mapped[int]
+    updated_at: Mapped[datetime]
 
 
 class DailySettlement(Base):
