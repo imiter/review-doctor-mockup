@@ -24,8 +24,8 @@ def test_fetch_golden_examples_prefers_real_over_synthetic(db_session, seeded_us
 
     result = fetch_golden_examples(db_session, sid, "hygiene", limit=3)
 
-    assert len(result) == 1
-    assert result[0].id == real.id
+    assert len(result) == 2
+    assert result[0].id == real.id  # 진짜 예시가 먼저 나온다 ("prefer real over synthetic" 증명)
 
 
 def test_fetch_golden_examples_backfills_with_synthetic_when_real_insufficient(db_session, seeded_user):
