@@ -10,3 +10,4 @@ pytest
 httpx
 cryptography
 playwright
+anthropic
