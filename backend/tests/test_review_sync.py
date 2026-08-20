@@ -5,7 +5,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.credential_crypto import CredentialCryptoError, encrypt_credential
-from app.models import AdCampaign, BaeminShopBrand, BrandAdClickMetric, DailySettlement, Order, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
+from app.models import AdCampaign, Alert, BaeminShopBrand, BrandAdClickMetric, DailySettlement, Order, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
 from app.review_sync import sync_reviews_for_job, upsert_brand_ad_click_metric, upsert_daily_settlement, upsert_order, upsert_repurchase_metric
 from scrapers.baemin_ads import BaeminAdsScrapeError
 from scrapers.baemin_auth import BaeminLoginError
@@ -2209,3 +2209,63 @@ def test_sync_fetches_all_click_metric_months_on_first_sync(db_session, sync_set
 
     assert job.status == "success"
     assert received_months == [months]
+
+
+def test_sync_classifies_new_review_and_stores_result(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1, _RAW_2])
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="food_quality", is_sensitive=False, sentiment_conflict=False),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=1001).one()
+    assert review.category == "food_quality"
+
+
+def test_sync_creates_sensitive_alert_for_flagged_review(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Alert
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="hygiene", is_sensitive=True, sentiment_conflict=False),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    alert = db_session.query(Alert).filter_by(store_id=job.store_id, alert_type="sensitive_review").one()
+    assert "확인" in alert.message
+
+
+def test_sync_falls_back_to_default_category_when_classification_fails(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
+
+    def _raise(content, rating):
+        raise review_sync_mod.ClassificationError("API 다운")
+
+    monkeypatch.setattr(review_sync_mod, "classify_review", _raise)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"  # 분류 실패가 동기화 자체를 막지 않는다
+    review = db_session.query(Review).filter_by(external_review_id=1001).one()
+    assert review.category == "no_issue"
+    assert review.is_sensitive is False

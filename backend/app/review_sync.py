@@ -15,6 +15,7 @@ from app.credential_crypto import CredentialCryptoError, decrypt_credential
 from app.db import SessionLocal
 from app.models import (
     AdCampaign,
+    Alert,
     BaeminShopBrand,
     BrandAdClickMetric,
     DailySettlement,
@@ -25,6 +26,7 @@ from app.models import (
     ReviewSyncJob,
     StorePlatformConnection,
 )
+from app.llm.classify import ClassificationError, classify_review
 from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics, fetch_cpc_booking, map_click_metrics_by_date
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 from scrapers.baemin_reviews import BaeminScrapeError, extract_owner_reply, fetch_all_reviews, map_review
@@ -314,11 +316,27 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 if m["external_review_id"] in existing_ids:
                     continue
                 review = Review(**m)
+                try:
+                    classification = classify_review(review.content, review.rating)
+                    review.category = classification.category
+                    review.is_sensitive = classification.is_sensitive
+                    review.sentiment_conflict = classification.sentiment_conflict
+                except ClassificationError:
+                    # 분류 실패해도 리뷰 저장 자체는 막지 않는다 — 컬럼
+                    # 기본값(no_issue)으로 남기고 계속 진행한다. 리뷰
+                    # 동기화가 AI 분류 가용성에 발목잡히면 안 된다.
+                    pass
                 db.add(review)
                 # review_replies가 review_id FK로 참조하려면 실제 id가
                 # 필요하다 — autoflush=False(app.db.SessionLocal)라 명시적으로
                 # flush해야 방금 만든 review의 id가 채워진다.
                 db.flush()
+                if review.is_sensitive:
+                    db.add(Alert(
+                        store_id=job.store_id, alert_type="sensitive_review",
+                        message=f"민감한 리뷰가 감지됐습니다: {review.menu_summary} 관련 — 우선 확인이 필요합니다",
+                        created_at=datetime.now(timezone.utc),
+                    ))
                 owner_reply = extract_owner_reply(raw)
                 if owner_reply is not None:
                     reply_content, replied_at = owner_reply
