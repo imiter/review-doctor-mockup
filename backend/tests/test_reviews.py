@@ -231,6 +231,39 @@ def test_generate_reply_uses_ai_path_for_problem_review(client, db_session, seed
     assert res.json()["content"] == "AI가 만든 답글입니다."
 
 
+def test_generate_reply_returns_503_with_korean_error_when_ai_generation_fails(
+    client, db_session, seeded_user, platforms, auth_headers, reply_styles, monkeypatch,
+):
+    """generate_ai_reply가 예외를 던지면(ANTHROPIC_API_KEY 미설정, API 장애 등)
+    500 대신 구조화된 한국어 에러를 담은 503을 반환해야 한다(Finding 2)."""
+    from datetime import datetime, timezone
+
+    from app.models import Review
+    from app.routers import reviews as reviews_mod
+
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=1, content="이물질이 나왔어요", customer_nickname="손님",
+        category="hygiene", is_sensitive=True, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    def _raise(db, review, store):
+        raise RuntimeError("네트워크 오류")
+
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply", _raise)
+
+    res = client.post(
+        f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
+    )
+
+    assert res.status_code == 503
+    detail = res.json()["detail"]
+    assert detail["error_code"] == "ai_generation_failed"
+    assert "AI 답글 생성" in detail["message"]
+
+
 def test_save_final_reply_promotes_edited_problem_review_to_golden_example(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
     from datetime import datetime, timezone
 

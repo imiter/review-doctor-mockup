@@ -136,7 +136,13 @@ def generate_reply(
         template = {"low": style.template_low, "mid": style.template_mid, "high": style.template_high}[_band(review.rating)]
         content = _fill_template(template, review, review.store)
     else:
-        content = generate_ai_reply(db, review, review.store)
+        try:
+            content = generate_ai_reply(db, review, review.store)
+        except Exception:
+            raise HTTPException(
+                503,
+                detail={"message": "AI 답글 생성에 실패했어요. 잠시 후 다시 시도해주세요.", "error_code": "ai_generation_failed"},
+            )
 
     draft = ReviewReply(
         review_id=review.id, reply_type="ai_draft", style_id=style.id,

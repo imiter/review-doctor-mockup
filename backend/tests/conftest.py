@@ -13,6 +13,19 @@ from app.main import app
 from app.models import Platform, ReplyStyle, Store, StorePlatformConnection, Subscription, User
 
 
+@pytest.fixture(autouse=True)
+def _no_anthropic_key(monkeypatch):
+    """테스트 스위트가 실제 Anthropic API를 호출하지 않도록 매 테스트마다
+    ANTHROPIC_API_KEY를 제거한다. classify_review/generate_ai_reply를 직접
+    monkeypatch하지 않는 테스트(예: review_sync의 분류 실패 폴백 테스트)는
+    키가 우연히 설정된 환경(실 배포 프로세스와 같은 환경변수를 공유하는
+    로컬/CI)에서 실제 과금되는 API를 호출할 수 있기 때문 — 이 fixture는
+    autouse라 테스트 본문보다 먼저 실행되지만, 테스트가 자체적으로
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ...)를 호출하면 그 테스트
+    안에서는 그 값이 그대로 우선한다."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+
 @pytest.fixture()
 def db_session():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
