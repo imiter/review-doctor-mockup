@@ -8,6 +8,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.llm import client
@@ -61,12 +62,15 @@ def get_or_create_scenario(db: Session, store: Store, category: str) -> Onboardi
     재사용하고, 없으면 새로 만든다. 호출자가 이미 find_uncovered_categories로
     real golden_example이 있는 카테고리를 걸러낸 뒤 부르므로 여기서는
     고려하지 않는다."""
-    existing = db.scalar(
-        select(OnboardingScenario).where(
-            OnboardingScenario.store_id == store.id,
-            OnboardingScenario.category == category,
+    def _select_existing():
+        return db.scalar(
+            select(OnboardingScenario).where(
+                OnboardingScenario.store_id == store.id,
+                OnboardingScenario.category == category,
+            )
         )
-    )
+
+    existing = _select_existing()
     if existing is not None:
         return existing
 
@@ -88,5 +92,17 @@ def get_or_create_scenario(db: Session, store: Store, category: str) -> Onboardi
         status="pending", created_at=datetime.now(timezone.utc),
     )
     db.add(scenario)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 체크-후-삽입 사이의 benign race — 동시 요청 두 개가 모두 위의
+        # _select_existing()을 통과한 뒤 하나가 먼저 커밋하면, 나중 커밋은
+        # UNIQUE (store_id, category) 위반으로 여기서 실패한다. 이미 LLM
+        # 호출 비용을 치른 뒤이므로 500을 내지 않고, 롤백 후 방금 다른
+        # 요청이 만든 행을 다시 조회해 그걸 반환한다.
+        db.rollback()
+        existing = _select_existing()
+        if existing is None:
+            raise
+        return existing
     return scenario

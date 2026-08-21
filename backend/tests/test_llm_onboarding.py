@@ -66,6 +66,48 @@ def test_get_or_create_scenario_reuses_existing_without_calling_llm_again(db_ses
     assert len(calls) == 1
 
 
+def test_get_or_create_scenario_recovers_from_concurrent_insert_race(db_session, seeded_user, monkeypatch):
+    """check-then-insert에는 락이 없어서, 두 요청이 거의 동시에 같은
+    (store_id, category)로 들어오면 둘 다 처음의 SELECT를 통과한 뒤 하나만
+    커밋에 성공하고 나머지는 UNIQUE (store_id, category) 위반으로 커밋이
+    실패할 수 있다(온보딩 라우터의 실서비스 시나리오: 대시보드 카드가 두 번
+    마운트되거나 요청이 재시도되는 경우). 스레드 없이 단일 프로세스 안에서
+    같은 레이스를 재현하려고, LLM 호출(call_haiku) 안에서 "다른 요청이 먼저
+    커밋한 것"처럼 같은 store_id/category로 행을 만들어 커밋해버린다 — 그러면
+    get_or_create_scenario가 뒤이어 시도하는 자신의 INSERT가 실제 sqlite
+    UNIQUE 제약 위반(IntegrityError)에 부딪히고, except 블록이 그걸 삼키고
+    롤백한 뒤 방금 커밋된 행을 재조회해서 반환하는지 검증한다."""
+    store = seeded_user["store"]
+    concurrent_winner = {}
+
+    def _sneaky_call_haiku(system, user, **kw):
+        # get_or_create_scenario의 첫 SELECT는 이미 통과한 뒤, 아직 자신의
+        # INSERT/커밋 전인 시점 — 바로 이 틈에 "동시 요청"이 먼저 커밋해버린
+        # 상황을 만든다.
+        winner = OnboardingScenario(
+            store_id=store.id, category="hygiene",
+            virtual_review_text="동시 요청이 먼저 만든 가상 리뷰",
+            draft_text="동시 요청이 먼저 만든 초안",
+            status="pending", created_at=datetime.now(timezone.utc),
+        )
+        db_session.add(winner)
+        db_session.commit()
+        concurrent_winner["row"] = winner
+        return "이 값은 쓰이지 않는다 — winner가 이미 커밋됐다"
+
+    monkeypatch.setattr(onboarding.client, "call_haiku", _sneaky_call_haiku)
+    monkeypatch.setattr(generate.client, "call_sonnet", lambda system, user, **kw: "초안")
+
+    scenario = onboarding.get_or_create_scenario(db_session, store, "hygiene")
+
+    # 500(처리되지 않은 IntegrityError)이 아니라 먼저 커밋된 "동시 요청"의
+    # 행을 그대로 반환해야 하고, 중복 행이 남아있으면 안 된다.
+    assert scenario.id == concurrent_winner["row"].id
+    assert scenario.virtual_review_text == "동시 요청이 먼저 만든 가상 리뷰"
+    count = db_session.query(OnboardingScenario).filter_by(store_id=store.id, category="hygiene").count()
+    assert count == 1
+
+
 def test_get_or_create_scenario_reuses_skipped_scenario_without_regenerating(db_session, seeded_user, monkeypatch):
     store = seeded_user["store"]
     db_session.add(OnboardingScenario(

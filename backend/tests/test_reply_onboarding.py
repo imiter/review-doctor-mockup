@@ -100,6 +100,39 @@ def test_today_prioritizes_never_shown_categories_over_previously_shown(client, 
     assert first_categories | second_categories == _ALL_CATEGORIES
 
 
+def test_today_rotates_through_all_categories_even_when_wizard_created_them_all_upfront(
+    client, db_session, seeded_user, auth_headers, monkeypatch,
+):
+    # 실제 배포 플로우 재현: 배민 로그인 직후 /wizard가 6개 카테고리 전부를
+    # 한 번에 만든다 — 이러면 never_shown이 처음부터 영구히 비고, previously_shown이
+    # created_at으로 정렬되면(버그) 매번 VALID_CATEGORIES 순서의 앞 3개
+    # (food_quality, delivery, hygiene)만 반복 노출되고 나머지 3개는 절대
+    # 안 나온다.
+    _patch_llm(monkeypatch)
+    client.post("/reply-onboarding/wizard", headers=auth_headers)
+
+    seen_categories: set[str] = set()
+    for day_offset in range(1, 4):
+        day_rows = client.get("/reply-onboarding/today", headers=auth_headers).json()
+        day_categories = {row["category"] for row in day_rows}
+        assert len(day_categories) == 3
+        seen_categories |= day_categories
+
+        for row in day_rows:
+            client.post(f"/reply-onboarding/scenarios/{row['id']}/skip", headers=auth_headers)
+
+        # "다음날"을 재현하려고 이 배치의 shown_on을 과거로 되돌린다 — 오늘
+        # 다시 부르면 already_shown(shown_on==today)이 비어서 today가 매번
+        # 새로 우선순위를 계산하게 된다.
+        backdated = date.today() - timedelta(days=day_offset)
+        for row in day_rows:
+            scenario = db_session.get(OnboardingScenario, row["id"])
+            scenario.shown_on = backdated
+        db_session.commit()
+
+    assert seen_categories == _ALL_CATEGORIES
+
+
 def test_answer_promotes_to_golden_example_and_triggers_style_refresh(client, db_session, seeded_user, auth_headers, monkeypatch):
     from app.routers import reply_onboarding as reply_onboarding_mod
 

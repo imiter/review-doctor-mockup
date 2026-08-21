@@ -90,7 +90,9 @@ function OnboardingTrainingCard({ storeId }: { storeId: number }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    apiGet<OnboardingScenario[]>(`/reply-onboarding/today?store_id=${storeId}`).then(setScenarios);
+    apiGet<OnboardingScenario[]>(`/reply-onboarding/today?store_id=${storeId}`)
+      .then(setScenarios)
+      .catch(() => setScenarios([]));
   }, [storeId]);
 
   const current = scenarios?.[index] ?? null;

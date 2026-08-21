@@ -86,9 +86,14 @@ def get_today(
     # 카테고리 목록의 앞쪽 3개만 매일 반복 노출되고, 뒤쪽 카테고리는 사장님이
     # 앞쪽을 스킵해도 영원히 트리클에 나오지 않는다.
     never_shown = [c for c in uncovered if c not in existing_by_category]
+    # shown_on(트리클에 실제로 노출된 날)이 정렬 기준이어야 한다 — created_at(행이
+    # 만들어진 시점)으로 정렬하면 POST /wizard가 6개 카테고리를 한 번에 만드는
+    # 실제 배포 플로우에서 never_shown이 영구히 비고 VALID_CATEGORIES 순서만
+    # 반복 재현된다(이 파일 상단 주석 참고). shown_on IS NULL(트리클에 한 번도
+    # 안 나온 것)은 date.min으로 최우선 취급하고, 동률은 created_at으로 정한다.
     previously_shown = sorted(
         (c for c in uncovered if c in existing_by_category),
-        key=lambda c: existing_by_category[c].created_at,
+        key=lambda c: (existing_by_category[c].shown_on or date.min, existing_by_category[c].created_at),
     )
     categories = (never_shown + previously_shown)[:_DAILY_TRICKLE_LIMIT]
 
