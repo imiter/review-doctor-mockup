@@ -32,6 +32,23 @@ type SyncStatus = {
   error_message: string | null;
 };
 
+type OnboardingScenario = {
+  id: number;
+  category: string;
+  virtual_review_text: string;
+  draft_text: string;
+  status: string;
+};
+
+const ONBOARDING_CATEGORY_LABEL: Record<string, string> = {
+  food_quality: "음식 품질(맛/온도/양)",
+  delivery: "배달(지연/파손)",
+  hygiene: "위생/이물질",
+  service: "응대",
+  price: "가격",
+  missing_or_wrong_item: "오배송/누락",
+};
+
 export default function StoreConnectionsPage() {
   const { storeId } = useStoreContext();
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -58,6 +75,10 @@ export default function StoreConnectionsPage() {
   const [loginPw, setLoginPw] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
+  const [wizardScenarios, setWizardScenarios] = useState<OnboardingScenario[] | null>(null);
+  const [wizardIndex, setWizardIndex] = useState(0);
+  const [wizardDraft, setWizardDraft] = useState("");
+  const [wizardSaving, setWizardSaving] = useState(false);
 
   const openLogin = (p: PlatformOption) => {
     setLoginTarget(p);
@@ -83,6 +104,12 @@ export default function StoreConnectionsPage() {
           platform_login_id: loginId,
           platform_login_password: loginPw,
         });
+        const scenarios = await apiPost<OnboardingScenario[]>(`/reply-onboarding/wizard?store_id=${storeId}`);
+        if (scenarios.length > 0) {
+          setWizardScenarios(scenarios);
+          setWizardIndex(0);
+          setWizardDraft(scenarios[0].draft_text);
+        }
       } else {
         // Mock 로그인 — 입력한 아이디/비밀번호는 전송/저장되지 않는다. 실제 로그인 흐름처럼
         // 잠깐의 지연을 준 뒤 매장을 연결한다.
@@ -97,6 +124,41 @@ export default function StoreConnectionsPage() {
       setModalError(e instanceof ApiError ? e.message : "연결에 실패했습니다");
     } finally {
       setConnecting(false);
+    }
+  };
+
+  const wizardCurrent = wizardScenarios?.[wizardIndex] ?? null;
+
+  const advanceWizard = () => {
+    if (!wizardScenarios) return;
+    if (wizardIndex + 1 < wizardScenarios.length) {
+      const next = wizardIndex + 1;
+      setWizardIndex(next);
+      setWizardDraft(wizardScenarios[next].draft_text);
+    } else {
+      setWizardScenarios(null);
+    }
+  };
+
+  const saveWizardAnswer = async () => {
+    if (!wizardCurrent) return;
+    setWizardSaving(true);
+    try {
+      await apiPost(`/reply-onboarding/scenarios/${wizardCurrent.id}/answer`, { content: wizardDraft });
+      advanceWizard();
+    } finally {
+      setWizardSaving(false);
+    }
+  };
+
+  const skipWizardScenario = async () => {
+    if (!wizardCurrent) return;
+    setWizardSaving(true);
+    try {
+      await apiPost(`/reply-onboarding/scenarios/${wizardCurrent.id}/skip`);
+      advanceWizard();
+    } finally {
+      setWizardSaving(false);
     }
   };
 
@@ -294,6 +356,45 @@ export default function StoreConnectionsPage() {
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {wizardCurrent && (
+        <Modal
+          title={`답글 스타일 빠르게 설정하기 (${wizardIndex + 1}/${wizardScenarios!.length})`}
+          onClose={() => setWizardScenarios(null)}
+        >
+          <div className="space-y-4">
+            <p className="text-xs text-muted">
+              &quot;{ONBOARDING_CATEGORY_LABEL[wizardCurrent.category] ?? wizardCurrent.category}&quot; 유형의 예시
+              리뷰예요. 사장님 말투로 답글을 다듬어 저장하면 이후 비슷한 리뷰에 바로 활용됩니다. 언제든 닫아도
+              괜찮아요 — 남은 항목은 대시보드에서 나중에 다시 볼 수 있습니다.
+            </p>
+            <p className="text-sm text-foreground">{wizardCurrent.virtual_review_text}</p>
+            <textarea
+              value={wizardDraft}
+              onChange={(e) => setWizardDraft(e.target.value)}
+              rows={4}
+              disabled={wizardSaving}
+              className="w-full rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent disabled:opacity-60"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={skipWizardScenario}
+                disabled={wizardSaving}
+                className="rounded-lg px-4 py-2 text-sm text-muted transition hover:bg-surface-2 disabled:opacity-60"
+              >
+                건너뛰기
+              </button>
+              <button
+                onClick={saveWizardAnswer}
+                disabled={wizardSaving || !wizardDraft.trim()}
+                className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+              >
+                저장
+              </button>
+            </div>
+          </div>
         </Modal>
       )}
     </div>
