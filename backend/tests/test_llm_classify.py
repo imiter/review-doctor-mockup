@@ -51,3 +51,23 @@ def test_classify_review_raises_on_valid_json_non_dict(monkeypatch):
     monkeypatch.setattr(classify.client, "call_haiku", lambda system, user, **kw: "[1, 2, 3]")
     with pytest.raises(classify.ClassificationError):
         classify.classify_review("...", 3)
+
+
+def test_classify_review_strips_markdown_code_fence(monkeypatch):
+    # 실측 확인(2026-08-21): Haiku가 프롬프트 지시("코드 블록 없이")를
+    # 무시하고 응답을 ```json ... ```로 감싸는 경우가 실제로 있었다.
+    monkeypatch.setattr(
+        classify.client, "call_haiku",
+        lambda system, user, **kw: '```json\n{"category": "food_quality", "is_sensitive": false, "sentiment_conflict": false}\n```',
+    )
+    result = classify.classify_review("닭이 딱딱해요", 1)
+    assert result.category == "food_quality"
+
+
+def test_classify_review_strips_bare_code_fence_without_language_tag(monkeypatch):
+    monkeypatch.setattr(
+        classify.client, "call_haiku",
+        lambda system, user, **kw: '```\n{"category": "service", "is_sensitive": false, "sentiment_conflict": false}\n```',
+    )
+    result = classify.classify_review("응대가 별로예요", 2)
+    assert result.category == "service"

@@ -31,7 +31,7 @@ sentiment_conflict: 별점과 리뷰 내용의 감정이 서로 어긋나면 tru
 별점은 4~5점인데 내용에 뚜렷한 불만이 섞여 있는 경우. 별점이 낮은데
 내용도 부정적인 건 "일치"이므로 false.
 
-JSON 형식으로만 답하라: {"category": "...", "is_sensitive": true/false, "sentiment_conflict": true/false}"""
+마크다운 코드 블록(```) 없이 JSON 객체 하나만 답하라: {"category": "...", "is_sensitive": true/false, "sentiment_conflict": true/false}"""
 
 
 class ClassificationError(Exception):
@@ -45,11 +45,26 @@ class ReviewClassification:
     sentiment_conflict: bool
 
 
+def _strip_code_fence(text: str) -> str:
+    """Haiku가 지시를 무시하고 응답을 ```json ... ``` 코드 블록으로 감싸는
+    경우가 실측으로 확인됐다(2026-08-21) — 프롬프트에 "코드 블록 없이"를
+    명시해도 완전히 막아주지 않으므로, 파싱 전에 방어적으로 벗겨낸다."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text[3:]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+        if text.endswith("```"):
+            text = text[:-3]
+    return text.strip()
+
+
 def classify_review(content: str, rating: int) -> ReviewClassification:
     user_message = f'리뷰: "{content}"\n별점: {rating}'
     try:
         raw = client.call_haiku(_SYSTEM_PROMPT, user_message)
-        data = json.loads(raw)
+        data = json.loads(_strip_code_fence(raw))
         if not isinstance(data, dict):
             raise ValueError(f"예상치 못한 응답 형식: {data!r}")
     except Exception as e:
