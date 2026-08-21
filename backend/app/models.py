@@ -362,3 +362,19 @@ class SignupVerification(Base):
     expires_at: Mapped[datetime]
     attempts: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[datetime]
+
+
+class OnboardingScenario(Base):
+    __tablename__ = "onboarding_scenarios"
+    __table_args__ = (UniqueConstraint("store_id", "category"),)
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("stores.id"))
+    category: Mapped[str] = mapped_column(String(24))
+    virtual_review_text: Mapped[str] = mapped_column(Text)
+    draft_text: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(10), default="pending")
+    shown_on: Mapped[date | None]
+    created_at: Mapped[datetime]
+
+    store: Mapped[Store] = relationship()

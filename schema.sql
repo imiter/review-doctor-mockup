@@ -455,4 +455,23 @@ CREATE TABLE payments (
 
 CREATE INDEX idx_payments_user ON payments(user_id);
 
+-- ----------------------------------------------------------------------------
+-- 23. onboarding_scenarios — 카테고리별 golden_examples가 비어있을 때 사장님께
+--     보여줄 가상 리뷰 + 마중물 초안. 마법사(배민 연결 직후)와 트리클(대시보드
+--     하루 단위)이 이 테이블을 공유한다. UNIQUE로 매장×카테고리당 1행만
+--     존재하게 강제해 재사용 원칙을 스키마 레벨에서도 지킨다.
+-- ----------------------------------------------------------------------------
+CREATE TABLE onboarding_scenarios (
+    id                  BIGSERIAL PRIMARY KEY,
+    store_id            BIGINT       NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    category            VARCHAR(24)  NOT NULL,
+    virtual_review_text TEXT         NOT NULL,
+    draft_text          TEXT         NOT NULL,
+    status              VARCHAR(10)  NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'answered', 'skipped')),
+    shown_on            DATE,
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    UNIQUE (store_id, category)
+);
+
 COMMIT;

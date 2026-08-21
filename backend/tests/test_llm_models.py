@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
-from app.models import GoldenExample, Review, StoreStyleProfile
+import pytest
+
+from app.models import GoldenExample, OnboardingScenario, Review, StoreStyleProfile
 
 
 def test_review_classification_columns_default(db_session, seeded_user, platforms):
@@ -44,3 +46,37 @@ def test_store_style_profile_round_trips(db_session, seeded_user):
 
     row = db_session.query(StoreStyleProfile).filter_by(store_id=seeded_user["store"].id).one()
     assert row.generated_from_count == 5
+
+
+def test_onboarding_scenario_round_trips(db_session, seeded_user):
+    scenario = OnboardingScenario(
+        store_id=seeded_user["store"].id, category="hygiene",
+        virtual_review_text="포장에서 냄새가 나요", draft_text="죄송합니다, 확인하겠습니다",
+        status="pending", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(scenario)
+    db_session.commit()
+
+    row = db_session.query(OnboardingScenario).filter_by(id=scenario.id).one()
+    assert row.category == "hygiene"
+    assert row.status == "pending"
+    assert row.shown_on is None
+
+
+def test_onboarding_scenario_unique_per_store_and_category(db_session, seeded_user):
+    from sqlalchemy.exc import IntegrityError
+
+    db_session.add(OnboardingScenario(
+        store_id=seeded_user["store"].id, category="hygiene",
+        virtual_review_text="첫 번째", draft_text="첫 번째 초안",
+        status="pending", created_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    db_session.add(OnboardingScenario(
+        store_id=seeded_user["store"].id, category="hygiene",
+        virtual_review_text="두 번째", draft_text="두 번째 초안",
+        status="pending", created_at=datetime.now(timezone.utc),
+    ))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
