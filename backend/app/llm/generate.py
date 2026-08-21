@@ -10,7 +10,7 @@ from app.models import Review, Store, StoreStyleProfile
 
 _FALLBACK_STYLE_RULES = "아직 학습된 스타일이 없습니다. 정중하고 진솔한 사과문 원칙을 따르세요."
 
-_CATEGORY_LABELS = {
+CATEGORY_LABELS = {
     "food_quality": "음식 품질(맛/온도/양)",
     "delivery": "배달(지연/파손)",
     "hygiene": "위생/이물질",
@@ -64,7 +64,7 @@ def generate_ai_reply(db: Session, review: Review, store: Store) -> str:
 
     examples = fetch_golden_examples(db, store.id, review.category, limit=3)
     repeat_count = count_recent_same_category(db, store.id, review.category, days=30)
-    category_label = _CATEGORY_LABELS.get(review.category, review.category)
+    category_label = CATEGORY_LABELS.get(review.category, review.category)
 
     system_prompt = _build_system_prompt(store, style_rules, examples)
     user_message = _build_user_message(review, category_label, repeat_count)
