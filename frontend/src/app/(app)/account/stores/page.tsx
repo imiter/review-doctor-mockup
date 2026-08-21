@@ -79,6 +79,7 @@ export default function StoreConnectionsPage() {
   const [wizardIndex, setWizardIndex] = useState(0);
   const [wizardDraft, setWizardDraft] = useState("");
   const [wizardSaving, setWizardSaving] = useState(false);
+  const [wizardError, setWizardError] = useState<string | null>(null);
 
   const openLogin = (p: PlatformOption) => {
     setLoginTarget(p);
@@ -104,11 +105,23 @@ export default function StoreConnectionsPage() {
           platform_login_id: loginId,
           platform_login_password: loginPw,
         });
-        const scenarios = await apiPost<OnboardingScenario[]>(`/reply-onboarding/wizard?store_id=${storeId}`);
-        if (scenarios.length > 0) {
-          setWizardScenarios(scenarios);
-          setWizardIndex(0);
-          setWizardDraft(scenarios[0].draft_text);
+        // 마법사 시나리오 생성(run_wizard)은 미답변 카테고리마다 Sonnet을 호출한다 —
+        // ANTHROPIC_API_KEY 미설정/LLM 타임아웃/레이트리밋으로 실패할 수 있다. 이미
+        // 로그인 자체는 서버에 성공적으로 반영됐으므로(store_platform_connections
+        // 행 저장 완료), 이 호출의 실패가 로그인 실패로 오인되면 안 된다 — 별도
+        // try/catch로 격리해 실패해도 로그인 성공 처리(모달 닫기, 목록 갱신)는
+        // 그대로 진행하고, 마법사만 조용히 건너뛴다. 놓친 카테고리는 대시보드
+        // 트리클 카드(OnboardingTrainingCard)가 나중에 다시 보여준다.
+        try {
+          const scenarios = await apiPost<OnboardingScenario[]>(`/reply-onboarding/wizard?store_id=${storeId}`);
+          if (scenarios.length > 0) {
+            setWizardScenarios(scenarios);
+            setWizardIndex(0);
+            setWizardDraft(scenarios[0].draft_text);
+            setWizardError(null);
+          }
+        } catch (wizardErr) {
+          console.error("온보딩 마법사 시나리오 생성 실패 (로그인은 성공):", wizardErr);
         }
       } else {
         // Mock 로그인 — 입력한 아이디/비밀번호는 전송/저장되지 않는다. 실제 로그인 흐름처럼
@@ -143,9 +156,12 @@ export default function StoreConnectionsPage() {
   const saveWizardAnswer = async () => {
     if (!wizardCurrent) return;
     setWizardSaving(true);
+    setWizardError(null);
     try {
       await apiPost(`/reply-onboarding/scenarios/${wizardCurrent.id}/answer`, { content: wizardDraft });
       advanceWizard();
+    } catch (e) {
+      setWizardError(e instanceof ApiError ? e.message : "저장에 실패했습니다");
     } finally {
       setWizardSaving(false);
     }
@@ -154,9 +170,12 @@ export default function StoreConnectionsPage() {
   const skipWizardScenario = async () => {
     if (!wizardCurrent) return;
     setWizardSaving(true);
+    setWizardError(null);
     try {
       await apiPost(`/reply-onboarding/scenarios/${wizardCurrent.id}/skip`);
       advanceWizard();
+    } catch (e) {
+      setWizardError(e instanceof ApiError ? e.message : "건너뛰기에 실패했습니다");
     } finally {
       setWizardSaving(false);
     }
@@ -362,7 +381,10 @@ export default function StoreConnectionsPage() {
       {wizardCurrent && (
         <Modal
           title={`답글 스타일 빠르게 설정하기 (${wizardIndex + 1}/${wizardScenarios!.length})`}
-          onClose={() => setWizardScenarios(null)}
+          onClose={() => {
+            setWizardScenarios(null);
+            setWizardError(null);
+          }}
         >
           <div className="space-y-4">
             <p className="text-xs text-muted">
@@ -378,6 +400,7 @@ export default function StoreConnectionsPage() {
               disabled={wizardSaving}
               className="w-full rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent disabled:opacity-60"
             />
+            {wizardError && <p className="text-xs text-danger">{wizardError}</p>}
             <div className="flex justify-end gap-2">
               <button
                 onClick={skipWizardScenario}
