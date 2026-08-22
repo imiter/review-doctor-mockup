@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Card } from "@/components/Card";
 import { Modal } from "@/components/Modal";
-import { apiGet, apiPost, percent, won, ApiError } from "@/lib/api";
+import { apiGet, percent, won } from "@/lib/api";
 import { useStoreContext } from "@/lib/store-context";
 
 type Period = "day" | "week" | "month" | "this_month";
@@ -53,23 +53,6 @@ const ALERT_LABEL: Record<string, { label: string; color: string }> = {
   rank_drop: { label: "순위 하락", color: "text-danger" },
 };
 
-type OnboardingScenario = {
-  id: number;
-  category: string;
-  virtual_review_text: string;
-  draft_text: string;
-  status: string;
-};
-
-const ONBOARDING_CATEGORY_LABEL: Record<string, string> = {
-  food_quality: "음식 품질(맛/온도/양)",
-  delivery: "배달(지연/파손)",
-  hygiene: "위생/이물질",
-  service: "응대",
-  price: "가격",
-  missing_or_wrong_item: "오배송/누락",
-};
-
 function ClickableCard({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }) {
   return (
     <button
@@ -79,96 +62,6 @@ function ClickableCard({ title, onClick, children }: { title: string; onClick: (
       <h2 className="mb-4 text-sm font-semibold text-foreground">{title}</h2>
       {children}
     </button>
-  );
-}
-
-function OnboardingTrainingCard({ storeId }: { storeId: number }) {
-  const [scenarios, setScenarios] = useState<OnboardingScenario[] | null>(null);
-  const [index, setIndex] = useState(0);
-  const [draft, setDraft] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    apiGet<OnboardingScenario[]>(`/reply-onboarding/today?store_id=${storeId}`)
-      .then(setScenarios)
-      .catch(() => setScenarios([]));
-  }, [storeId]);
-
-  const current = scenarios?.[index] ?? null;
-
-  useEffect(() => {
-    if (current) setDraft(current.draft_text);
-  }, [current]);
-
-  if (!scenarios || scenarios.length === 0 || !current) return null;
-
-  const advance = () => {
-    if (index + 1 < scenarios.length) {
-      setIndex(index + 1);
-    } else {
-      setScenarios([]);
-    }
-  };
-
-  const save = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      await apiPost(`/reply-onboarding/scenarios/${current.id}/answer`, { content: draft });
-      advance();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : "저장에 실패했습니다");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const skip = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      await apiPost(`/reply-onboarding/scenarios/${current.id}/skip`);
-      advance();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : "건너뛰기에 실패했습니다");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Card title={`오늘의 답글 훈련 (${index + 1}/${scenarios.length})`}>
-      <p className="mb-3 rounded-lg bg-surface-2 p-3 text-xs text-muted">
-        아직 &quot;{ONBOARDING_CATEGORY_LABEL[current.category] ?? current.category}&quot; 유형의 실제 답글이 없어요.
-        아래 예시 리뷰에 답글을 다듬어 저장하면, 이후 비슷한 리뷰에 사장님 말투로 답글이 생성돼요.
-      </p>
-      <p className="mb-2 text-sm text-foreground">{current.virtual_review_text}</p>
-      <textarea
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        rows={4}
-        disabled={saving}
-        className="w-full rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent disabled:opacity-60"
-      />
-      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
-      <div className="mt-3 flex justify-end gap-2">
-        <button
-          onClick={skip}
-          disabled={saving}
-          className="rounded-lg px-4 py-2 text-sm text-muted transition hover:bg-surface-2 disabled:opacity-60"
-        >
-          건너뛰기
-        </button>
-        <button
-          onClick={save}
-          disabled={saving || !draft.trim()}
-          className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
-        >
-          저장
-        </button>
-      </div>
-    </Card>
   );
 }
 
@@ -384,7 +277,6 @@ export default function DashboardPage() {
   return (
     <div className="max-w-6xl space-y-6">
       <div>
-        <h1 className="text-xl font-semibold">{dashboard.store.name}</h1>
         <p className="text-sm text-muted">{dashboard.store.category} · 카드를 클릭하면 상세를 볼 수 있습니다</p>
       </div>
 
@@ -476,8 +368,6 @@ export default function DashboardPage() {
           )}
         </Card>
       </div>
-
-      <OnboardingTrainingCard storeId={storeId} />
 
       {openModal === "ugacle" && (
         <Modal title="우가클 점수" onClose={() => setOpenModal(null)}><UgacleModal storeId={storeId} shopNo={selectedShopNo} /></Modal>
