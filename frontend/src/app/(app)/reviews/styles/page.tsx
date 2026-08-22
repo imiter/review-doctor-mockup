@@ -163,12 +163,12 @@ export default function ReplyStylesPage() {
 
   return (
     <div className="max-w-4xl space-y-6">
+      {storeId && <OnboardingTrainingCard storeId={storeId} />}
+
       <div>
         <h1 className="text-xl font-semibold">답글 스타일 설정</h1>
         <p className="text-sm text-muted">원하는 답글 스타일을 선택하세요. 각 스타일은 답변 톤과 방식이 다릅니다.</p>
       </div>
-
-      {storeId && <OnboardingTrainingCard storeId={storeId} />}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         {styles.map((s) => {
