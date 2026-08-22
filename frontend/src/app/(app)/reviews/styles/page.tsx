@@ -88,7 +88,7 @@ function OnboardingTrainingCard({ storeId }: { storeId: number }) {
   };
 
   return (
-    <Card title={`오늘의 답글 훈련 (${index + 1}/${scenarios.length})`}>
+    <Card title={`사장님 말투 학습 (${index + 1}/${scenarios.length})`}>
       <p className="mb-3 rounded-lg bg-surface-2 p-3 text-xs text-muted">
         아직 &quot;{ONBOARDING_CATEGORY_LABEL[current.category] ?? current.category}&quot; 유형의 실제 답글이 없어요.
         아래 예시 리뷰에 답글을 다듬어 저장하면, 이후 비슷한 리뷰에 사장님 말투로 답글이 생성돼요.
@@ -163,12 +163,12 @@ export default function ReplyStylesPage() {
 
   return (
     <div className="max-w-4xl space-y-6">
-      {storeId && <OnboardingTrainingCard storeId={storeId} />}
-
       <div>
         <h1 className="text-xl font-semibold">답글 스타일 설정</h1>
         <p className="text-sm text-muted">원하는 답글 스타일을 선택하세요. 각 스타일은 답변 톤과 방식이 다릅니다.</p>
       </div>
+
+      {storeId && <OnboardingTrainingCard storeId={storeId} />}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         {styles.map((s) => {
