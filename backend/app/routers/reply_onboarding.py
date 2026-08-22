@@ -14,6 +14,7 @@ from app.db import get_db
 from app.llm.onboarding import find_uncovered_categories, get_or_create_scenario
 from app.llm.style_profile import refresh_store_style_profile_background
 from app.models import GoldenExample, OnboardingScenario, Store, User
+from app.plan import kst_today
 
 router = APIRouter(tags=["reply-onboarding"])
 
@@ -62,7 +63,10 @@ def get_today(
     if store is None:
         raise HTTPException(404, "매장을 찾을 수 없습니다")
 
-    today = date.today()
+    # 서버는 Railway에서 UTC로 돌아가지만 "오늘"의 경계는 KST 자정이어야 한다
+    # (app.plan 모듈 docstring 참고) — date.today()를 직접 쓰면 UTC 자정까지
+    # 최대 9시간 오늘 몫이 지연 갱신된다.
+    today = kst_today()
     already_shown = db.scalars(
         select(OnboardingScenario).where(
             OnboardingScenario.store_id == sid,
