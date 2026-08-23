@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.models import GoldenExample, OnboardingScenario, Review, StoreStyleProfile
+from app.models import GoldenExample, OnboardingScenario, ReplyStyle, Review, StoreStyleProfile
 
 
 def test_review_classification_columns_default(db_session, seeded_user, platforms):
@@ -80,3 +80,18 @@ def test_onboarding_scenario_unique_per_store_and_category(db_session, seeded_us
     ))
     with pytest.raises(IntegrityError):
         db_session.commit()
+
+
+def test_reply_style_tone_instruction_round_trips(db_session):
+    style = ReplyStyle(
+        name="테스트 스타일", description="테스트용",
+        template_high="{nickname}님 감사합니다.",
+        template_mid="{nickname}님 아쉬워요.",
+        template_low="{nickname}님 죄송합니다.",
+        tone_instruction="이모지 없이 담백하게 작성하세요.",
+    )
+    db_session.add(style)
+    db_session.commit()
+
+    row = db_session.query(ReplyStyle).filter_by(id=style.id).one()
+    assert row.tone_instruction == "이모지 없이 담백하게 작성하세요."

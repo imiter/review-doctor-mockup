@@ -97,12 +97,13 @@ CREATE TABLE subscriptions (
 --    플레이스홀더: {nickname}, {menu}, {store}
 -- ----------------------------------------------------------------------------
 CREATE TABLE reply_styles (
-    id            SERIAL PRIMARY KEY,
-    name          VARCHAR(30)  NOT NULL UNIQUE,   -- 발랄 이모지 파티 / 진중맨 / 무난 요정 / 진지한 하이개그
-    description   VARCHAR(200) NOT NULL,          -- 페르소나 설명 (예: 발랄한 20대 여사장님 말투)
-    template_high TEXT         NOT NULL,          -- 4~5점 리뷰용 템플릿
-    template_mid  TEXT         NOT NULL,          -- 3점 리뷰용 템플릿
-    template_low  TEXT         NOT NULL           -- 1~2점 리뷰용 템플릿
+    id                SERIAL PRIMARY KEY,
+    name              VARCHAR(30)  NOT NULL UNIQUE,   -- 이모지 불맛 / 담백한 손맛 / 다정한 슴슴함 / 위트있는 칼칼함
+    description       VARCHAR(200) NOT NULL,          -- 페르소나 설명
+    template_high     TEXT         NOT NULL,          -- 4~5점 리뷰용 템플릿(칭찬 리뷰, no_issue 전용)
+    template_mid      TEXT         NOT NULL,          -- 3점 리뷰용 템플릿(칭찬 리뷰, no_issue 전용)
+    template_low      TEXT         NOT NULL,          -- 1~2점 리뷰용 템플릿(칭찬 리뷰, no_issue 전용)
+    tone_instruction  TEXT         NOT NULL DEFAULT '' -- 불만 리뷰 RAG 생성 시 얹는 톤 지시문(이모지/격식 수준). is_sensitive/sentiment_conflict면 고정 override로 대체됨.
 );
 
 -- ----------------------------------------------------------------------------

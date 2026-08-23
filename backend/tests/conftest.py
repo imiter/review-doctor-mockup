@@ -66,10 +66,11 @@ def platforms(db_session):
 @pytest.fixture()
 def reply_styles(db_session):
     style = ReplyStyle(
-        name="발랄 이모지 파티", description="테스트용",
+        name="이모지 불맛", description="테스트용",
         template_high="{nickname}님 {menu} 최고예요! {store} 감사합니다.",
         template_mid="{nickname}님 {menu} 아쉬웠어요. {store} 개선할게요.",
         template_low="{nickname}님 {menu} 죄송합니다. {store} 바로 고칠게요.",
+        tone_instruction="이모지를 문장마다 적극적으로 사용하고, 밝고 통통 튀는 말투로 작성하세요.",
     )
     db_session.add(style)
     db_session.flush()

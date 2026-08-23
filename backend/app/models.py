@@ -130,6 +130,7 @@ class ReplyStyle(Base):
     template_high: Mapped[str] = mapped_column(Text)
     template_mid: Mapped[str] = mapped_column(Text)
     template_low: Mapped[str] = mapped_column(Text)
+    tone_instruction: Mapped[str] = mapped_column(Text)
 
 
 class ReplySetting(Base):
