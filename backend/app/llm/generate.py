@@ -1,14 +1,26 @@
 """문제 리뷰(category != "no_issue")에 대한 RAG 기반 답글 생성. 검색
-(app.llm.rag)과 생성(Sonnet)을 조합한다 — 벡터 검색은 쓰지 않는다."""
+(app.llm.rag)과 생성(Sonnet)을 조합한다 — 벡터 검색은 쓰지 않는다.
+
+페르소나(reply_styles.tone_instruction)는 표면적 톤(이모지 사용량, 격식
+수준)만 조절하는 얇은 레이어다 — 원인 설명·사과의 실질적 근거는 항상
+store_style_profile(사장님 말투 그라운딩)과 골든 예시에서만 온다. 위생/안전
+민감 사안이거나 별점-내용이 어긋나는 리뷰는 페르소나 선택과 무관하게
+_SENSITIVE_TONE_OVERRIDE로 강제 전환한다(설계 문서
+2026-08-24-persona-rag-integration-design.md 참고)."""
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.llm import client
 from app.llm.rag import count_recent_same_category, fetch_golden_examples
-from app.models import Review, Store, StoreStyleProfile
+from app.models import ReplyStyle, Review, Store, StoreStyleProfile
 
 _FALLBACK_STYLE_RULES = "아직 학습된 스타일이 없습니다. 정중하고 진솔한 사과문 원칙을 따르세요."
+
+_SENSITIVE_TONE_OVERRIDE = (
+    "위생/안전 문제이거나 별점과 내용이 어긋나는 민감한 리뷰입니다. "
+    "페르소나 톤과 무관하게 이모지 없이 차분하고 진중하게 작성하세요."
+)
 
 CATEGORY_LABELS = {
     "food_quality": "음식 품질(맛/온도/양)",
@@ -20,7 +32,7 @@ CATEGORY_LABELS = {
 }
 
 
-def _build_system_prompt(store: Store, style_rules: str, examples) -> str:
+def _build_system_prompt(store: Store, style_rules: str, examples, tone_instruction: str) -> str:
     example_block = "\n\n".join(
         f'예시 {i}: 리뷰 "{ex.review_text}" / 답글 "{ex.reply_text}"'
         for i, ex in enumerate(examples, start=1)
@@ -30,6 +42,9 @@ def _build_system_prompt(store: Store, style_rules: str, examples) -> str:
 
 [이 가게의 답글 스타일]
 {style_rules}
+
+[답글 톤]
+{tone_instruction}
 
 [참고 예시 — 스타일 참고 전용]
 아래는 이 가게 사장님이 실제로 쓴(또는 승인한) 답글 예시다.
@@ -58,7 +73,7 @@ def _build_user_message(review: Review, category_label: str, repeat_count: int) 
     return "\n".join(lines)
 
 
-def generate_ai_reply(db: Session, review: Review, store: Store) -> str:
+def generate_ai_reply(db: Session, review: Review, store: Store, style: ReplyStyle) -> str:
     profile = db.scalar(select(StoreStyleProfile).where(StoreStyleProfile.store_id == store.id))
     style_rules = profile.rules if profile is not None else _FALLBACK_STYLE_RULES
 
@@ -66,6 +81,12 @@ def generate_ai_reply(db: Session, review: Review, store: Store) -> str:
     repeat_count = count_recent_same_category(db, store.id, review.category, days=30)
     category_label = CATEGORY_LABELS.get(review.category, review.category)
 
-    system_prompt = _build_system_prompt(store, style_rules, examples)
+    tone_instruction = (
+        _SENSITIVE_TONE_OVERRIDE
+        if review.is_sensitive or review.sentiment_conflict
+        else style.tone_instruction
+    )
+
+    system_prompt = _build_system_prompt(store, style_rules, examples, tone_instruction)
     user_message = _build_user_message(review, category_label, repeat_count)
     return client.call_sonnet(system_prompt, user_message, max_tokens=800)
