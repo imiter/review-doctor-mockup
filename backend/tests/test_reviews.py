@@ -221,7 +221,7 @@ def test_generate_reply_uses_ai_path_for_problem_review(client, db_session, seed
     db_session.add(review)
     db_session.commit()
 
-    monkeypatch.setattr(reviews_mod, "generate_ai_reply", lambda db, review, store: "AI가 만든 답글입니다.")
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply", lambda db, review, store, style: "AI가 만든 답글입니다.")
 
     res = client.post(
         f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
@@ -249,7 +249,7 @@ def test_generate_reply_returns_503_with_korean_error_when_ai_generation_fails(
     db_session.add(review)
     db_session.commit()
 
-    def _raise(db, review, store):
+    def _raise(db, review, store, style):
         raise RuntimeError("네트워크 오류")
 
     monkeypatch.setattr(reviews_mod, "generate_ai_reply", _raise)
@@ -366,3 +366,73 @@ def test_list_reviews_includes_category_and_sensitivity(client, db_session, seed
     row = next(r for r in body if r["content"] == "이물질이 나왔어요")
     assert row["category"] == "hygiene"
     assert row["is_sensitive"] is True
+
+
+def test_generate_reply_tone_overridden_true_when_sensitive(client, db_session, seeded_user, platforms, auth_headers, reply_styles, monkeypatch):
+    from datetime import datetime, timezone
+
+    from app.models import Review
+    from app.routers import reviews as reviews_mod
+
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=1, content="이물질이 나왔어요", customer_nickname="손님",
+        category="hygiene", is_sensitive=True, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply", lambda db, review, store, style: "답글")
+
+    res = client.post(
+        f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
+    )
+
+    assert res.status_code == 200
+    assert res.json()["tone_overridden"] is True
+
+
+def test_generate_reply_tone_overridden_false_when_not_sensitive(client, db_session, seeded_user, platforms, auth_headers, reply_styles, monkeypatch):
+    from datetime import datetime, timezone
+
+    from app.models import Review
+    from app.routers import reviews as reviews_mod
+
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=2, content="배달이 늦었어요", customer_nickname="손님",
+        category="delivery", is_sensitive=False, sentiment_conflict=False,
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply", lambda db, review, store, style: "답글")
+
+    res = client.post(
+        f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
+    )
+
+    assert res.status_code == 200
+    assert res.json()["tone_overridden"] is False
+
+
+def test_generate_reply_tone_overridden_false_for_no_issue_review(client, db_session, seeded_user, platforms, auth_headers, reply_styles):
+    from datetime import datetime, timezone
+
+    from app.models import Review
+
+    review = Review(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+        menu_summary="치킨", rating=5, content="맛있어요", customer_nickname="손님",
+        category="no_issue", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    res = client.post(
+        f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
+    )
+
+    assert res.status_code == 200
+    assert res.json()["tone_overridden"] is False

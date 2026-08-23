@@ -132,17 +132,19 @@ def generate_reply(
                 detail={"message": "오늘 답글 생성 한도를 모두 사용했어요. Pro는 무제한이에요.", "error_code": "reply_limit_exceeded"},
             )
 
+    tone_overridden = False
     if review.category == "no_issue":
         template = {"low": style.template_low, "mid": style.template_mid, "high": style.template_high}[_band(review.rating)]
         content = _fill_template(template, review, review.store)
     else:
         try:
-            content = generate_ai_reply(db, review, review.store)
+            content = generate_ai_reply(db, review, review.store, style)
         except Exception:
             raise HTTPException(
                 503,
                 detail={"message": "AI 답글 생성에 실패했어요. 잠시 후 다시 시도해주세요.", "error_code": "ai_generation_failed"},
             )
+        tone_overridden = review.is_sensitive or review.sentiment_conflict
 
     draft = ReviewReply(
         review_id=review.id, reply_type="ai_draft", style_id=style.id,
@@ -152,7 +154,7 @@ def generate_reply(
     if review.status == "unanswered":
         review.status = "pending"
     db.commit()
-    return {"content": content, "style_id": style.id}
+    return {"content": content, "style_id": style.id, "tone_overridden": tone_overridden}
 
 
 class SaveReplyRequest(BaseModel):
