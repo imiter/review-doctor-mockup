@@ -7,7 +7,7 @@ import { ApiError, apiGet, apiPost } from "@/lib/api";
 import { useStoreContext } from "@/lib/store-context";
 
 type ReplyStyle = { id: number; name: string; description: string };
-type ReplyRef = { content: string; style_id: number } | null;
+type ReplyRef = { content: string; style_id: number | null } | null;
 type SecondaryReply = { id: number; content: string; created_at: string };
 type Review = {
   id: number;
@@ -254,7 +254,7 @@ function ReviewCard({
         </div>
       ) : (
         <div className="mt-3 space-y-2">
-          {mode === "idle" && (
+          {mode === "idle" && !generateError && (
             <div className="flex flex-wrap gap-2">
               <button
                 onClick={startManual}
@@ -264,7 +264,7 @@ function ReviewCard({
               </button>
               <button
                 onClick={generate}
-                disabled={generating}
+                disabled={generating || styles.length === 0}
                 className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
               >
                 {generating ? "생성 중..." : "✨ AI 추천 답글 보기"}
