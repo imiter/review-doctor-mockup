@@ -46,12 +46,10 @@ def generate_virtual_review(category: str) -> str:
     )
 
 
-def _default_style(db: Session, store: Store) -> ReplyStyle:
+def _default_style(db: Session, store: Store) -> ReplyStyle | None:
     setting = db.scalar(select(ReplySetting).where(ReplySetting.store_id == store.id))
-    if setting is not None:
-        style = db.get(ReplyStyle, setting.style_id)
-        if style is not None:
-            return style
+    if setting is not None and setting.style is not None:
+        return setting.style
     return db.scalar(select(ReplyStyle).order_by(ReplyStyle.id))
 
 

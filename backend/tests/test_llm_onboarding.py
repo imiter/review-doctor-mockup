@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from app.llm import generate, onboarding
-from app.models import GoldenExample, OnboardingScenario, Review
+from app.models import GoldenExample, OnboardingScenario, ReplySetting, ReplyStyle, Review
 
 
 def test_find_uncovered_categories_excludes_covered_and_no_issue(db_session, seeded_user):
@@ -122,6 +122,43 @@ def test_get_or_create_scenario_reuses_skipped_scenario_without_regenerating(db_
 
     scenario = onboarding.get_or_create_scenario(db_session, store, "hygiene")
     assert scenario.status == "skipped"
+
+
+def test_get_or_create_scenario_uses_store_configured_style_over_default(db_session, seeded_user, reply_styles, monkeypatch):
+    """_default_style이 reply_settings에 지정된 스타일을 우선시하는지 검증한다
+    — reply_styles fixture 스타일과 톤 지시문이 다른 두 번째 스타일을 만들고
+    reply_settings로 그쪽을 가리키게 한 뒤, 실제로 생성된 시스템 프롬프트에
+    설정된 스타일의 tone_instruction만 들어가고 fixture 스타일의
+    tone_instruction은 들어가지 않는지 확인한다(어느 스타일이든 하나만
+    있어도 통과하는 약한 assertion이 아니라, 진짜로 "설정된" 스타일이
+    선택됐는지를 구분해서 증명한다)."""
+    store = seeded_user["store"]
+    configured_style = ReplyStyle(
+        name="담백한 손맛", description="테스트용",
+        template_high="{nickname}님 {menu} 감사합니다.",
+        template_mid="{nickname}님 {menu} 아쉬워요.",
+        template_low="{nickname}님 {menu} 죄송합니다.",
+        tone_instruction="이모지를 쓰지 않고, 격식 있고 담백한 말투로 신뢰감 있게 작성하세요.",
+    )
+    db_session.add(configured_style)
+    db_session.flush()
+    db_session.add(ReplySetting(store_id=store.id, style_id=configured_style.id))
+    db_session.commit()
+
+    monkeypatch.setattr(onboarding.client, "call_haiku", lambda system, user, **kw: "가상 리뷰 본문")
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["system"] = system
+        return "마중물 초안"
+
+    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+
+    onboarding.get_or_create_scenario(db_session, store, "delivery")
+
+    assert configured_style.tone_instruction in captured["system"]
+    assert reply_styles.tone_instruction not in captured["system"]
 
 
 def test_generate_virtual_review_uses_category_label(monkeypatch):
