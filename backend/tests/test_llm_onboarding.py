@@ -39,7 +39,7 @@ def test_find_uncovered_categories_all_six_for_fresh_store(db_session, seeded_us
     }
 
 
-def test_get_or_create_scenario_creates_new_one(db_session, seeded_user, monkeypatch):
+def test_get_or_create_scenario_creates_new_one(db_session, seeded_user, reply_styles, monkeypatch):
     store = seeded_user["store"]
     monkeypatch.setattr(onboarding.client, "call_haiku", lambda system, user, **kw: "가상 리뷰 본문")
     monkeypatch.setattr(generate.client, "call_sonnet", lambda system, user, **kw: "마중물 초안")
@@ -53,7 +53,7 @@ def test_get_or_create_scenario_creates_new_one(db_session, seeded_user, monkeyp
     assert db_session.query(Review).count() == 0  # 가상 리뷰는 reviews 테이블에 저장되지 않는다
 
 
-def test_get_or_create_scenario_reuses_existing_without_calling_llm_again(db_session, seeded_user, monkeypatch):
+def test_get_or_create_scenario_reuses_existing_without_calling_llm_again(db_session, seeded_user, reply_styles, monkeypatch):
     store = seeded_user["store"]
     calls = []
     monkeypatch.setattr(onboarding.client, "call_haiku", lambda system, user, **kw: calls.append(1) or "가상 리뷰")
@@ -66,7 +66,7 @@ def test_get_or_create_scenario_reuses_existing_without_calling_llm_again(db_ses
     assert len(calls) == 1
 
 
-def test_get_or_create_scenario_recovers_from_concurrent_insert_race(db_session, seeded_user, monkeypatch):
+def test_get_or_create_scenario_recovers_from_concurrent_insert_race(db_session, seeded_user, reply_styles, monkeypatch):
     """check-then-insert에는 락이 없어서, 두 요청이 거의 동시에 같은
     (store_id, category)로 들어오면 둘 다 처음의 SELECT를 통과한 뒤 하나만
     커밋에 성공하고 나머지는 UNIQUE (store_id, category) 위반으로 커밋이
@@ -108,7 +108,7 @@ def test_get_or_create_scenario_recovers_from_concurrent_insert_race(db_session,
     assert count == 1
 
 
-def test_get_or_create_scenario_reuses_skipped_scenario_without_regenerating(db_session, seeded_user, monkeypatch):
+def test_get_or_create_scenario_reuses_skipped_scenario_without_regenerating(db_session, seeded_user, reply_styles, monkeypatch):
     store = seeded_user["store"]
     db_session.add(OnboardingScenario(
         store_id=store.id, category="hygiene", virtual_review_text="가상 리뷰", draft_text="초안",

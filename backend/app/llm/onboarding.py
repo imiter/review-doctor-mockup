@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.llm import client
 from app.llm.classify import VALID_CATEGORIES
 from app.llm.generate import CATEGORY_LABELS, generate_ai_reply
-from app.models import GoldenExample, OnboardingScenario, Review, Store
+from app.models import GoldenExample, OnboardingScenario, ReplySetting, ReplyStyle, Review, Store
 
 # 실제 별점이 아니라 프롬프트 컨텍스트용 플레이스홀더 — generate_ai_reply의
 # 프롬프트가 별점을 참고하므로 대표값만 채운다. 정밀할 필요 없다.
@@ -44,6 +44,15 @@ def generate_virtual_review(category: str) -> str:
         _VIRTUAL_REVIEW_PROMPT_TEMPLATE.format(category_label=label),
         max_tokens=200,
     )
+
+
+def _default_style(db: Session, store: Store) -> ReplyStyle:
+    setting = db.scalar(select(ReplySetting).where(ReplySetting.store_id == store.id))
+    if setting is not None:
+        style = db.get(ReplyStyle, setting.style_id)
+        if style is not None:
+            return style
+    return db.scalar(select(ReplyStyle).order_by(ReplyStyle.id))
 
 
 def find_uncovered_categories(db: Session, store_id: int) -> list[str]:
@@ -84,7 +93,7 @@ def get_or_create_scenario(db: Session, store: Store, category: str) -> Onboardi
         customer_nickname="", customer_order_count=1, category=category,
         is_sensitive=(category == "hygiene"), created_at=datetime.now(timezone.utc),
     )
-    draft_text = generate_ai_reply(db, fake_review, store)
+    draft_text = generate_ai_reply(db, fake_review, store, _default_style(db, store))
 
     scenario = OnboardingScenario(
         store_id=store.id, category=category,

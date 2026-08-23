@@ -11,7 +11,7 @@ def _patch_llm(monkeypatch, virtual_review="가상 리뷰 본문", draft_text="�
     monkeypatch.setattr(generate.client, "call_sonnet", lambda system, user, **kw: draft_text)
 
 
-def test_wizard_returns_all_uncovered_categories(client, seeded_user, auth_headers, monkeypatch):
+def test_wizard_returns_all_uncovered_categories(client, seeded_user, auth_headers, reply_styles, monkeypatch):
     _patch_llm(monkeypatch)
     res = client.post("/reply-onboarding/wizard", headers=auth_headers)
     assert res.status_code == 200
@@ -19,7 +19,7 @@ def test_wizard_returns_all_uncovered_categories(client, seeded_user, auth_heade
     assert categories == _ALL_CATEGORIES
 
 
-def test_wizard_excludes_covered_categories(client, db_session, seeded_user, auth_headers, monkeypatch):
+def test_wizard_excludes_covered_categories(client, db_session, seeded_user, auth_headers, reply_styles, monkeypatch):
     _patch_llm(monkeypatch)
     db_session.add(GoldenExample(
         store_id=seeded_user["store"].id, category="hygiene", review_text="옛날", reply_text="옛날 답글",
@@ -33,7 +33,7 @@ def test_wizard_excludes_covered_categories(client, db_session, seeded_user, aut
     assert len(categories) == 5
 
 
-def test_wizard_returns_empty_when_fully_covered(client, db_session, seeded_user, auth_headers, monkeypatch):
+def test_wizard_returns_empty_when_fully_covered(client, db_session, seeded_user, auth_headers, reply_styles, monkeypatch):
     _patch_llm(monkeypatch)
     for c in _ALL_CATEGORIES:
         db_session.add(GoldenExample(
@@ -46,21 +46,21 @@ def test_wizard_returns_empty_when_fully_covered(client, db_session, seeded_user
     assert res.json() == []
 
 
-def test_today_limits_to_three_scenarios(client, seeded_user, auth_headers, monkeypatch):
+def test_today_limits_to_three_scenarios(client, seeded_user, auth_headers, reply_styles, monkeypatch):
     _patch_llm(monkeypatch)
     res = client.get("/reply-onboarding/today", headers=auth_headers)
     assert res.status_code == 200
     assert len(res.json()) == 3
 
 
-def test_today_is_stable_within_the_same_day(client, seeded_user, auth_headers, monkeypatch):
+def test_today_is_stable_within_the_same_day(client, seeded_user, auth_headers, reply_styles, monkeypatch):
     _patch_llm(monkeypatch)
     first = client.get("/reply-onboarding/today", headers=auth_headers).json()
     second = client.get("/reply-onboarding/today", headers=auth_headers).json()
     assert [row["id"] for row in first] == [row["id"] for row in second]
 
 
-def test_today_excludes_already_answered_same_day_scenario(client, seeded_user, auth_headers, monkeypatch):
+def test_today_excludes_already_answered_same_day_scenario(client, seeded_user, auth_headers, reply_styles, monkeypatch):
     from app.routers import reply_onboarding as reply_onboarding_mod
 
     _patch_llm(monkeypatch)
@@ -78,7 +78,7 @@ def test_today_excludes_already_answered_same_day_scenario(client, seeded_user, 
     assert len(second) == 2
 
 
-def test_today_prioritizes_never_shown_categories_over_previously_shown(client, db_session, seeded_user, auth_headers, monkeypatch):
+def test_today_prioritizes_never_shown_categories_over_previously_shown(client, db_session, seeded_user, auth_headers, reply_styles, monkeypatch):
     _patch_llm(monkeypatch)
     first_day = client.get("/reply-onboarding/today", headers=auth_headers).json()
     first_categories = {row["category"] for row in first_day}
@@ -101,7 +101,7 @@ def test_today_prioritizes_never_shown_categories_over_previously_shown(client, 
 
 
 def test_today_rotates_through_all_categories_even_when_wizard_created_them_all_upfront(
-    client, db_session, seeded_user, auth_headers, monkeypatch,
+    client, db_session, seeded_user, auth_headers, reply_styles, monkeypatch,
 ):
     # 실제 배포 플로우 재현: 배민 로그인 직후 /wizard가 6개 카테고리 전부를
     # 한 번에 만든다 — 이러면 never_shown이 처음부터 영구히 비고, previously_shown이
@@ -133,7 +133,7 @@ def test_today_rotates_through_all_categories_even_when_wizard_created_them_all_
     assert seen_categories == _ALL_CATEGORIES
 
 
-def test_answer_promotes_to_golden_example_and_triggers_style_refresh(client, db_session, seeded_user, auth_headers, monkeypatch):
+def test_answer_promotes_to_golden_example_and_triggers_style_refresh(client, db_session, seeded_user, auth_headers, reply_styles, monkeypatch):
     from app.routers import reply_onboarding as reply_onboarding_mod
 
     _patch_llm(monkeypatch)
@@ -160,7 +160,7 @@ def test_answer_promotes_to_golden_example_and_triggers_style_refresh(client, db
     assert refreshed == [seeded_user["store"].id]
 
 
-def test_answer_promotes_even_when_identical_to_draft(client, db_session, seeded_user, auth_headers, monkeypatch):
+def test_answer_promotes_even_when_identical_to_draft(client, db_session, seeded_user, auth_headers, reply_styles, monkeypatch):
     from app.routers import reply_onboarding as reply_onboarding_mod
 
     _patch_llm(monkeypatch, draft_text="이대로 괜찮아요")
@@ -181,7 +181,7 @@ def test_answer_promotes_even_when_identical_to_draft(client, db_session, seeded
     assert count == 1
 
 
-def test_answer_already_answered_returns_409(client, seeded_user, auth_headers, monkeypatch):
+def test_answer_already_answered_returns_409(client, seeded_user, auth_headers, reply_styles, monkeypatch):
     from app.routers import reply_onboarding as reply_onboarding_mod
 
     _patch_llm(monkeypatch)
@@ -194,7 +194,7 @@ def test_answer_already_answered_returns_409(client, seeded_user, auth_headers, 
     assert res.status_code == 409
 
 
-def test_skip_does_not_promote_and_stays_available_for_rescan(client, db_session, seeded_user, auth_headers, monkeypatch):
+def test_skip_does_not_promote_and_stays_available_for_rescan(client, db_session, seeded_user, auth_headers, reply_styles, monkeypatch):
     _patch_llm(monkeypatch)
     scenarios = client.post("/reply-onboarding/wizard", headers=auth_headers).json()
     target = next(s for s in scenarios if s["category"] == "hygiene")
@@ -210,7 +210,7 @@ def test_skip_does_not_promote_and_stays_available_for_rescan(client, db_session
     assert "hygiene" in still_uncovered
 
 
-def test_scenario_action_404_for_other_users_scenario(client, db_session, seeded_user, auth_headers, monkeypatch):
+def test_scenario_action_404_for_other_users_scenario(client, db_session, seeded_user, auth_headers, reply_styles, monkeypatch):
     from app.auth import hash_password
     from app.models import Store, User
 
