@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card } from "@/components/Card";
 import { apiGet, apiPost, apiPut, ApiError } from "@/lib/api";
 import { useStoreContext } from "@/lib/store-context";
@@ -38,6 +38,7 @@ function OnboardingTrainingCard({ storeId }: { storeId: number }) {
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     apiGet<OnboardingScenario[]>(`/reply-onboarding/today?store_id=${storeId}`)
@@ -50,6 +51,15 @@ function OnboardingTrainingCard({ storeId }: { storeId: number }) {
   useEffect(() => {
     if (current) setDraft(current.draft_text);
   }, [current]);
+
+  // 글자 수에 맞춰 textarea 높이를 자동으로 늘린다 — 스크롤이나 수동 리사이즈 없이
+  // 답글 전체가 한 번에 보이게. 위아래로 여유를 조금 더 둔다(+24px).
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight + 24}px`;
+  }, [draft]);
 
   if (!scenarios || scenarios.length === 0 || !current) return null;
 
@@ -95,11 +105,11 @@ function OnboardingTrainingCard({ storeId }: { storeId: number }) {
       </p>
       <p className="mb-2 text-sm text-foreground">{current.virtual_review_text}</p>
       <textarea
+        ref={textareaRef}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        rows={4}
         disabled={saving}
-        className="w-full rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent disabled:opacity-60"
+        className="w-full resize-none overflow-hidden rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent disabled:opacity-60"
       />
       {error && <p className="mt-2 text-xs text-danger">{error}</p>}
       <div className="mt-3 flex justify-end gap-2">
