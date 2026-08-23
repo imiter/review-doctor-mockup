@@ -117,8 +117,10 @@ function ReviewCard({
   review: Review; styles: ReplyStyle[]; onSaved: () => void; brandName?: string;
 }) {
   const { refreshBilling } = useStoreContext();
+  const [mode, setMode] = useState<"idle" | "manual" | "ai">(review.draft_reply ? "ai" : "idle");
   const [styleId, setStyleId] = useState(review.draft_reply?.style_id ?? styles[0]?.id ?? 0);
   const [draft, setDraft] = useState(review.draft_reply?.content ?? "");
+  const [lastGenerated, setLastGenerated] = useState(review.draft_reply?.content ?? "");
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [secondaryText, setSecondaryText] = useState("");
@@ -135,6 +137,8 @@ function ReviewCard({
     try {
       const res = await apiPost<{ content: string }>(`/reviews/${review.id}/generate-reply`, { style_id: styleId });
       setDraft(res.content);
+      setLastGenerated(res.content);
+      setMode("ai");
       // onSaved()를 여기서 부르지 않는다 — 목록을 새로고침하면 이 리뷰가
       // 서버에서 이미 pending으로 바뀌어 "답글 대기" 필터에서 사라지고,
       // 사장님이 미리보기를 확인·수정하기도 전에 카드가 없어져 버린다.
@@ -151,10 +155,32 @@ function ReviewCard({
     }
   };
 
+  const regenerate = async () => {
+    // 마지막 생성 결과와 지금 텍스트가 다르면(직접 손을 댄 흔적이 있으면)
+    // 되돌릴 방법이 없으니 실수로 날리지 않도록 한 번 확인한다.
+    if (draft !== lastGenerated) {
+      const confirmed = window.confirm("지금까지 수정한 내용이 사라집니다. 다시 생성할까요?");
+      if (!confirmed) return;
+    }
+    await generate();
+  };
+
+  const startManual = () => {
+    setGenerateError(null);
+    setMode("manual");
+    setDraft("");
+  };
+
+  const cancelDraft = () => {
+    setMode("idle");
+    setDraft("");
+    setGenerateError(null);
+  };
+
   const save = async () => {
     setSaving(true);
     try {
-      await apiPost(`/reviews/${review.id}/reply`, { style_id: styleId, content: draft });
+      await apiPost(`/reviews/${review.id}/reply`, { style_id: mode === "ai" ? styleId : null, content: draft });
       onSaved();
     } finally {
       setSaving(false);
@@ -228,35 +254,67 @@ function ReviewCard({
         </div>
       ) : (
         <div className="mt-3 space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={styleId}
-              onChange={(e) => setStyleId(Number(e.target.value))}
-              className="rounded-lg border border-border-subtle bg-surface px-2 py-1.5 text-xs outline-none focus:border-accent"
-            >
-              {styles.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-            <button
-              onClick={generate}
-              disabled={generating}
-              className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
-            >
-              {generating ? "생성 중..." : "답글 생성 (Mock)"}
-            </button>
-          </div>
-          {generateError && (
-            <p className="mt-2 text-xs text-danger">
-              {generateError}{" "}
-              <Link href="/account/billing" className="underline">
-                구독 관리
-              </Link>
-            </p>
+          {mode === "idle" && (
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={startManual}
+                className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs font-medium text-muted transition hover:text-foreground"
+              >
+                직접 답글 쓰기
+              </button>
+              <button
+                onClick={generate}
+                disabled={generating}
+                className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+              >
+                {generating ? "생성 중..." : "✨ AI 추천 답글 보기"}
+              </button>
+            </div>
           )}
-          {draft && (
+
+          {generateError && (
+            <div className="space-y-2">
+              <p className="text-xs text-danger">
+                {generateError}{" "}
+                <Link href="/account/billing" className="underline">
+                  구독 관리
+                </Link>
+              </p>
+              {mode === "idle" && (
+                <button
+                  onClick={startManual}
+                  className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs font-medium text-muted transition hover:text-foreground"
+                >
+                  대신 직접 답글 쓰기
+                </button>
+              )}
+            </div>
+          )}
+
+          {mode === "ai" && (
             <div className="space-y-2 rounded-lg border border-accent/40 bg-accent-soft/40 p-3">
-              <p className="text-xs font-medium text-accent">미리보기 — 등록 전 자유롭게 수정하세요</p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-medium text-accent">AI 추천 답글</p>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={styleId}
+                    onChange={(e) => setStyleId(Number(e.target.value))}
+                    className="rounded-lg border border-border-subtle bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
+                  >
+                    {styles.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={regenerate}
+                    disabled={generating}
+                    title="다시 생성"
+                    className="rounded-lg border border-border-subtle p-1.5 text-xs text-muted transition hover:text-foreground disabled:opacity-50"
+                  >
+                    {generating ? "..." : "↻"}
+                  </button>
+                </div>
+              </div>
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
@@ -272,7 +330,37 @@ function ReviewCard({
                   {saving ? "등록 중..." : "이대로 답글 등록"}
                 </button>
                 <button
-                  onClick={() => setDraft("")}
+                  onClick={cancelDraft}
+                  disabled={saving}
+                  className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs text-muted transition hover:text-foreground disabled:opacity-50"
+                >
+                  취소
+                </button>
+              </div>
+            </div>
+          )}
+
+          {mode === "manual" && (
+            <div className="space-y-2 rounded-lg border border-border-subtle bg-surface p-3">
+              <p className="text-xs font-medium text-muted">직접 작성</p>
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                rows={3}
+                autoFocus
+                placeholder="답글을 입력하세요"
+                className="w-full rounded-lg border border-border-subtle bg-surface-2 p-2.5 text-sm outline-none focus:border-accent"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={save}
+                  disabled={saving || !draft.trim()}
+                  className="rounded-lg bg-success px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+                >
+                  {saving ? "등록 중..." : "이대로 답글 등록"}
+                </button>
+                <button
+                  onClick={cancelDraft}
                   disabled={saving}
                   className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs text-muted transition hover:text-foreground disabled:opacity-50"
                 >
@@ -341,7 +429,7 @@ export default function ReviewsPage() {
     <div className="max-w-4xl space-y-6">
       <div>
         <h1 className="text-xl font-semibold">리뷰 관리</h1>
-        <p className="text-sm text-muted">답글 생성은 스타일 템플릿 기반 Mock — 실제 AI 호출 없음</p>
+        <p className="text-sm text-muted">칭찬 리뷰는 스타일 템플릿으로, 불만 리뷰는 실제 AI가 사장님 말투를 학습해 답글을 생성해요</p>
         {billing && (
           <p className="text-xs text-muted">
             오늘 답글 생성{" "}
