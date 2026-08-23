@@ -111,16 +111,56 @@ const DATE_PRESETS: { label: string; range: () => [string, string] }[] = [
   },
 ];
 
+type SavedDraft = { mode: "manual" | "ai"; draft: string };
+
+function loadSavedDraft(reviewId: number): SavedDraft | null {
+  try {
+    const raw = sessionStorage.getItem(`review-draft-${reviewId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && (parsed.mode === "manual" || parsed.mode === "ai") && typeof parsed.draft === "string") {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function saveDraftToStorage(reviewId: number, mode: "idle" | "manual" | "ai", draft: string) {
+  try {
+    if (mode === "idle") {
+      sessionStorage.removeItem(`review-draft-${reviewId}`);
+    } else {
+      sessionStorage.setItem(`review-draft-${reviewId}`, JSON.stringify({ mode, draft }));
+    }
+  } catch {
+    // sessionStorage 사용 불가(프라이빗 브라우징 등) — 초안 보존은 best-effort이므로 조용히 무시
+  }
+}
+
+function clearSavedDraft(reviewId: number) {
+  try {
+    sessionStorage.removeItem(`review-draft-${reviewId}`);
+  } catch {
+    // ignore
+  }
+}
+
 function ReviewCard({
   review, styles, onSaved, brandName,
 }: {
   review: Review; styles: ReplyStyle[]; onSaved: () => void; brandName?: string;
 }) {
   const { refreshBilling } = useStoreContext();
-  const [mode, setMode] = useState<"idle" | "manual" | "ai">(review.draft_reply ? "ai" : "idle");
+  const savedDraft = loadSavedDraft(review.id);
+  const [mode, setMode] = useState<"idle" | "manual" | "ai">(
+    savedDraft?.mode ?? (review.draft_reply ? "ai" : "idle")
+  );
   const [styleId, setStyleId] = useState(review.draft_reply?.style_id ?? styles[0]?.id ?? 0);
-  const [draft, setDraft] = useState(review.draft_reply?.content ?? "");
+  const [draft, setDraft] = useState(savedDraft?.draft ?? review.draft_reply?.content ?? "");
   const [lastGenerated, setLastGenerated] = useState(review.draft_reply?.content ?? "");
+  const [toneOverridden, setToneOverridden] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [secondaryText, setSecondaryText] = useState("");
@@ -131,13 +171,20 @@ function ReviewCard({
     if (styles.length > 0 && styleId === 0) setStyleId(styles[0].id);
   }, [styles, styleId]);
 
+  useEffect(() => {
+    saveDraftToStorage(review.id, mode, draft);
+  }, [review.id, mode, draft]);
+
   const generate = async () => {
     setGenerating(true);
     setGenerateError(null);
     try {
-      const res = await apiPost<{ content: string }>(`/reviews/${review.id}/generate-reply`, { style_id: styleId });
+      const res = await apiPost<{ content: string; tone_overridden: boolean }>(
+        `/reviews/${review.id}/generate-reply`, { style_id: styleId }
+      );
       setDraft(res.content);
       setLastGenerated(res.content);
+      setToneOverridden(res.tone_overridden);
       setMode("ai");
       // onSaved()를 여기서 부르지 않는다 — 목록을 새로고침하면 이 리뷰가
       // 서버에서 이미 pending으로 바뀌어 "답글 대기" 필터에서 사라지고,
@@ -181,6 +228,7 @@ function ReviewCard({
     setSaving(true);
     try {
       await apiPost(`/reviews/${review.id}/reply`, { style_id: mode === "ai" ? styleId : null, content: draft });
+      clearSavedDraft(review.id);
       onSaved();
     } finally {
       setSaving(false);
@@ -293,6 +341,11 @@ function ReviewCard({
 
           {mode === "ai" && (
             <div className="space-y-2 rounded-lg border border-accent/40 bg-accent-soft/40 p-3">
+              {toneOverridden && (
+                <p className="rounded-lg bg-warning/10 px-2 py-1 text-xs text-warning">
+                  ⚠ 민감한 리뷰라 자동으로 진중한 톤으로 작성돼요
+                </p>
+              )}
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-medium text-accent">AI 추천 답글</p>
                 <div className="flex items-center gap-2">
