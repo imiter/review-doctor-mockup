@@ -253,9 +253,6 @@ function ReviewCard({
     <div className="rounded-2xl border border-border-subtle bg-surface-2 p-6 shadow-sm">
       <div className="flex flex-wrap items-center gap-2">
         <span className="rounded-lg bg-surface px-2.5 py-1 text-xs font-medium text-accent">{review.platform_name}</span>
-        {brandName && (
-          <span className="rounded-lg bg-surface px-2.5 py-1 text-xs font-medium text-foreground">{brandName}</span>
-        )}
         {review.category !== "no_issue" && (
           <span
             className={`rounded-lg bg-surface px-2.5 py-1 text-xs font-medium ${
@@ -269,7 +266,9 @@ function ReviewCard({
         <span className="ml-auto text-xs text-muted">{new Date(review.created_at).toLocaleString("ko-KR")}</span>
       </div>
 
-      <div className="mt-4 flex items-start gap-5">
+      {brandName && <p className="mt-3 text-xs text-muted">{brandName}</p>}
+
+      <div className={`flex items-start gap-5 ${brandName ? "mt-1.5" : "mt-4"}`}>
         <div className="w-52 flex-shrink-0 space-y-1.5">
           <div className="flex flex-wrap items-baseline gap-2">
             <span className="text-base font-semibold text-foreground">{review.customer_nickname}</span>
@@ -283,7 +282,7 @@ function ReviewCard({
             {review.menu_summary}
           </span>
         </div>
-        <div className="flex-1 space-y-3">
+        <div className="flex-1 space-y-3 rounded-xl bg-surface p-4">
           {review.image_urls.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {review.image_urls.map((url) => (
