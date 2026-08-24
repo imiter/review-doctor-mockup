@@ -269,37 +269,39 @@ function ReviewCard({
         <span className="ml-auto text-xs text-muted">{new Date(review.created_at).toLocaleString("ko-KR")}</span>
       </div>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2.5">
-        <span className="text-lg font-semibold text-foreground">{review.customer_nickname}</span>
-        <span className="text-sm text-muted">{review.customer_order_count}회 주문</span>
-      </div>
-      <div className="mt-1.5 text-base text-warning">
-        {"★".repeat(review.rating)}
-        <span className="text-border-subtle">{"★".repeat(5 - review.rating)}</span>
-      </div>
-
-      <div className="mt-4">
-        <span className="inline-block rounded-lg bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent">
-          {review.menu_summary}
-        </span>
-      </div>
-      <p className="mt-3 text-sm leading-relaxed text-foreground">{review.content}</p>
-
-      {review.image_urls.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {review.image_urls.map((url) => (
-            <a key={url} href={url} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-xl border border-border-subtle">
-              <Image
-                src={url}
-                alt="고객이 첨부한 리뷰 사진"
-                width={112}
-                height={112}
-                className="h-28 w-28 object-cover transition hover:opacity-90"
-              />
-            </a>
-          ))}
+      <div className="mt-4 flex items-start gap-5">
+        <div className="w-52 flex-shrink-0 space-y-1.5">
+          <div className="flex flex-wrap items-baseline gap-2">
+            <span className="text-base font-semibold text-foreground">{review.customer_nickname}</span>
+            <span className="text-xs text-muted">{review.customer_order_count}회 주문</span>
+          </div>
+          <div className="text-sm text-warning">
+            {"★".repeat(review.rating)}
+            <span className="text-border-subtle">{"★".repeat(5 - review.rating)}</span>
+          </div>
+          <span className="inline-block rounded-lg bg-accent-soft px-2.5 py-1 text-xs font-medium text-accent">
+            {review.menu_summary}
+          </span>
         </div>
-      )}
+        <div className="flex-1 space-y-3">
+          {review.image_urls.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {review.image_urls.map((url) => (
+                <a key={url} href={url} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-xl border border-border-subtle">
+                  <Image
+                    src={url}
+                    alt="고객이 첨부한 리뷰 사진"
+                    width={112}
+                    height={112}
+                    className="h-28 w-28 object-cover transition hover:opacity-90"
+                  />
+                </a>
+              ))}
+            </div>
+          )}
+          <p className="text-sm leading-relaxed text-foreground">{review.content}</p>
+        </div>
+      </div>
 
       {review.final_reply ? (
         <div className="mt-5 space-y-3">
