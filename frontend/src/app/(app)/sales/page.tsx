@@ -68,18 +68,24 @@ export default function SalesDailyPage() {
         </div>
       </div>
 
-      <Card>
-        {rows.length === 0 && <p className="text-sm text-muted">데이터가 없습니다.</p>}
-        {view === "list" ? (
-          <div className="space-y-2">
-            {rows.map((r) => (
-              <div key={r.date} className="flex items-center justify-between rounded-lg bg-surface-2 px-4 py-3">
-                <span className="text-sm font-medium">{DAY_LABEL(r.date, today, yesterday)}</span>
-                <span className="text-sm font-semibold">{won(r.amount)}</span>
-              </div>
-            ))}
-          </div>
-        ) : (
+      {rows.length === 0 ? (
+        <Card>
+          <p className="text-sm text-muted">데이터가 없습니다.</p>
+        </Card>
+      ) : view === "list" ? (
+        <div className="space-y-3">
+          {rows.map((r) => (
+            <div
+              key={r.date}
+              className="flex items-center justify-between rounded-2xl border border-border-subtle bg-surface-2 px-6 py-4 shadow-sm"
+            >
+              <span className="text-sm font-medium text-foreground">{DAY_LABEL(r.date, today, yesterday)}</span>
+              <span className="text-lg font-semibold text-accent">{won(r.amount)}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <Card>
           <div className="space-y-2">
             {rows.map((r) => (
               <div key={r.date} className="flex items-center gap-3">
@@ -91,8 +97,8 @@ export default function SalesDailyPage() {
               </div>
             ))}
           </div>
-        )}
-      </Card>
+        </Card>
+      )}
     </div>
   );
 }
