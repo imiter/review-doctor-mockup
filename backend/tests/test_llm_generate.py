@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+
 from app.llm import generate
-from app.models import GoldenExample, Review, StoreStyleProfile
+from app.models import BaeminShopBrand, GoldenExample, Review, StorePlatformConnection, StoreStyleProfile
 
 
 def test_generate_ai_reply_includes_style_profile_and_examples(db_session, seeded_user, platforms, reply_styles, monkeypatch):
@@ -220,3 +222,65 @@ def test_generate_ai_reply_grounding_present_even_when_tone_overridden(db_sessio
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
     assert "항상 재방문을 유도한다" in captured["system"]
+
+
+def test_generate_ai_reply_uses_matched_brand_name_not_store_name(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """한 배민 계정에 브랜드가 여러 개 딸려있을 때, 리뷰의 platform_shop_no로
+    실제 브랜드명을 찾아 답글에 써야 한다 — Store.name(대표 브랜드) 하나만
+    쓰면 다른 브랜드 리뷰에 엉뚱한 이름이 붙는 문제(2026-08-24 실측 확인:
+    "블랙닭갈비" 리뷰에 "치킨대장 당고점입니다"가 붙음)를 고친 회귀 테스트."""
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+
+    connection = db_session.scalar(
+        select(StorePlatformConnection).where(StorePlatformConnection.store_id == sid)
+    )
+    db_session.add(BaeminShopBrand(
+        connection_id=connection.id, shop_no="14804914",
+        shop_name="[음식배달] 블랙닭갈비 노원당고개점 / 고기·구이 14804914",
+    ))
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="닭갈비", rating=5, content="맛있어요",
+        customer_nickname="손님", platform_shop_no="14804914", category="no_issue",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["system"] = system
+        return "..."
+
+    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+
+    generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert '"블랙닭갈비 노원당고개점"' in captured["system"]
+    assert "치킨대장" not in captured["system"]
+
+
+def test_generate_ai_reply_falls_back_to_store_name_when_no_brand_match(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """platform_shop_no가 없거나(온보딩 가상 리뷰 등) 매칭되는 브랜드가
+    없으면 기존처럼 Store.name으로 폴백한다."""
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="치킨", rating=5, content="맛있어요",
+        customer_nickname="손님", category="no_issue", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["system"] = system
+        return "..."
+
+    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+
+    generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert '"치킨대장"' in captured["system"]

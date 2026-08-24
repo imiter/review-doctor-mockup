@@ -22,12 +22,14 @@ store_style_profile(사장님 말투 그라운딩)과 골든 예시에서만 온
 _SENSITIVE_TONE_OVERRIDE로 강제 전환한다(설계 문서
 2026-08-24-persona-rag-integration-design.md 참고)."""
 
+import re
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.llm import client
 from app.llm.rag import count_recent_same_category, fetch_golden_examples
-from app.models import ReplyStyle, Review, Store, StoreStyleProfile
+from app.models import BaeminShopBrand, ReplyStyle, Review, Store, StorePlatformConnection, StoreStyleProfile
 
 _FALLBACK_STYLE_RULES = "아직 학습된 스타일이 없습니다. 정중하고 진솔한 사과문 원칙을 따르세요."
 
@@ -46,13 +48,45 @@ CATEGORY_LABELS = {
 }
 
 
-def _build_system_prompt(store: Store, style_rules: str, examples, tone_instruction: str) -> str:
+def _resolve_display_name(db: Session, store: Store, review: Review) -> str:
+    """답글에서 "안녕하세요, {name}입니다"처럼 실제로 언급할 가게 이름을
+    정한다. 한 배민 계정에 브랜드가 여러 개(치밥대장/블랙닭갈비/곱도리탕/
+    행복가성비) 딸려있는데, 이전에는 항상 Store.name(단일 값, 대표
+    브랜드 이름) 하나만 써서 리뷰가 다른 브랜드 것이어도 엉뚱한 브랜드명이
+    답글에 들어갔다(2026-08-24 실측 확인 — "블랙닭갈비" 리뷰에 "치킨대장
+    당고점입니다"가 붙음). review.platform_shop_no로 baemin_shop_brands를
+    찾아 그 브랜드의 실제 이름을 쓰고, 못 찾으면(연결 정보 없음, 온보딩
+    가상 리뷰 등) Store.name으로 폴백한다.
+
+    baemin_shop_brands.shop_name은 배민 매장 선택 드롭다운 원문 그대로라
+    "[음식배달] 블랙닭갈비 노원당고개점 / 고기·구이 14804914"처럼 프롬프트에
+    쓰기엔 지저분하다 — 앞의 "[...]" 태그와 " / 카테고리 번호" 뒷부분을
+    잘라 "블랙닭갈비 노원당고개점"만 남긴다."""
+    if not review.platform_shop_no:
+        return store.name
+
+    brand = db.scalar(
+        select(BaeminShopBrand)
+        .join(StorePlatformConnection, BaeminShopBrand.connection_id == StorePlatformConnection.id)
+        .where(
+            StorePlatformConnection.store_id == store.id,
+            BaeminShopBrand.shop_no == review.platform_shop_no,
+        )
+    )
+    if brand is None:
+        return store.name
+
+    name = re.sub(r"^\[[^\]]*\]\s*", "", brand.shop_name)
+    return name.split(" / ")[0].strip() or store.name
+
+
+def _build_system_prompt(display_name: str, style_rules: str, examples, tone_instruction: str) -> str:
     example_block = "\n\n".join(
         f'예시 {i}: 리뷰 "{ex.review_text}" / 답글 "{ex.reply_text}"'
         for i, ex in enumerate(examples, start=1)
     ) if examples else "(아직 참고할 예시가 없습니다.)"
 
-    return f"""너는 "{store.name}"의 사장님을 대신해 배달앱 리뷰에 답글을 쓴다.
+    return f"""너는 "{display_name}"의 사장님을 대신해 배달앱 리뷰에 답글을 쓴다.
 
 [이 가게의 답글 스타일]
 {style_rules}
@@ -106,6 +140,7 @@ def generate_ai_reply(db: Session, review: Review, store: Store, style: ReplySty
         else style.tone_instruction
     )
 
-    system_prompt = _build_system_prompt(store, style_rules, examples, tone_instruction)
+    display_name = _resolve_display_name(db, store, review)
+    system_prompt = _build_system_prompt(display_name, style_rules, examples, tone_instruction)
     user_message = _build_user_message(review, category_label, repeat_count)
     return client.call_sonnet(system_prompt, user_message, max_tokens=800)
