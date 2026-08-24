@@ -92,6 +92,7 @@ def list_reviews(
             "content": r.content,
             "customer_nickname": r.customer_nickname,
             "customer_order_count": r.customer_order_count,
+            "image_urls": r.image_urls,
             "status": r.status,
             "category": r.category,
             "is_sensitive": r.is_sensitive,

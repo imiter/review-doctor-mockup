@@ -404,6 +404,14 @@ baemin_shop_brands, brand_ad_click_metrics, payments.
 - reviews: 리뷰(별점, 내용, 고객 닉네임, 주문 횟수, 상태). store_id/platform_id/
   menu_summary를 직접 가진다 — 주문과 독립적으로 적재 가능(배민 리뷰 API에는
   주문과 연결할 공통 키가 없음). order_id는 있으면 연결하는 선택적 FK.
+  image_urls(TEXT[])는 고객이 리뷰에 첨부한 사진 URL 목록이다(2026-08-24) —
+  실 계정 raw JSON 확인 결과 배민 리뷰는 `images[].imageUrl` 배열을 주고,
+  답글(comments)과 동일하게 `displayStatus`가 `DISPLAY`가 아닌 사진(가려짐/
+  삭제)은 걸러낸다(`backend/scrapers/baemin_reviews.py`의
+  `extract_image_urls`). 새 테이블을 만들지 않고 배열 컬럼으로 저장했다 —
+  사진마다 별도로 다루는 로직(모더레이션, 좋아요 등)이 없어 단순 표시용
+  목록이라 정규화 실익이 없다고 판단. 기존에 동기화된 리뷰는 이 컬럼이
+  빈 배열로 남고, 다음 동기화부터 채워진다(소급 백필 없음).
 - golden_examples: RAG few-shot 소스. 사장님이 직접 쓰거나 승인한 진짜
   답글(is_manual=true)과 예시 부족 시 보충하는 순수 AI 생성 모범답안
   (is_synthetic=true)을 함께 담는다. 검색은 category 필터만 쓴다(벡터

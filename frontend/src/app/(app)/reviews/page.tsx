@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { Card } from "@/components/Card";
 import { ApiError, apiGet, apiPost } from "@/lib/api";
@@ -18,6 +19,7 @@ type Review = {
   content: string;
   customer_nickname: string;
   customer_order_count: number;
+  image_urls: string[];
   status: "unanswered" | "pending" | "answered";
   category: string;
   is_sensitive: boolean;
@@ -248,15 +250,15 @@ function ReviewCard({
   };
 
   return (
-    <div className="rounded-xl border border-border-subtle bg-surface-2 p-4">
-      <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-        <span className="rounded bg-surface px-2 py-0.5 font-medium text-accent">{review.platform_name}</span>
+    <div className="rounded-2xl border border-border-subtle bg-surface-2 p-6 shadow-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded-lg bg-surface px-2.5 py-1 text-xs font-medium text-accent">{review.platform_name}</span>
         {brandName && (
-          <span className="rounded bg-surface px-2 py-0.5 font-medium text-foreground">{brandName}</span>
+          <span className="rounded-lg bg-surface px-2.5 py-1 text-xs font-medium text-foreground">{brandName}</span>
         )}
         {review.category !== "no_issue" && (
           <span
-            className={`rounded bg-surface px-2 py-0.5 font-medium ${
+            className={`rounded-lg bg-surface px-2.5 py-1 text-xs font-medium ${
               review.is_sensitive ? "text-danger" : "text-warning"
             }`}
           >
@@ -264,24 +266,51 @@ function ReviewCard({
             {CATEGORY_LABELS[review.category] ?? review.category}
           </span>
         )}
-        <span className="text-warning">{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
-        <span className="font-medium text-foreground">{review.customer_nickname}</span>
-        <span>· {review.customer_order_count}회 주문</span>
-        <span className="ml-auto">{new Date(review.created_at).toLocaleString("ko-KR")}</span>
+        <span className="ml-auto text-xs text-muted">{new Date(review.created_at).toLocaleString("ko-KR")}</span>
       </div>
-      <p className="mt-2 text-xs text-muted">{review.menu_summary}</p>
-      <p className="mt-1 text-sm text-foreground">{review.content}</p>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2.5">
+        <span className="text-lg font-semibold text-foreground">{review.customer_nickname}</span>
+        <span className="text-sm text-muted">{review.customer_order_count}회 주문</span>
+      </div>
+      <div className="mt-1.5 text-base text-warning">
+        {"★".repeat(review.rating)}
+        <span className="text-border-subtle">{"★".repeat(5 - review.rating)}</span>
+      </div>
+
+      <div className="mt-4">
+        <span className="inline-block rounded-lg bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent">
+          {review.menu_summary}
+        </span>
+      </div>
+      <p className="mt-3 text-sm leading-relaxed text-foreground">{review.content}</p>
+
+      {review.image_urls.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {review.image_urls.map((url) => (
+            <a key={url} href={url} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-xl border border-border-subtle">
+              <Image
+                src={url}
+                alt="고객이 첨부한 리뷰 사진"
+                width={112}
+                height={112}
+                className="h-28 w-28 object-cover transition hover:opacity-90"
+              />
+            </a>
+          ))}
+        </div>
+      )}
 
       {review.final_reply ? (
-        <div className="mt-3 space-y-2">
-          <div className="rounded-lg border border-border-subtle bg-surface p-3">
-            <p className="mb-1 text-xs font-medium text-success">등록된 답글</p>
-            <p className="text-sm text-foreground">{review.final_reply.content}</p>
+        <div className="mt-5 space-y-3">
+          <div className="rounded-xl border border-border-subtle bg-surface p-4">
+            <p className="mb-1.5 text-xs font-medium text-success">등록된 답글</p>
+            <p className="text-sm leading-relaxed text-foreground">{review.final_reply.content}</p>
           </div>
           {review.secondary_replies.map((r) => (
-            <div key={r.id} className="rounded-lg border border-accent/30 bg-accent-soft p-3">
-              <p className="mb-1 text-xs font-medium text-accent">2차 답글</p>
-              <p className="text-sm text-foreground">{r.content}</p>
+            <div key={r.id} className="rounded-xl border border-accent/30 bg-accent-soft p-4">
+              <p className="mb-1.5 text-xs font-medium text-accent">2차 답글</p>
+              <p className="text-sm leading-relaxed text-foreground">{r.content}</p>
             </div>
           ))}
           <div className="flex gap-2">
@@ -289,31 +318,31 @@ function ReviewCard({
               value={secondaryText}
               onChange={(e) => setSecondaryText(e.target.value)}
               placeholder="추가로 안내할 내용을 입력하세요"
-              className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
+              className="flex-1 rounded-xl border border-border-subtle bg-surface px-3.5 py-2.5 text-sm outline-none focus:border-accent"
             />
             <button
               onClick={saveSecondary}
               disabled={savingSecondary || !secondaryText.trim()}
-              className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+              className="rounded-xl bg-accent px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
             >
               {savingSecondary ? "등록 중..." : "2차 답글 등록"}
             </button>
           </div>
         </div>
       ) : (
-        <div className="mt-3 space-y-2">
+        <div className="mt-5 space-y-2.5">
           {mode === "idle" && !generateError && (
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-col gap-2.5">
               <button
                 onClick={startManual}
-                className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs font-medium text-muted transition hover:text-foreground"
+                className="w-full rounded-xl border border-border-subtle py-3 text-sm font-medium text-muted transition hover:border-foreground hover:text-foreground"
               >
-                직접 답글 쓰기
+                ✏️ 직접 답글 쓰기
               </button>
               <button
                 onClick={generate}
                 disabled={generating || styles.length === 0}
-                className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+                className="w-full rounded-xl bg-accent py-3 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
               >
                 {generating ? "생성 중..." : "✨ AI 추천 답글 보기"}
               </button>
@@ -321,8 +350,8 @@ function ReviewCard({
           )}
 
           {generateError && (
-            <div className="space-y-2">
-              <p className="text-xs text-danger">
+            <div className="space-y-2.5">
+              <p className="text-sm text-danger">
                 {generateError}{" "}
                 <Link href="/account/billing" className="underline">
                   구독 관리
@@ -331,7 +360,7 @@ function ReviewCard({
               {mode === "idle" && (
                 <button
                   onClick={startManual}
-                  className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs font-medium text-muted transition hover:text-foreground"
+                  className="w-full rounded-xl border border-border-subtle py-3 text-sm font-medium text-muted transition hover:border-foreground hover:text-foreground"
                 >
                   대신 직접 답글 쓰기
                 </button>
@@ -340,19 +369,19 @@ function ReviewCard({
           )}
 
           {mode === "ai" && (
-            <div className="space-y-2 rounded-lg border border-accent/40 bg-accent-soft/40 p-3">
+            <div className="space-y-3 rounded-xl border border-accent/40 bg-accent-soft/40 p-4">
               {toneOverridden && (
-                <p className="rounded-lg bg-warning/10 px-2 py-1 text-xs text-warning">
+                <p className="rounded-lg bg-warning/10 px-3 py-1.5 text-xs text-warning">
                   ⚠ 민감한 리뷰라 자동으로 진중한 톤으로 작성돼요
                 </p>
               )}
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs font-medium text-accent">AI 추천 답글</p>
+                <p className="text-sm font-medium text-accent">AI 추천 답글</p>
                 <div className="flex items-center gap-2">
                   <select
                     value={styleId}
                     onChange={(e) => setStyleId(Number(e.target.value))}
-                    className="rounded-lg border border-border-subtle bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
+                    className="rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs outline-none focus:border-accent"
                   >
                     {styles.map((s) => (
                       <option key={s.id} value={s.id}>{s.name}</option>
@@ -371,21 +400,21 @@ function ReviewCard({
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                rows={3}
-                className="w-full rounded-lg border border-border-subtle bg-surface p-2.5 text-sm outline-none focus:border-accent"
+                rows={4}
+                className="w-full rounded-xl border border-border-subtle bg-surface p-3.5 text-sm leading-relaxed outline-none focus:border-accent"
               />
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2.5">
                 <button
                   onClick={save}
                   disabled={saving || !draft.trim()}
-                  className="rounded-lg bg-success px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+                  className="flex-1 rounded-xl bg-success py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
                 >
                   {saving ? "등록 중..." : "이대로 답글 등록"}
                 </button>
                 <button
                   onClick={cancelDraft}
                   disabled={saving}
-                  className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs text-muted transition hover:text-foreground disabled:opacity-50"
+                  className="rounded-xl border border-border-subtle px-4 py-2.5 text-sm text-muted transition hover:text-foreground disabled:opacity-50"
                 >
                   취소
                 </button>
@@ -394,28 +423,28 @@ function ReviewCard({
           )}
 
           {mode === "manual" && (
-            <div className="space-y-2 rounded-lg border border-border-subtle bg-surface p-3">
-              <p className="text-xs font-medium text-muted">직접 작성</p>
+            <div className="space-y-3 rounded-xl border border-border-subtle bg-surface p-4">
+              <p className="text-sm font-medium text-muted">직접 작성</p>
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                rows={3}
+                rows={4}
                 autoFocus
                 placeholder="답글을 입력하세요"
-                className="w-full rounded-lg border border-border-subtle bg-surface-2 p-2.5 text-sm outline-none focus:border-accent"
+                className="w-full rounded-xl border border-border-subtle bg-surface-2 p-3.5 text-sm leading-relaxed outline-none focus:border-accent"
               />
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2.5">
                 <button
                   onClick={save}
                   disabled={saving || !draft.trim()}
-                  className="rounded-lg bg-success px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+                  className="flex-1 rounded-xl bg-success py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
                 >
                   {saving ? "등록 중..." : "이대로 답글 등록"}
                 </button>
                 <button
                   onClick={cancelDraft}
                   disabled={saving}
-                  className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs text-muted transition hover:text-foreground disabled:opacity-50"
+                  className="rounded-xl border border-border-subtle px-4 py-2.5 text-sm text-muted transition hover:text-foreground disabled:opacity-50"
                 >
                   취소
                 </button>
@@ -590,27 +619,27 @@ export default function ReviewsPage() {
         )}
       </div>
 
-      <Card>
-        <div className="space-y-3">
-          {reviews.length === 0 ? (
-            <p className="text-sm text-muted">해당하는 리뷰가 없습니다.</p>
-          ) : (
-            reviews.map((r) => (
-              <ReviewCard
-                key={r.id}
-                review={r}
-                styles={styles}
-                onSaved={load}
-                brandName={
-                  brands.length > 1
-                    ? brands.find((b) => b.shop_no === r.platform_shop_no)?.shop_name
-                    : undefined
-                }
-              />
-            ))
-          )}
+      {reviews.length === 0 ? (
+        <Card>
+          <p className="text-sm text-muted">해당하는 리뷰가 없습니다.</p>
+        </Card>
+      ) : (
+        <div className="space-y-5">
+          {reviews.map((r) => (
+            <ReviewCard
+              key={r.id}
+              review={r}
+              styles={styles}
+              onSaved={load}
+              brandName={
+                brands.length > 1
+                  ? brands.find((b) => b.shop_no === r.platform_shop_no)?.shop_name
+                  : undefined
+              }
+            />
+          ))}
         </div>
-      </Card>
+      )}
     </div>
   );
 }

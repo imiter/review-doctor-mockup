@@ -8,6 +8,7 @@ from scrapers.baemin_reviews import (
     _LOAD_MORE_WAIT_MS,
     BaeminScrapeError,
     _consecutive_known_count,
+    extract_image_urls,
     extract_owner_reply,
     fetch_all_reviews,
     map_review,
@@ -22,6 +23,17 @@ _RAW_REVIEW = {
     "menus": [{"name": "양념치킨"}],
     "createdAt": "2026-08-04T21:12:33+09:00",
     "displayStatus": "DISPLAY",
+}
+
+# 실 계정(치밥대장)에서 확인한 실제 사진 첨부 리뷰의 images 구조.
+_REVIEW_IMAGE = {
+    "id": 2026082203004809,
+    "imageUrl": "https://bmreview.cdn.baemin.com/bmreview-qh2e/i/2026/8/22/01m0mxhc2dxcrgzd563drdf0wc.jpg",
+    "displayStatus": "DISPLAY",
+    "sequence": 1,
+    "createdAt": "2026-08-22T23:21:01.945551",
+    "modifiedAt": "2026-08-22T23:21:01.945551",
+    "blockMessage": "",
 }
 
 # 실 계정(치밥대장)에서 확인한 실제 답글 달린 리뷰의 comments 구조.
@@ -55,6 +67,7 @@ def test_map_review_translates_baemin_fields_to_our_schema():
         "customer_nickname": "먹보왕",
         "customer_order_count": 3,
         "menu_summary": "양념치킨",
+        "image_urls": [],
         "created_at": datetime.fromisoformat("2026-08-04T21:12:33+09:00"),
         "store_id": 7,
         "platform_id": 1,
@@ -117,6 +130,38 @@ def test_map_review_status_is_unanswered_when_only_hidden_comment_present():
 def test_map_review_handles_empty_content():
     raw = {**_RAW_REVIEW, "contents": ""}
     assert map_review(raw, store_id=7, platform_id=1, platform_shop_no="14804912")["content"] == ""
+
+
+def test_extract_image_urls_returns_empty_list_when_no_images():
+    assert extract_image_urls(_RAW_REVIEW) == []
+    assert extract_image_urls({**_RAW_REVIEW, "images": []}) == []
+
+
+def test_extract_image_urls_returns_display_image_urls():
+    raw = {**_RAW_REVIEW, "images": [_REVIEW_IMAGE]}
+    assert extract_image_urls(raw) == [_REVIEW_IMAGE["imageUrl"]]
+
+
+def test_extract_image_urls_ignores_hidden_image():
+    hidden = {**_REVIEW_IMAGE, "displayStatus": "HIDDEN"}
+    raw = {**_RAW_REVIEW, "images": [hidden]}
+    assert extract_image_urls(raw) == []
+
+
+def test_extract_image_urls_orders_by_sequence():
+    first = {**_REVIEW_IMAGE, "sequence": 2, "imageUrl": "https://bmreview.cdn.baemin.com/second.jpg"}
+    second = {**_REVIEW_IMAGE, "sequence": 1, "imageUrl": "https://bmreview.cdn.baemin.com/first.jpg"}
+    raw = {**_RAW_REVIEW, "images": [first, second]}
+    assert extract_image_urls(raw) == [
+        "https://bmreview.cdn.baemin.com/first.jpg",
+        "https://bmreview.cdn.baemin.com/second.jpg",
+    ]
+
+
+def test_map_review_includes_image_urls():
+    raw = {**_RAW_REVIEW, "images": [_REVIEW_IMAGE]}
+    mapped = map_review(raw, store_id=7, platform_id=1, platform_shop_no="14804912")
+    assert mapped["image_urls"] == [_REVIEW_IMAGE["imageUrl"]]
 
 
 def test_consecutive_known_count_counts_trailing_known_ids():

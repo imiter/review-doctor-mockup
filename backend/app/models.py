@@ -7,7 +7,8 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -187,6 +188,7 @@ class Review(Base):
     category: Mapped[str] = mapped_column(String(24), default="no_issue")
     is_sensitive: Mapped[bool] = mapped_column(default=False)
     sentiment_conflict: Mapped[bool] = mapped_column(default=False)
+    image_urls: Mapped[list[str]] = mapped_column(ARRAY(Text).with_variant(JSON(), "sqlite"), default=list)
     created_at: Mapped[datetime]
 
     order: Mapped[Order | None] = relationship(back_populates="review")

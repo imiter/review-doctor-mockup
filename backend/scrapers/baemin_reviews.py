@@ -245,6 +245,24 @@ def extract_owner_reply(raw: dict) -> tuple[str, datetime] | None:
     return None
 
 
+def extract_image_urls(raw: dict) -> list[str]:
+    """고객이 리뷰에 첨부한 사진 URL 목록을 배민 응답 순서(sequence)대로 반환한다.
+
+    실 계정 raw JSON 확인 결과(치밥대장, 최근 10건 중 7건에 사진 있음): 각
+    리뷰는 `images` 리스트를 갖고, 원소는 다음 형태다:
+
+        {"id": 2026082203004809,
+         "imageUrl": "https://bmreview.cdn.baemin.com/bmreview-qh2e/i/...jpg",
+         "displayStatus": "DISPLAY", "sequence": 1, ...}
+
+    `comments`(답글)와 동일하게 `displayStatus`가 `DISPLAY`가 아닌 사진(가려짐/
+    삭제)은 실제 화면에도 안 보이므로 걸러낸다.
+    """
+    images = [img for img in (raw.get("images") or []) if img.get("displayStatus") == "DISPLAY"]
+    images.sort(key=lambda img: img.get("sequence", 0))
+    return [img["imageUrl"] for img in images]
+
+
 def map_review(raw: dict, store_id: int, platform_id: int, platform_shop_no: str) -> dict:
     menus = raw.get("menus") or []
     if not menus:
@@ -261,6 +279,7 @@ def map_review(raw: dict, store_id: int, platform_id: int, platform_shop_no: str
         "customer_nickname": raw["memberNickname"],
         "customer_order_count": raw.get("orderCount", 1),
         "menu_summary": menu_summary,
+        "image_urls": extract_image_urls(raw),
         "created_at": datetime.fromisoformat(raw["createdAt"]),
         "store_id": store_id,
         "platform_id": platform_id,

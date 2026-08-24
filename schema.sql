@@ -170,6 +170,7 @@ CREATE TABLE reviews (
                          )),
     is_sensitive         BOOLEAN     NOT NULL DEFAULT FALSE,
     sentiment_conflict   BOOLEAN     NOT NULL DEFAULT FALSE,
+    image_urls           TEXT[]      NOT NULL DEFAULT '{}',  -- 고객이 첨부한 리뷰 사진 URL 목록(배민 images[].imageUrl, displayStatus=DISPLAY만)
     created_at           TIMESTAMPTZ NOT NULL
 );
 
