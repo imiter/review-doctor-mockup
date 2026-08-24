@@ -245,12 +245,13 @@ food_quality/delivery/hygiene/service/price/missing_or_wrong_item/
 no_issue)과 민감도(`is_sensitive`), 별점-텍스트 불일치
 (`sentiment_conflict`)를 분류해 `reviews`에 저장한다 — 답글 생성
 버튼을 누르기 전에도 민감 리뷰 알림(`alerts`, `sensitive_review`
-타입)이 뜨게 하기 위해서다. `category="no_issue"`(불만 신호 없음)인
+타입)이 뜨게 하기 위해서다. 원래 `category="no_issue"`(불만 신호 없음)인
 긍정 리뷰는 기존 4-페르소나 템플릿 경로를 그대로 쓰고, 그 외 문제
-리뷰만 새 RAG 경로(`backend/app/llm/`)를 탄다 — 이 가게의 진짜 답글
-사례(`golden_examples`, `category` 필터로만 검색하고 벡터 DB는 쓰지
-않는다)와 매장별 스타일 규칙(`store_style_profile`, Sonnet이 5~7줄로
-요약해 캐싱)을 few-shot으로 반영해 Sonnet이 생성한다. few-shot
+리뷰만 새 RAG 경로(`backend/app/llm/`)를 탔으나, 2026-08-24부터 no_issue를
+포함한 모든 리뷰가 RAG 경로를 탄다(아래 "no_issue 리뷰도 RAG로 통합" 절
+참고) — 이 가게의 진짜 답글 사례(`golden_examples`, `category` 필터로만
+검색하고 벡터 DB는 쓰지 않는다)와 매장별 스타일 규칙(`store_style_profile`,
+Sonnet이 5~7줄로 요약해 캐싱)을 few-shot으로 반영해 Sonnet이 생성한다. few-shot
 프롬프트에는 "스타일만 참고, 사건 내용 복사 금지" 지시를 반드시
 포함한다(소량 예시의 과적합 방지). 사장님이 AI 초안을 수정하거나
 초안 없이 직접 써서 저장하면 그 답글이 자동으로 새 골든 예시로
@@ -269,6 +270,48 @@ is_synthetic=false` 데이터로만 하며, 순수 AI 생성 모범답안을 학
 온보딩 절)을 이어서 진행한다. `ANTHROPIC_API_KEY`는 Claude Pro 구독과
 무관한 별도 과금 API 키다(console.anthropic.com 발급). 설계 상세는
 `docs/superpowers/specs/2026-08-21-llm-rag-reply-design.md` 참고.
+
+#### no_issue 리뷰도 RAG로 통합 (2026-08-24)
+원래 `category="no_issue"`(칭찬/무난) 리뷰는 무료 4-페르소나 템플릿
+치환만 쓰고 RAG를 타지 않았으나, 실사용 중 별점은 높아도 구체적 피드백이
+담긴 리뷰(예: "기본맛으로 주문했는데 맵지 않아요~ 조금 더 매우면 맛있을
+것 같아요", 4점)에 리뷰 내용과 전혀 무관한 정형 문구("맛있게 드셨다니
+다행입니다")가 그대로 붙는 문제가 확인됐다 — 분류 프롬프트가 "명백한
+불만"이 없으면 전부 no_issue로 묶기 때문에, 템플릿 경로는 이런 리뷰의
+실제 내용을 반영할 방법이 구조적으로 없었다. 사장님이 RAG를 도입한
+목적 자체가 "진짜 내 말투가 반영된 AI 답글"이었는데, 절대다수(실측
+확인 결과 매장 리뷰 756건 중 749건)인 no_issue 리뷰가 전부 페르소나
+템플릿만 타면 그 차별점이 드러나지 않는다는 지적도 있었다. 그래서
+category 분기(`backend/app/routers/reviews.py`의 `generate_reply`)를
+없애고 모든 리뷰가 `generate_ai_reply`(RAG)를 타도록 통합했다.
+`reply_styles.template_high/mid/low` 컬럼은 스키마에 남아있지만(되돌릴
+여지, DROP 안 함) 이제 아무 코드에서도 읽지 않는다 — `_band`/
+`_fill_template` 함수는 삭제했다.
+
+no_issue 리뷰의 RAG 프롬프트(`backend/app/llm/generate.py`의
+`_build_user_message`)는 "불만 유형: no_issue"처럼 없는 불만을 있는
+것처럼 프레이밍하지 않는다 — 대신 "특이 불만 없음(칭찬 또는 중립적인
+리뷰), 구체적 취향/요청이 있으면 반영"으로 안내하고, 문제 리뷰 전용인
+"최근 30일 반복 불만 건수" 안내도 no_issue에는 붙이지 않는다. 골든 예시
+승격 가드(`save_final_reply`의 `if review.category != "no_issue"`)도
+없앴다 — no_issue도 few-shot 예시가 쌓여야 실제 학습된 말투가
+반영되므로, 사장님이 no_issue 리뷰에 직접 쓰거나 수정한 답글도 이제
+`golden_examples`로 승격된다.
+
+이 변경으로 답글 생성 API 호출이 실질적으로 전부 유료 Sonnet 호출이
+된다(기존에는 no_issue 비중이 커서 상당수가 무료 템플릿이었음) — 실비용
+증가를 인지하고 진행했다. 별도 조사에서, 이 분류 기능 자체가 2026-08-21에
+처음 배포됐고 그 이전에 이미 동기화된 과거 리뷰는 증분 동기화 특성상
+재분류되지 않는다는 것도 확인했다(예: 명백한 1점 불만 리뷰가 옛날에
+동기화됐다는 이유만으로 no_issue로 방치됨) — 이 재분류 백필은 아직
+별도로 진행하지 않았고 향후 스코프로 남아있다.
+
+`reply_styles`에 5번째 페르소나 "찐사장님 말투"를 추가했다(2026-08-24)
+— 나머지 4개 페르소나는 여전히 "표면적 톤(이모지/격식)만 조절하는 얇은
+레이어"이고, 이 5번째는 그 톤 레이어 자체를 끄는 옵션이다.
+`tone_instruction`에 "페르소나에 맞춰 임의로 바꾸지 말고 사장님의 실제
+말투를 그대로 따르라"고 명시해, `store_style_profile`/골든 예시 그라운딩
+결과가 페르소나 이모지·격식 지시에 덮이지 않고 그대로 나오게 한다.
 
 ### 배민 정산 상세(수수료/배달비/고객할인/우가클비용) 연동 (예외 허용)
 원래 "매출 분석" 카드의 배민 행은 `platforms.default_commission_rate`(요율)
@@ -419,7 +462,8 @@ baemin_shop_brands, brand_ad_click_metrics, payments.
 - store_style_profile: 매장별 답글 스타일 규칙(5~7줄) 캐싱. 진짜
   골든 예시로만 재생성한다.
 - review_replies: AI 추천 답글 Mock과 사장 최종 답글.
-- reply_styles: 답글 말투 스타일 마스터(발랄 이모지 파티, 진중맨, 무난 요정, 진지한 하이개그).
+- reply_styles: 답글 말투 스타일 마스터(이모지 불맛, 담백한 손맛, 다정한
+  슴슴함, 위트있는 칼칼함, 찐사장님 말투).
 - reply_settings: 가게별 답글 설정(홍보문구, 닉네임/메뉴/가게명 포함 여부, 부정 리뷰 홍보문구 포함 여부).
 - daily_settlements: 일별 매출과 입금을 함께 저장(정산 지연 반영). 배민
   행에는 정산 상세 실측 컬럼 4개(수수료/배달비/고객할인/우가클비용, 전부

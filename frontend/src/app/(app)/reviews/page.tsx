@@ -333,20 +333,36 @@ function ReviewCard({
       ) : (
         <div className="mt-5 space-y-2.5">
           {mode === "idle" && !generateError && (
-            <div className="flex flex-col gap-2.5">
-              <button
-                onClick={startManual}
-                className="w-full rounded-xl border border-border-subtle py-3 text-sm font-medium text-muted transition hover:border-foreground hover:text-foreground"
-              >
-                ✏️ 직접 답글 쓰기
-              </button>
-              <button
-                onClick={generate}
-                disabled={generating || styles.length === 0}
-                className="w-full rounded-xl bg-accent py-3 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
-              >
-                {generating ? "생성 중..." : "✨ AI 추천 답글 보기"}
-              </button>
+            <div className="space-y-2.5">
+              {styles.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted">답글 말투</span>
+                  <select
+                    value={styleId}
+                    onChange={(e) => setStyleId(Number(e.target.value))}
+                    className="flex-1 rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
+                  >
+                    {styles.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className="flex flex-col gap-2.5">
+                <button
+                  onClick={startManual}
+                  className="w-full rounded-xl border border-border-subtle py-3 text-sm font-medium text-muted transition hover:border-foreground hover:text-foreground"
+                >
+                  ✏️ 직접 답글 쓰기
+                </button>
+                <button
+                  onClick={generate}
+                  disabled={generating || styles.length === 0}
+                  className="w-full rounded-xl bg-accent py-3 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+                >
+                  {generating ? "생성 중..." : "✨ AI 추천 답글 보기"}
+                </button>
+              </div>
             </div>
           )}
 
@@ -512,7 +528,7 @@ export default function ReviewsPage() {
     <div className="max-w-4xl space-y-6">
       <div>
         <h1 className="text-xl font-semibold">리뷰 관리</h1>
-        <p className="text-sm text-muted">칭찬 리뷰는 스타일 템플릿으로, 불만 리뷰는 실제 AI가 사장님 말투를 학습해 답글을 생성해요</p>
+        <p className="text-sm text-muted">모든 리뷰에 실제 AI가 사장님 말투를 학습해 답글을 생성해요</p>
         {billing && (
           <p className="text-xs text-muted">
             오늘 답글 생성{" "}

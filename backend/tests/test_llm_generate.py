@@ -87,6 +87,36 @@ def test_generate_ai_reply_injects_sensitive_instruction(db_session, seeded_user
     assert "민감" in captured["user"] or "신중" in captured["user"]
 
 
+def test_generate_ai_reply_omits_complaint_framing_for_no_issue_review(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """no_issue 리뷰는 "불만 유형: no_issue"처럼 없는 불만을 있는 것처럼
+    프레이밍하면 안 된다 — 별점 4점에 "조금 더 매우면 맛있을 것 같아요"
+    처럼 취향/요청이 섞인 리뷰가 무시당하는 문제(2026-08-24)를 고친
+    회귀 테스트."""
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="숯불양념바베큐치킨", rating=4,
+        content="기본맛으로 주문했는데 맵지 않아요~ 조금 더 매우면 맛있을 것 같아요",
+        customer_nickname="원투셋", customer_order_count=1, category="no_issue",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["user"] = user
+        return "..."
+
+    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+
+    generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert "불만 유형: no_issue" not in captured["user"]
+    assert "조금 더 매우면 맛있을 것 같아요" in captured["user"]
+
+
 def test_generate_ai_reply_includes_persona_tone_instruction_when_not_sensitive(db_session, seeded_user, platforms, reply_styles, monkeypatch):
     sid = seeded_user["store"].id
     pid = platforms["baemin"].id

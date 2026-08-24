@@ -1,5 +1,9 @@
-"""리뷰 관리 + 답글 스타일. 긍정 리뷰(category="no_issue")는 템플릿 기반
-Mock, 문제 리뷰는 실제 Claude API 기반 RAG 생성이다."""
+"""리뷰 관리 + 답글 스타일. 모든 리뷰(칭찬/무난 포함)가 실제 Claude API
+기반 RAG 생성을 탄다 — 원래 category="no_issue" 리뷰는 템플릿 치환만
+썼으나, 별점은 높아도 구체적 피드백이 담긴 리뷰에 리뷰 내용과 무관한
+정형 문구가 붙는 문제가 확인돼(2026-08-24) 전부 RAG로 통합했다(사장님
+학습 말투가 항상 반영되도록). 자세한 배경은 app/llm/generate.py 모듈
+docstring 참고."""
 
 from datetime import date, datetime, timedelta, timezone
 
@@ -12,7 +16,7 @@ from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
 from app.llm.generate import generate_ai_reply
 from app.llm.style_profile import refresh_store_style_profile_background
-from app.models import GoldenExample, ReplyStyle, Review, ReviewReply, Store, Subscription, User
+from app.models import GoldenExample, ReplyStyle, Review, ReviewReply, Subscription, User
 from app.plan import effective_plan, replies_used_today
 
 router = APIRouter(tags=["reviews"])
@@ -22,22 +26,6 @@ router = APIRouter(tags=["reviews"])
 def list_reply_styles(db: Session = Depends(get_db)):
     styles = db.scalars(select(ReplyStyle).order_by(ReplyStyle.id)).all()
     return [{"id": s.id, "name": s.name, "description": s.description} for s in styles]
-
-
-def _band(rating: int) -> str:
-    if rating <= 2:
-        return "low"
-    if rating == 3:
-        return "mid"
-    return "high"
-
-
-def _fill_template(template: str, review: Review, store: Store) -> str:
-    return (
-        template.replace("{nickname}", review.customer_nickname)
-        .replace("{menu}", review.menu_summary)
-        .replace("{store}", store.name)
-    )
 
 
 @router.get("/reviews")
@@ -133,19 +121,14 @@ def generate_reply(
                 detail={"message": "오늘 답글 생성 한도를 모두 사용했어요. Pro는 무제한이에요.", "error_code": "reply_limit_exceeded"},
             )
 
-    tone_overridden = False
-    if review.category == "no_issue":
-        template = {"low": style.template_low, "mid": style.template_mid, "high": style.template_high}[_band(review.rating)]
-        content = _fill_template(template, review, review.store)
-    else:
-        try:
-            content = generate_ai_reply(db, review, review.store, style)
-        except Exception:
-            raise HTTPException(
-                503,
-                detail={"message": "AI 답글 생성에 실패했어요. 잠시 후 다시 시도해주세요.", "error_code": "ai_generation_failed"},
-            )
-        tone_overridden = review.is_sensitive or review.sentiment_conflict
+    try:
+        content = generate_ai_reply(db, review, review.store, style)
+    except Exception:
+        raise HTTPException(
+            503,
+            detail={"message": "AI 답글 생성에 실패했어요. 잠시 후 다시 시도해주세요.", "error_code": "ai_generation_failed"},
+        )
+    tone_overridden = review.is_sensitive or review.sentiment_conflict
 
     draft = ReviewReply(
         review_id=review.id, reply_type="ai_draft", style_id=style.id,
@@ -182,24 +165,26 @@ def save_final_reply(
     db.add(reply)
     db.flush()
 
-    if review.category != "no_issue":
-        draft = db.scalar(
-            select(ReviewReply)
-            .where(ReviewReply.review_id == review.id, ReviewReply.reply_type == "ai_draft")
-            .order_by(ReviewReply.created_at.desc())
-        )
-        # 초안이 아예 없이(직접 작성) 저장했거나, 초안과 다르게 고쳐서
-        # 저장했으면 "진짜 사장님 목소리"로 보고 골든 예시로 승격한다.
-        # 초안을 그대로 복붙했으면(AI 산출물 그대로) 승격하지 않는다.
-        if draft is None or draft.content != reply.content:
-            db.add(GoldenExample(
-                store_id=review.store_id, category=review.category,
-                review_text=review.content, reply_text=reply.content,
-                is_manual=True, is_synthetic=False, source="organic",
-                source_review_id=review.id, source_reply_id=reply.id,
-                created_at=datetime.now(timezone.utc),
-            ))
-            background_tasks.add_task(refresh_store_style_profile_background, review.store_id)
+    # category와 무관하게(no_issue 포함) 골든 예시로 승격한다 — 모든 리뷰가
+    # RAG를 타게 되면서 no_issue 카테고리도 few-shot 예시가 쌓여야 실제
+    # 학습된 말투가 반영된다(2026-08-24, app/llm/generate.py 모듈 docstring 참고).
+    draft = db.scalar(
+        select(ReviewReply)
+        .where(ReviewReply.review_id == review.id, ReviewReply.reply_type == "ai_draft")
+        .order_by(ReviewReply.created_at.desc())
+    )
+    # 초안이 아예 없이(직접 작성) 저장했거나, 초안과 다르게 고쳐서
+    # 저장했으면 "진짜 사장님 목소리"로 보고 골든 예시로 승격한다.
+    # 초안을 그대로 복붙했으면(AI 산출물 그대로) 승격하지 않는다.
+    if draft is None or draft.content != reply.content:
+        db.add(GoldenExample(
+            store_id=review.store_id, category=review.category,
+            review_text=review.content, reply_text=reply.content,
+            is_manual=True, is_synthetic=False, source="organic",
+            source_review_id=review.id, source_reply_id=reply.id,
+            created_at=datetime.now(timezone.utc),
+        ))
+        background_tasks.add_task(refresh_store_style_profile_background, review.store_id)
 
     db.commit()
     return {"id": reply.id, "content": reply.content}

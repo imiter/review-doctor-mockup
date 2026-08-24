@@ -14,28 +14,25 @@ def make_review(db_session, store, platforms, rating, content="테스트 리뷰"
     return review
 
 
-def test_generate_reply_fills_template_and_sets_pending(client, db_session, seeded_user, platforms, reply_styles, auth_headers):
+def test_generate_reply_returns_ai_content_and_sets_pending(client, db_session, seeded_user, platforms, reply_styles, auth_headers):
+    """rating=5(기본값으로 category="no_issue")인 리뷰도 이제 template이
+    아니라 generate_ai_reply(RAG)를 탄다 — conftest의 _mock_generate_ai_reply
+    기본값이 응답 내용을 결정한다."""
     review = make_review(db_session, seeded_user["store"], platforms, rating=5)
 
     res = client.post(f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers)
     assert res.status_code == 200
-    body = res.json()
-    assert "먹보" in body["content"]
-    assert "양념치킨" in body["content"]
-    assert "치킨대장" in body["content"]
-    assert "{nickname}" not in body["content"]  # 플레이스홀더가 전부 치환됐는지
+    assert res.json()["content"] == "먹보님 감사합니다! (테스트 기본 응답)"
 
     listed = client.get("/reviews?status=pending", headers=auth_headers).json()
     assert [r["id"] for r in listed] == [review.id]
 
 
-def test_generate_reply_uses_correct_rating_band(client, db_session, seeded_user, platforms, reply_styles, auth_headers):
-    negative = make_review(db_session, seeded_user["store"], platforms, rating=1, content="별로예요")
-    res = client.post(f"/reviews/{negative.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers)
-    assert "죄송합니다" in res.json()["content"]  # template_low 문구
+def test_save_final_reply_transitions_status_and_blocks_duplicate(client, db_session, seeded_user, platforms, reply_styles, auth_headers, monkeypatch):
+    from app.routers import reviews as reviews_mod
 
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
 
-def test_save_final_reply_transitions_status_and_blocks_duplicate(client, db_session, seeded_user, platforms, reply_styles, auth_headers):
     review = make_review(db_session, seeded_user["store"], platforms, rating=5)
 
     save = client.post(f"/reviews/{review.id}/reply", json={"style_id": reply_styles.id, "content": "감사합니다!"}, headers=auth_headers)
@@ -86,7 +83,7 @@ def test_review_without_order_is_listed_and_repliable(client, db_session, seeded
 
     res = client.post(f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers)
     assert res.status_code == 200
-    assert "양념치킨" in res.json()["content"]
+    assert res.json()["content"] == "먹보님 감사합니다! (테스트 기본 응답)"
 
 
 def test_reviews_filtered_by_platform_shop_no(client, db_session, seeded_user, platforms, reply_styles, auth_headers):
@@ -186,10 +183,14 @@ def test_generate_reply_unlimited_for_pro_plan(client, db_session, seeded_user, 
         assert res.status_code == 200
 
 
-def test_generate_reply_uses_template_path_for_no_issue_review(client, db_session, seeded_user, platforms, auth_headers, reply_styles):
+def test_generate_reply_uses_ai_path_for_no_issue_review_too(client, db_session, seeded_user, platforms, auth_headers, reply_styles, monkeypatch):
+    """no_issue(칭찬/무난) 리뷰도 이제 문제 리뷰와 동일하게 generate_ai_reply를
+    타야 한다 — 별점은 높아도 구체적 피드백이 담긴 리뷰를 무시하는 정형
+    템플릿 문제(2026-08-24)를 고친 핵심 회귀 테스트."""
     from datetime import datetime, timezone
 
     from app.models import Review
+    from app.routers import reviews as reviews_mod
 
     review = Review(
         store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
@@ -199,12 +200,14 @@ def test_generate_reply_uses_template_path_for_no_issue_review(client, db_sessio
     db_session.add(review)
     db_session.commit()
 
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply", lambda db, review, store, style: "AI가 만든 답글입니다.")
+
     res = client.post(
         f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
     )
 
     assert res.status_code == 200
-    assert "치킨" in res.json()["content"] or "손님" in res.json()["content"]  # 템플릿 치환 결과
+    assert res.json()["content"] == "AI가 만든 답글입니다."
 
 
 def test_generate_reply_uses_ai_path_for_problem_review(client, db_session, seeded_user, platforms, auth_headers, reply_styles, monkeypatch):
@@ -326,7 +329,10 @@ def test_save_final_reply_does_not_promote_when_final_matches_draft_verbatim(cli
     assert db_session.query(GoldenExample).filter_by(source_review_id=review.id).count() == 0
 
 
-def test_save_final_reply_does_not_promote_no_issue_review(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
+def test_save_final_reply_promotes_no_issue_review_too(client, db_session, seeded_user, platforms, auth_headers, monkeypatch):
+    """no_issue 리뷰도 이제 RAG few-shot 예시가 필요하므로(2026-08-24),
+    직접 작성한 답글이 골든 예시로 승격돼야 한다 — 예전엔 no_issue는
+    템플릿 경로라 승격하지 않았다."""
     from datetime import datetime, timezone
 
     from app.models import GoldenExample, Review
@@ -346,7 +352,10 @@ def test_save_final_reply_does_not_promote_no_issue_review(client, db_session, s
         f"/reviews/{review.id}/reply", json={"style_id": None, "content": "감사합니다!"}, headers=auth_headers,
     )
 
-    assert db_session.query(GoldenExample).count() == 0
+    examples = db_session.query(GoldenExample).all()
+    assert len(examples) == 1
+    assert examples[0].category == "no_issue"
+    assert examples[0].reply_text == "감사합니다!"
 
 
 def test_list_reviews_includes_category_and_sensitivity(client, db_session, seeded_user, platforms, auth_headers):

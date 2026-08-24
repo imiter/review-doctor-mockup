@@ -1,5 +1,19 @@
-"""문제 리뷰(category != "no_issue")에 대한 RAG 기반 답글 생성. 검색
-(app.llm.rag)과 생성(Sonnet)을 조합한다 — 벡터 검색은 쓰지 않는다.
+"""모든 리뷰(칭찬/무난 포함)에 대한 RAG 기반 답글 생성. 검색(app.llm.rag)과
+생성(Sonnet)을 조합한다 — 벡터 검색은 쓰지 않는다.
+
+원래는 category == "no_issue"(칭찬/무난) 리뷰만 무료 템플릿 치환으로
+처리하고 이 RAG 경로는 문제 리뷰에만 탔다. 그런데 실사용 중 "기본맛으로
+주문했는데 맵지 않아요, 조금 더 매우면 맛있을 것 같아요"처럼 별점은
+높지만 구체적인 피드백이 담긴 리뷰에도 템플릿이 리뷰 내용과 무관한
+정형 문구("맛있게 드셨다니 다행입니다")를 그대로 붙이는 문제가
+확인됐다(2026-08-24) — 카테고리 분류가 "명백한 불만"이 아니면 전부
+no_issue로 묶이기 때문에, 템플릿 경로는 이런 리뷰의 구체적 내용을 전혀
+반영하지 못한다. 그래서 no_issue를 포함한 모든 리뷰가 이 RAG 경로를
+타도록 바꿨다 — 사장님이 실제로 답글을 원하는 이상 항상 사장님의 학습된
+말투로 응답하는 게 "찐사장님 말투"라는 이 기능의 원래 목적에 맞다는
+판단(사용자 확인). reply_styles.template_high/mid/low 컬럼은 이제 이
+경로에서 더 이상 읽지 않는다 — 컬럼 자체는 되돌릴 여지를 남기려고 스키마에
+그대로 뒀다(DROP 안 함).
 
 페르소나(reply_styles.tone_instruction)는 표면적 톤(이모지 사용량, 격식
 수준)만 조절하는 얇은 레이어다 — 원인 설명·사과의 실질적 근거는 항상
@@ -58,15 +72,20 @@ def _build_system_prompt(store: Store, style_rules: str, examples, tone_instruct
 
 
 def _build_user_message(review: Review, category_label: str, repeat_count: int) -> str:
-    lines = [
-        f"별점: {review.rating}",
-        f"불만 유형: {category_label}",
-        f'내용: "{review.content}"',
-        f"이 고객의 누적 주문 횟수: {review.customer_order_count}회",
-    ]
+    lines = [f"별점: {review.rating}"]
+    if review.category == "no_issue":
+        # "불만 유형: no_issue"라고 그대로 넣으면 모델이 없는 불만을 억지로
+        # 찾아 사과하게 될 수 있다 — 칭찬/무난 리뷰는 불만 프레이밍 자체를
+        # 빼고, 리뷰에 실제로 담긴 요청·취향(예: "더 매웠으면")이 있으면
+        # 그것만 자연스럽게 반영하도록 안내한다.
+        lines.append("특이 불만 없음(칭찬 또는 중립적인 리뷰). 리뷰에 구체적인 취향/요청이 담겨있으면 자연스럽게 반영하고, 없으면 감사 인사 위주로 답하세요.")
+    else:
+        lines.append(f"불만 유형: {category_label}")
+    lines.append(f'내용: "{review.content}"')
+    lines.append(f"이 고객의 누적 주문 횟수: {review.customer_order_count}회")
     if review.customer_order_count > 1:
         lines.append("재방문 고객이니 자연스럽게 반영하세요.")
-    if repeat_count > 1:
+    if review.category != "no_issue" and repeat_count > 1:
         lines.append(f"이 유형 불만이 최근 30일간 {repeat_count}건째입니다 — 반복 문제임을 인지하되 변명처럼 들리지 않게 주의하세요.")
     if review.is_sensitive:
         lines.append("위생/안전 관련 민감 사안입니다. 섣부른 원인 추정이나 과도한 변명 없이, 진지하게 사과하고 구체적 조치(연락처 안내 등)를 제시하세요.")
