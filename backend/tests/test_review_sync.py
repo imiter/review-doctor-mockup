@@ -2250,6 +2250,56 @@ def test_sync_creates_sensitive_alert_for_flagged_review(db_session, sync_setup,
     assert "확인" in alert.message
 
 
+def test_sync_creates_negative_review_alert_for_low_rating(db_session, sync_setup, monkeypatch):
+    """seed.sql은 orders.id = reviews.order_id로 조인해 negative_review
+    알림을 만들었는데, 실 배민 리뷰는 order_id가 항상 NULL이라 이 조인에
+    걸리지 않아 실 연동 이후 1~2점 리뷰가 들어와도 알림이 전혀 안
+    만들어지고 있었다(2026-08-25 실측 확인). 리뷰가 실제로 저장되는
+    시점에 직접 만들도록 고친 회귀 테스트."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Alert
+
+    job, conn = sync_setup
+    raw_low_rating = {
+        "id": 1005, "rating": 1.0, "contents": "다신 안 시켜요", "memberNickname": "화난고객",
+        "orderCount": 1, "menus": [{"name": "메뉴"}], "createdAt": "2026-08-05T10:00:00+09:00",
+        "displayStatus": "DISPLAY",
+    }
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [raw_low_rating])
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="food_quality", is_sensitive=False, sentiment_conflict=False),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    alert = db_session.query(Alert).filter_by(store_id=job.store_id, alert_type="negative_review").one()
+    assert "1점" in alert.message
+    assert "다신 안 시켜요" in alert.message
+
+
+def test_sync_does_not_create_negative_review_alert_for_high_rating(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Alert
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert db_session.query(Alert).filter_by(store_id=job.store_id, alert_type="negative_review").count() == 0
+
+
 def test_sync_falls_back_to_default_category_when_classification_fails(db_session, sync_setup, monkeypatch):
     import app.review_sync as review_sync_mod
 

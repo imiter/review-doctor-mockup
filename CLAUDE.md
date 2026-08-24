@@ -493,8 +493,13 @@ baemin_shop_brands, brand_ad_click_metrics, payments.
   스크롤하며 수집한 point_label/거리/순위/스캔개수/위 광고개수. 경쟁 가게
   CPC는 실측 불가능해 이 종류에는 저장하지 않는다(NULL).
 - alerts: 부정 리뷰, 미답변, 순위 하락, 민감 리뷰(sensitive_review) 알림.
-  민감 리뷰는 실제로 동적 생성되고(review_sync.py), 나머지 세 타입은
-  여전히 seed.sql Mock이다(실동작화는 별도 스코프).
+  민감 리뷰와 부정 리뷰(negative_review, 별점 2점 이하)는 실제로 동적
+  생성되고(review_sync.py), 나머지 두 타입(미답변/순위 하락)은 여전히
+  seed.sql Mock이다(실동작화는 별도 스코프). 부정 리뷰는 원래 seed.sql이
+  orders.id = reviews.order_id로 조인해 만들었으나, 실 배민 리뷰는
+  order_id가 항상 NULL이라 이 조인에 걸리지 않아 실 연동 이후로는 전혀
+  안 만들어지고 있었다(2026-08-25 실측 확인, review_sync.py에서 직접
+  생성하도록 수정).
 - social_accounts: 소셜 로그인(카카오 등) 연결. provider 문자열 기반이라 확장 대비.
 - signup_verifications: 이메일 회원가입 인증 코드(Resend 실발송). users를
   참조하지 않는다 — 인증이 끝난 뒤에만 계정이 생성되기 때문. purpose 컬럼은

@@ -337,6 +337,19 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                         message=f"민감한 리뷰가 감지됐습니다: {review.menu_summary} 관련 — 우선 확인이 필요합니다",
                         created_at=datetime.now(timezone.utc),
                     ))
+                if review.rating <= 2:
+                    # seed.sql은 orders.id = reviews.order_id로 조인해 부정
+                    # 리뷰 알림을 만들었는데, 실 배민 리뷰는 order_id가 항상
+                    # NULL이라(리뷰 API와 주문 API를 연결할 공통 키 없음)
+                    # 이 조인에 절대 걸리지 않는다 — 그래서 실 연동 이후로는
+                    # 1~2점 리뷰가 들어와도 알림이 전혀 안 만들어지고
+                    # 있었다(2026-08-25 실측 확인). 리뷰가 실제로 DB에
+                    # 들어오는 이 시점에 직접 만들도록 고쳤다.
+                    db.add(Alert(
+                        store_id=job.store_id, alert_type="negative_review",
+                        message=f'{review.rating}점 부정 리뷰가 등록되었습니다: "{review.content[:30]}"',
+                        created_at=datetime.now(timezone.utc),
+                    ))
                 owner_reply = extract_owner_reply(raw)
                 if owner_reply is not None:
                     reply_content, replied_at = owner_reply
