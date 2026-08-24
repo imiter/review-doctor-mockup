@@ -41,7 +41,7 @@
 - Consumes: 없음 (스키마/시드 레벨 변경).
 - Produces: `ReplyStyle.tone_instruction: str` — Task 2(`generate_ai_reply`)와 Task 3(라우터)이 `style.tone_instruction`으로 읽는다. `conftest.py`의 `reply_styles` fixture가 `tone_instruction` 필드를 갖게 되어 Task 3의 테스트가 그대로 재사용한다.
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `backend/tests/test_llm_models.py` 파일 맨 위 임포트 줄에 `ReplyStyle`을 추가하고(기존 `from app.models import GoldenExample, OnboardingScenario, Review, StoreStyleProfile`를 `from app.models import GoldenExample, OnboardingScenario, ReplyStyle, Review, StoreStyleProfile`로), 파일 맨 아래에 아래 테스트를 추가한다:
 
@@ -61,12 +61,12 @@ def test_reply_style_tone_instruction_round_trips(db_session):
     assert row.tone_instruction == "이모지 없이 담백하게 작성하세요."
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `cd backend && /Users/kunhee/Developer/review-docter/backend/.venv/bin/python -m pytest tests/test_llm_models.py -v`
 Expected: FAIL — `TypeError: 'tone_instruction' is an invalid keyword argument for ReplyStyle`
 
-- [ ] **Step 3: `models.py`에 컬럼 추가**
+- [x] **Step 3: `models.py`에 컬럼 추가**
 
 `backend/app/models.py`의 `ReplyStyle` 클래스를 아래로 교체:
 
@@ -83,7 +83,7 @@ class ReplyStyle(Base):
     tone_instruction: Mapped[str] = mapped_column(Text)
 ```
 
-- [ ] **Step 4: `schema.sql` 갱신**
+- [x] **Step 4: `schema.sql` 갱신**
 
 `schema.sql`의 `CREATE TABLE reply_styles` 블록(현재 아래 내용)을:
 
@@ -112,7 +112,7 @@ CREATE TABLE reply_styles (
 );
 ```
 
-- [ ] **Step 5: `seed.sql` 갱신**
+- [x] **Step 5: `seed.sql` 갱신**
 
 `seed.sql`의 `-- 6. reply_styles` INSERT 블록(현재 4개 페르소나, 5개 값씩) 전체를 아래로 교체:
 
@@ -156,7 +156,7 @@ INSERT INTO reply_styles (name, description, template_high, template_mid, templa
 -- 7. reply_settings — 가게별 답글 설정 (1호점: 이모지 불맛, 2호점: 담백한 손맛)
 ```
 
-- [ ] **Step 6: `conftest.py`의 `reply_styles` fixture 갱신**
+- [x] **Step 6: `conftest.py`의 `reply_styles` fixture 갱신**
 
 `backend/tests/conftest.py`의 `reply_styles` fixture를:
 
@@ -191,17 +191,17 @@ def reply_styles(db_session):
     return style
 ```
 
-- [ ] **Step 7: 테스트 통과 확인**
+- [x] **Step 7: 테스트 통과 확인**
 
 Run: `cd backend && /Users/kunhee/Developer/review-docter/backend/.venv/bin/python -m pytest tests/test_llm_models.py -v`
 Expected: PASS (전체)
 
-- [ ] **Step 8: 전체 스위트 회귀 확인**
+- [x] **Step 8: 전체 스위트 회귀 확인**
 
 Run: `cd backend && /Users/kunhee/Developer/review-docter/backend/.venv/bin/python -m pytest -q`
 Expected: 이전에 통과하던 테스트가 전부 그대로 통과한다(이 시점에는 아직 `generate_ai_reply`/라우터가 `style`을 요구하지 않으므로 실패가 없어야 한다). 만약 `test_reviews.py`나 `test_llm_generate.py`에서 `reply_styles` fixture를 쓰는 테스트가 실패한다면, 그 테스트가 `ReplyStyle(...)`을 직접 생성하면서 `tone_instruction`을 빠뜨린 것이니 Task 2/3에서 마저 고친다(지금 이 태스크에서는 fixture 기반 테스트만 통과하면 충분).
 
-- [ ] **Step 9: 커밋**
+- [x] **Step 9: 커밋**
 
 ```bash
 git add schema.sql backend/app/models.py seed.sql backend/tests/conftest.py backend/tests/test_llm_models.py
@@ -220,7 +220,7 @@ git commit -m "feat: reply_styles에 tone_instruction 컬럼 추가 + 세일즈�
 - Consumes: `ReplyStyle.tone_instruction: str`(Task 1).
 - Produces: `generate_ai_reply(db: Session, review: Review, store: Store, style: ReplyStyle) -> str` — 시그니처가 `style` 파라미터를 새로 받는다. Task 3(라우터)이 이 새 시그니처로 호출한다.
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `backend/tests/test_llm_generate.py`의 기존 3개 테스트 전부 `generate.generate_ai_reply(db_session, review, seeded_user["store"])` 호출에 4번째 인자가 빠져 있다. 파일 전체를 아래로 교체한다(기존 3개 테스트에 `reply_styles` fixture와 4번째 인자를 추가하고, 새 테스트 4개를 더한다):
 
@@ -419,12 +419,12 @@ def test_generate_ai_reply_grounding_present_even_when_tone_overridden(db_sessio
     assert "항상 재방문을 유도한다" in captured["system"]
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `cd backend && /Users/kunhee/Developer/review-docter/backend/.venv/bin/python -m pytest tests/test_llm_generate.py -v`
 Expected: FAIL — `TypeError: generate_ai_reply() takes 3 positional arguments but 4 were given` (기존 3개), 새 테스트들은 `AttributeError: module 'app.llm.generate' has no attribute '_SENSITIVE_TONE_OVERRIDE'` 등으로 실패
 
-- [ ] **Step 3: `generate.py` 구현**
+- [x] **Step 3: `generate.py` 구현**
 
 `backend/app/llm/generate.py` 전체를 아래로 교체:
 
@@ -523,12 +523,12 @@ def generate_ai_reply(db: Session, review: Review, store: Store, style: ReplySty
     return client.call_sonnet(system_prompt, user_message, max_tokens=800)
 ```
 
-- [ ] **Step 4: 테스트 통과 확인**
+- [x] **Step 4: 테스트 통과 확인**
 
 Run: `cd backend && /Users/kunhee/Developer/review-docter/backend/.venv/bin/python -m pytest tests/test_llm_generate.py -v`
 Expected: PASS (전체 7개)
 
-- [ ] **Step 5: 커밋**
+- [x] **Step 5: 커밋**
 
 ```bash
 git add backend/app/llm/generate.py backend/tests/test_llm_generate.py
@@ -549,7 +549,7 @@ git commit -m "feat: generate_ai_reply에 페르소나 톤 레이어 + 민감 �
 
 **주의**: `test_reviews.py`에 이미 `reviews_mod.generate_ai_reply`를 `monkeypatch`하는 테스트가 2개 있고(`test_generate_reply_uses_ai_path_for_problem_review`, `test_generate_reply_returns_503_with_korean_error_when_ai_generation_fails`), 둘 다 옛 3-인자 시그니처(`lambda db, review, store: ...`)로 patch돼 있다. 라우터가 4번째 인자(`style`)를 넘기도록 바뀌면 이 두 lambda가 `TypeError`를 던지므로, 이번 태스크에서 반드시 같이 고쳐야 한다.
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `backend/tests/test_reviews.py`에서 아래 두 곳을 수정하고, 새 테스트 3개를 추가한다.
 
@@ -656,12 +656,12 @@ def test_generate_reply_tone_overridden_false_for_no_issue_review(client, db_ses
     assert res.json()["tone_overridden"] is False
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `cd backend && /Users/kunhee/Developer/review-docter/backend/.venv/bin/python -m pytest tests/test_reviews.py -v`
 Expected: FAIL — 새 3개 테스트는 `KeyError: 'tone_overridden'`, 기존 2개(이미 고친) 테스트는 라우터가 아직 3-인자로 호출하므로 오히려 지금은 통과할 수 있음(다음 스텝에서 라우터를 바꾸면 일관됨) — 어느 쪽이든 최종적으로 Step 4에서 전체가 PASS하면 된다.
 
-- [ ] **Step 3: 라우터 구현**
+- [x] **Step 3: 라우터 구현**
 
 `backend/app/routers/reviews.py`의 `generate_reply` 함수(113~155번째 줄) 중 아래 부분을:
 
@@ -717,17 +717,17 @@ Expected: FAIL — 새 3개 테스트는 `KeyError: 'tone_overridden'`, 기존 2
     return {"content": content, "style_id": style.id, "tone_overridden": tone_overridden}
 ```
 
-- [ ] **Step 4: 테스트 통과 확인**
+- [x] **Step 4: 테스트 통과 확인**
 
 Run: `cd backend && /Users/kunhee/Developer/review-docter/backend/.venv/bin/python -m pytest tests/test_reviews.py -v`
 Expected: PASS (전체)
 
-- [ ] **Step 5: 전체 스위트 회귀 확인**
+- [x] **Step 5: 전체 스위트 회귀 확인**
 
 Run: `cd backend && /Users/kunhee/Developer/review-docter/backend/.venv/bin/python -m pytest -q`
 Expected: 전부 PASS, 새로운 실패 없음
 
-- [ ] **Step 6: 커밋**
+- [x] **Step 6: 커밋**
 
 ```bash
 git add backend/app/routers/reviews.py backend/tests/test_reviews.py
@@ -747,7 +747,7 @@ git commit -m "feat: generate-reply 라우터가 style을 RAG에 전달하고 to
 
 이 태스크는 자동화 테스트가 없다 — "구현 → 빌드/린트 확인 → 수동 체크리스트" 순서로 진행한다.
 
-- [ ] **Step 1: `ReviewCard` 컴포넌트 전체를 아래 코드로 교체**
+- [x] **Step 1: `ReviewCard` 컴포넌트 전체를 아래 코드로 교체**
 
 `frontend/src/app/(app)/reviews/page.tsx`에서 `function ReviewCard({...`부터 그 함수의 닫는 `}`까지(현재 114번째 줄부터 376번째 줄까지) 전체를, 그리고 그 바로 앞에 sessionStorage 헬퍼 3개 함수를 추가한다.
 
@@ -1078,12 +1078,12 @@ function ReviewCard({
 
 이 교체로 바뀌는 부분: 모듈 최상단에 `loadSavedDraft`/`saveDraftToStorage`/`clearSavedDraft` 3개 헬퍼 함수 추가, `mode`/`draft`의 초기값이 `sessionStorage`를 먼저 확인하도록 변경, 새 상태 `toneOverridden` 추가, `mode`/`draft` 변경 시마다 `sessionStorage`에 저장하는 `useEffect` 추가, `generate()`가 `tone_overridden`을 읽어 상태에 반영, `save()` 성공 시 `clearSavedDraft` 호출, AI 패널에 민감 리뷰 안내 배지 추가. 헤더, `review.final_reply` 블록, `saveSecondary`, `startManual`, `cancelDraft`, "직접 쓰기" 패널의 나머지는 기존 그대로다.
 
-- [ ] **Step 2: 빌드로 타입 오류 확인**
+- [x] **Step 2: 빌드로 타입 오류 확인**
 
 Run: `cd frontend && npm run build`
 Expected: 에러 없이 빌드 성공.
 
-- [ ] **Step 3: 린트 확인**
+- [x] **Step 3: 린트 확인**
 
 Run: `cd frontend && npm run lint`
 Expected: 이 파일에서 새로 생긴 에러/경고가 없어야 한다(기존에 이미 있던 다른 파일들의 `react-hooks/set-state-in-effect` 계열 경고는 무시).
@@ -1100,7 +1100,17 @@ Run: `cd frontend && npm run dev` (백엔드도 `ANTHROPIC_API_KEY`가 설정된
 - 위 상태에서 페이지를 새로고침해도 내용이 복구되는지
 - "이대로 답글 등록" 성공 후에는 그 리뷰의 sessionStorage 항목이 지워져서, 이후 우연히 같은 키로 다른 상태가 복구되지 않는지(개발자도구 Application 탭에서 `review-draft-{id}` 키가 저장 후 사라지는지 확인)
 
-- [ ] **Step 5: 커밋**
+**진행 상황 (2026-08-24, 세션 재개 후 Playwright로 검증)**: ANTHROPIC_API_KEY 없이도
+확인 가능한 항목은 전부 확인 완료 — 격리된 Postgres(schema.sql/seed.sql 적용) +
+백엔드(8002)/프론트(3001)를 따로 띄워 실제 브라우저(Playwright)로 (1) 페르소나
+4개 이름 정상 표시, (2) 직접 쓰기 초안이 필터 토글 후에도 복구, (3) 새로고침 후에도
+복구, (4) "이대로 답글 등록" 성공 후 해당 `review-draft-{id}` 키가 sessionStorage에서
+삭제되는 것까지 전부 확인됨. **아직 못 한 것**: 민감 리뷰 톤 override 배지와
+페르소나별 실제 톤 차이(이모지 사용량 등)는 실제 Claude API 호출이 필요한데, 이
+환경에는 `ANTHROPIC_API_KEY`가 없어 검증 불가 — 이 부분은 실 키를 가진 사용자가
+직접 브라우저에서 확인해야 한다(비용 발생 항목이라 임의로 키를 발급/사용하지 않음).
+
+- [x] **Step 5: 커밋**
 
 ```bash
 git add "frontend/src/app/(app)/reviews/page.tsx"
