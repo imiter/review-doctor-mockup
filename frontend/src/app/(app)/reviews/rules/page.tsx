@@ -51,8 +51,9 @@ export default function ReplyRulesPage() {
       <div>
         <h1 className="text-xl font-semibold">답글 규칙 설정</h1>
         <p className="text-sm text-muted">
-          자동 답글을 켜도 실제로 답글이 자동 등록되지 않습니다 (Mock) — 리뷰 관리 화면에서
-          조건에 맞는 리뷰에 안내 배지만 표시됩니다.
+          자동 답글을 켜면 새로 들어오는 5점 리뷰에 한해 사람 확인 없이 실제 배민에 답글이
+          자동으로 등록됩니다. 아직 안전을 위해 5점 리뷰만 지원해요 — 4점 이하는 이 설정과
+          무관하게 자동 등록되지 않습니다.
         </p>
       </div>
 
@@ -76,14 +77,16 @@ export default function ReplyRulesPage() {
           <div className="mt-5 space-y-5 border-t border-border-subtle pt-5">
             <div>
               <label className="mb-2 block text-xs text-muted">
-                몇 점 이상 리뷰에 자동 답글을 적용할까요?
+                몇 점 이상 리뷰에 자동 답글을 적용할까요? (지금은 5점만 지원)
               </label>
               <div className="flex gap-2">
                 {[1, 2, 3, 4, 5].map((n) => (
                   <button
                     key={n}
+                    disabled={n !== 5}
+                    title={n !== 5 ? "아직 5점 리뷰만 지원해요" : undefined}
                     onClick={() => save({ auto_reply_min_rating: n })}
-                    className={`flex-1 rounded-lg py-2 text-sm font-medium transition ${
+                    className={`flex-1 rounded-lg py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-30 ${
                       settings.auto_reply_min_rating === n
                         ? "bg-accent text-white"
                         : "border border-border-subtle text-muted hover:text-foreground"
@@ -94,7 +97,7 @@ export default function ReplyRulesPage() {
                 ))}
               </div>
               <p className="mt-2 text-xs text-muted">
-                현재: {settings.auto_reply_min_rating}점 이상 리뷰만 자동 답글 대상
+                현재: 5점 리뷰만 자동 답글 대상 (4점 이하는 안전을 위해 아직 미지원)
               </p>
             </div>
 

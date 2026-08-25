@@ -2300,6 +2300,176 @@ def test_sync_does_not_create_negative_review_alert_for_high_rating(db_session, 
     assert db_session.query(Alert).filter_by(store_id=job.store_id, alert_type="negative_review").count() == 0
 
 
+def _enable_auto_reply(db_session, store_id, style_id):
+    from app.models import ReplySetting
+    db_session.add(ReplySetting(
+        store_id=store_id, style_id=style_id, promo_text="", include_nickname=True,
+        include_menu=True, include_store_name=True, promo_on_negative=False,
+        auto_reply_enabled=True, auto_reply_min_rating=1,
+    ))
+    db_session.commit()
+
+
+def test_sync_auto_replies_to_five_star_review_when_enabled(db_session, sync_setup, reply_styles, monkeypatch):
+    """자동 답글이 켜져 있으면 별점 5점 리뷰는 실제로 AI 생성 + 배민 제출까지
+    자동으로 실행되고, review.status가 answered로 바뀌어야 한다."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])  # rating 5.0
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "감사합니다!")
+    submit_calls = []
+    monkeypatch.setattr(
+        review_sync_mod, "submit_reply",
+        lambda page, shop_no, external_review_id, content: submit_calls.append((shop_no, external_review_id, content)),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review.status == "answered"
+    assert submit_calls == [(fake_session.shop_no, _RAW_1["id"], "감사합니다!")]
+    final_reply = db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="final").one()
+    assert final_reply.content == "감사합니다!"
+
+
+def test_sync_does_not_auto_reply_below_rating_floor(db_session, sync_setup, reply_styles, monkeypatch):
+    """auto_reply_min_rating을 1로 낮게 설정해도, 지금은 별점 5점 미만은
+    자동 답글 대상이 아니다(하드코딩된 안전장치, 2026-08-25)."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_2])  # rating 4.0
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_2["id"]).one()
+    assert review.status == "unanswered"
+
+
+def test_sync_does_not_auto_reply_when_disabled(db_session, sync_setup, monkeypatch):
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Review
+
+    job, conn = sync_setup
+    # auto_reply_enabled 설정을 아예 만들지 않음(기본 상태) — reply_settings가
+    # 없으면 auto_reply_style이 None으로 남아 자동 답글이 시도되지 않는다.
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review.status == "unanswered"
+
+
+def test_sync_does_not_auto_reply_when_owner_already_replied(db_session, sync_setup, reply_styles, monkeypatch):
+    """배민에 이미 사장님 답글이 달려있는 리뷰(_RAW_ALREADY_REPLIED)는
+    자동 답글을 다시 달면 안 된다(이중 답글 방지)."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_ALREADY_REPLIED])
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
+
+    sync_reviews_for_job(job, conn, db_session)  # should not raise
+
+
+def test_sync_auto_reply_failure_does_not_fail_whole_job(db_session, sync_setup, reply_styles, monkeypatch):
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Review
+    from scrapers.baemin_reply_submit import BaeminReplySubmitError
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "감사합니다!")
+
+    def _raise(*a, **kw):
+        raise BaeminReplySubmitError("네트워크 오류")
+
+    monkeypatch.setattr(review_sync_mod, "submit_reply", _raise)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review.status == "unanswered"  # 실패했으니 답변 안 된 채로 남는다
+    assert job.status == "success"  # 리뷰 동기화 자체는 성공
+    assert "자동 답글 실패" in job.error_message
+
+
+def test_sync_auto_reply_does_not_promote_to_golden_examples(db_session, sync_setup, reply_styles, monkeypatch):
+    """자동 답글은 사람이 한 번도 검토하지 않은 순수 AI 산출물이라
+    golden_examples로 승격하면 안 된다(순환 오염 방지)."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import GoldenExample
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "감사합니다!")
+    monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: None)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert db_session.query(GoldenExample).count() == 0
+
+
 def test_sync_falls_back_to_default_category_when_classification_fails(db_session, sync_setup, monkeypatch):
     import app.review_sync as review_sync_mod
 

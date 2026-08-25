@@ -21,14 +21,19 @@ from app.models import (
     DailySettlement,
     Order,
     RepurchaseMetric,
+    ReplySetting,
+    ReplyStyle,
     Review,
     ReviewReply,
     ReviewSyncJob,
+    Store,
     StorePlatformConnection,
 )
 from app.llm.classify import ClassificationError, classify_review
+from app.llm.generate import generate_ai_reply
 from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics, fetch_cpc_booking, map_click_metrics_by_date
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
+from scrapers.baemin_reply_submit import BaeminReplySubmitError, submit_reply
 from scrapers.baemin_reviews import BaeminScrapeError, extract_owner_reply, fetch_all_reviews, map_review
 from scrapers.baemin_stats import (
     ORDER_BACKFILL_PAGE_CLICKS,
@@ -265,6 +270,24 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         select(Review.external_review_id).where(Review.external_review_id.isnot(None))
     ).all())
 
+    # 자동 답글: reply_settings.auto_reply_enabled가 켜져 있으면 새로 들어온
+    # 리뷰에 실제로 배민 답글을 자동 제출한다(2026-08-25, 사용자 확인).
+    # auto_reply_min_rating 설정값과 무관하게 지금은 별점 5점으로만
+    # 하드코딩해서 제한한다 — AI 생성과 실제 배민 제출이 사람 검토 없이
+    # 자동으로 나가는 첫 기능이라, 가장 안전한 순수 긍정 리뷰로만
+    # 시작한다(설정 화면의 auto_reply_min_rating을 낮춰도 이 하한을
+    # 넘지 못한다). 매장별로 한 번만 조회해 리뷰 루프 안에서 재사용한다.
+    _AUTO_REPLY_MIN_RATING_FLOOR = 5
+    reply_settings = db.scalar(select(ReplySetting).where(ReplySetting.store_id == job.store_id))
+    auto_reply_style = None
+    if reply_settings is not None and reply_settings.auto_reply_enabled:
+        auto_reply_style = db.get(ReplyStyle, reply_settings.style_id)
+    store = db.get(Store, job.store_id)
+    # 자동 답글 실패는 stats_errors와 같은 종류의 "부분 실패"다 — 이 리뷰
+    # 자체는 이미 정상 저장됐으므로 shop 전체를 실패로 보면 안 되고, 실패
+    # 사실만 조용히 묻히지 않게 모아서 job.error_message에 남긴다.
+    auto_reply_errors: list[str] = []
+
     # 배민 리뷰 id(external_review_id)는 매장(브랜드)이 아니라 계정 전체에서
     # 유일하므로, 중복 판별 집합은 매장 루프 전체에 걸쳐 하나만 공유한다.
     total_fetched = 0
@@ -357,6 +380,26 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                         review_id=review.id, reply_type="final", style_id=None,
                         content=reply_content, created_at=replied_at,
                     ))
+                elif auto_reply_style is not None and review.rating >= _AUTO_REPLY_MIN_RATING_FLOOR:
+                    try:
+                        content = generate_ai_reply(db, review, store, auto_reply_style)
+                        submit_reply(session.page, shop_no, review.external_review_id, content)
+                        db.add(ReviewReply(
+                            review_id=review.id, reply_type="final", style_id=auto_reply_style.id,
+                            content=content, created_at=datetime.now(timezone.utc),
+                        ))
+                        review.status = "answered"
+                        # golden_examples로 승격하지 않는다 — 사람이 한 번도
+                        # 검토하지 않은 순수 AI 산출물이다. save_final_reply(사장님이
+                        # 직접 등록 버튼을 누른 경로)와 달리 여기서 승격하면
+                        # "AI 산출물을 AI가 다시 학습하는" 순환 오염이 된다
+                        # (golden_examples.is_manual=true는 사람이 직접 쓰거나
+                        # 승인한 것이라는 전제 — CLAUDE.md 참고).
+                    except Exception as e:
+                        # 자동 답글 실패가 리뷰 저장 자체를 되돌리지 않는다 —
+                        # 리뷰는 이미 정상 동기화됐고, 다음에 사장님이 수동으로
+                        # 답글을 달 수 있다(review.status는 unanswered로 남음).
+                        auto_reply_errors.append(f"리뷰 {review.id}(별점 {review.rating}): {e}")
                 existing_ids.add(m["external_review_id"])
                 total_inserted += 1
 
@@ -693,6 +736,8 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         )
     if stats_errors:
         messages.append(f"매출/재주문율/입금 동기화 실패: {'; '.join(stats_errors)}")
+    if auto_reply_errors:
+        messages.append(f"자동 답글 실패: {'; '.join(auto_reply_errors)}")
     if messages:
         job.error_message = " / ".join(messages)
     job.finished_at = datetime.now(timezone.utc)
