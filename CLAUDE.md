@@ -360,7 +360,8 @@ no_issue RAG 통합 이후 실사용 스팟체크 중, 한 배민 계정에 브�
 
 동작 방식: `review_sync.py`가 새 리뷰를 저장하는 시점에(sensitive_review/
 negative_review 알림과 같은 자리) `reply_settings.auto_reply_enabled`가
-켜져 있고 별점이 5점이면 `generate_ai_reply`로 답글을 생성해
+켜져 있고 별점이 5점이면(아래 게이트 강화 이후로는 분류 결과까지 통과해야
+함) `generate_ai_reply`로 답글을 생성해
 `backend/scrapers/baemin_reply_submit.py`의 `submit_reply`로 실제
 배민에 제출한다. 이미 배민에 사장님 답글이 달려있는 리뷰(가져올 때
 `extract_owner_reply`로 감지)는 건드리지 않는다(이중 답글 방지). 성공하면
@@ -395,6 +396,27 @@ organic하게 서명된 요청을 보낸다(다른 배민 스크래핑과 동일
 위임 경로를 따로 만들 필요가 없었다. 다만 이 말은 곧 **크롤 워커
 프로세스가 떠 있어야만** 자동 답글이 실제로 나간다는 뜻이다 — Railway
 백엔드 배포만으로는 부족하다.
+
+#### 안전 게이트 강화: 별점만으로는 부족함 (2026-08-26)
+원래 자동 제출 조건은 `review.rating >= _AUTO_REPLY_MIN_RATING_FLOOR`
+(별점 5점) 하나뿐이었으나, 실사용 중 별점 5점인데 내용은 명백한 불만인
+리뷰(id 799, "고기가 질기고 뻑뻑하다/양념이 심심하다/치킨마요 고기양
+부족", 단골 고객)가 실제로 들어오는 걸 확인하면서(위 "배민 매출·입금·
+재주문율 연동" 절 이후 실사용 스트레스 테스트, 2026-08-25) 별점만으로는
+"진짜 순수 긍정 리뷰"를 가려낼 수 없다는 게 드러났다. 마침 같은 세션에서
+`crawler/.env.worker`에 `ANTHROPIC_API_KEY`가 없어 이 리뷰의 분류
+자체가 조용히 실패해 `no_issue`로 방치됐던 별개 버그도 함께 발견했다
+(위 문단 참고, 키 추가로 해결) — 키를 고친 뒤 재분류해보니 이 리뷰는
+`category=food_quality, sentiment_conflict=true`로 정확히 잡혔다.
+
+그래서 자동 제출 조건에 분류 결과를 추가했다: 별점 5점 하한에 더해
+**`category == "no_issue"`이고 `is_sensitive`가 아니고
+`sentiment_conflict`도 아닌** 리뷰만 자동 제출 대상이다(`review_sync.py`
+동기화 루프의 `elif` 조건). 셋 중 하나라도 걸리면(불만 카테고리로
+분류됐거나, 위생/안전 민감 사안이거나, 별점-내용이 어긋나거나) 자동
+제출을 건너뛰고 `unanswered`로 남겨 사장님이 직접 확인하게 한다. 분류는
+이미 이 리뷰가 DB에 저장되기 직전에(`classify_review`) 실행되므로 이
+게이트를 위해 별도로 다시 분류하지 않는다 — 있는 값을 재사용할 뿐이다.
 
 ### 배민 정산 상세(수수료/배달비/고객할인/우가클비용) 연동 (예외 허용)
 원래 "매출 분석" 카드의 배민 행은 `platforms.default_commission_rate`(요율)

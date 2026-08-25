@@ -325,6 +325,15 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
     # 자동으로 나가는 첫 기능이라, 가장 안전한 순수 긍정 리뷰로만
     # 시작한다(설정 화면의 auto_reply_min_rating을 낮춰도 이 하한을
     # 넘지 못한다). 매장별로 한 번만 조회해 리뷰 루프 안에서 재사용한다.
+    #
+    # 별점만으로는 부족하다는 게 실사용으로 확인됐다(2026-08-25, 리뷰
+    # id 799 — 별점 5점인데 "고기가 질기고 뻑뻑하다/양념이 심심하다/
+    # 치킨마요 고기양 부족"이라는 실제 불만이 담긴 리뷰). 이런 리뷰가
+    # 사람 검토 없이 그대로 배민에 자동 제출되면 위험하므로, 별점 5점
+    # 하한에 더해 classify_review 결과(category/is_sensitive/
+    # sentiment_conflict)도 함께 통과해야만 자동 제출한다 — no_issue
+    # 카테고리이고, 위생/안전 민감 사안도 아니고, 별점-내용 불일치도
+    # 아닌, "진짜 순수 긍정"으로 분류된 리뷰만 대상이다(아래 elif 참고).
     _AUTO_REPLY_MIN_RATING_FLOOR = 5
     reply_settings = db.scalar(select(ReplySetting).where(ReplySetting.store_id == job.store_id))
     auto_reply_style = None
@@ -438,7 +447,13 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                         review_id=review.id, reply_type="final", style_id=None,
                         content=reply_content, created_at=replied_at,
                     ))
-                elif auto_reply_style is not None and review.rating >= _AUTO_REPLY_MIN_RATING_FLOOR:
+                elif (
+                    auto_reply_style is not None
+                    and review.rating >= _AUTO_REPLY_MIN_RATING_FLOOR
+                    and review.category == "no_issue"
+                    and not review.is_sensitive
+                    and not review.sentiment_conflict
+                ):
                     try:
                         content = generate_ai_reply(db, review, store, auto_reply_style)
                         submit_reply(session.page, shop_no, review.external_review_id, content)

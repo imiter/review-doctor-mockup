@@ -2374,6 +2374,84 @@ def test_sync_does_not_auto_reply_below_rating_floor(db_session, sync_setup, rep
     assert review.status == "unanswered"
 
 
+def test_sync_does_not_auto_reply_when_category_is_not_no_issue(db_session, sync_setup, reply_styles, monkeypatch):
+    """별점 5점이어도 분류 결과가 no_issue가 아니면(예: food_quality) 자동
+    제출하지 않는다 — 별점만으로는 부족하다는 게 실사용으로 확인됐다
+    (리뷰 id 799, 2026-08-25)."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])  # rating 5.0
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="food_quality", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review.status == "unanswered"
+
+
+def test_sync_does_not_auto_reply_when_sensitive(db_session, sync_setup, reply_styles, monkeypatch):
+    """별점 5점, category=no_issue여도 is_sensitive면 자동 제출하지 않는다."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])  # rating 5.0
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=True, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review.status == "unanswered"
+
+
+def test_sync_does_not_auto_reply_when_sentiment_conflict(db_session, sync_setup, reply_styles, monkeypatch):
+    """별점 5점, category=no_issue여도 sentiment_conflict면 자동 제출하지
+    않는다 — 별점-내용 불일치 리뷰는 사람이 검토해야 한다."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])  # rating 5.0
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=True),
+    )
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review.status == "unanswered"
+
+
 def test_sync_does_not_auto_reply_when_disabled(db_session, sync_setup, monkeypatch):
     import app.review_sync as review_sync_mod
     from app.llm.classify import ReviewClassification
