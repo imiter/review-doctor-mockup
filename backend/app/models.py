@@ -257,7 +257,10 @@ class GoldenExample(Base):
     source: Mapped[str] = mapped_column(String(16))
     source_review_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("reviews.id"))
     source_reply_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("review_replies.id"))
-    embedding: Mapped[list[float] | None] = mapped_column(ARRAY(Float).with_variant(JSON(), "sqlite"))
+    # none_as_null=True — SQLite JSON 타입은 기본값(False)이면 Python None을
+    # SQL NULL이 아니라 JSON 리터럴 "null"(텍스트)로 저장해, embedding.is_(None)
+    # 같은 IS NULL 조회가 전혀 매칭되지 않는다(실측 확인, 2026-08-26).
+    embedding: Mapped[list[float] | None] = mapped_column(ARRAY(Float).with_variant(JSON(none_as_null=True), "sqlite"))
     created_at: Mapped[datetime]
 
 
