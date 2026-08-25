@@ -202,7 +202,7 @@ def generate_ai_reply(db: Session, review: Review, store: Store, style: ReplySty
     profile = db.scalar(select(StoreStyleProfile).where(StoreStyleProfile.store_id == store.id))
     style_rules = profile.rules if profile is not None else _FALLBACK_STYLE_RULES
 
-    examples = fetch_golden_examples(db, store.id, review.category, limit=3)
+    examples = fetch_golden_examples(db, store.id, review.category, review.content, limit=3)
     repeat_count = count_recent_same_category(db, store.id, review.category, days=30)
     category_label = CATEGORY_LABELS.get(review.category, review.category)
 

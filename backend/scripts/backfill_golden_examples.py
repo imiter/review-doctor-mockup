@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.llm.classify import ClassificationError, classify_review
+from app.llm.rag import compute_golden_example_embedding
 from app.models import GoldenExample, Review, ReviewReply
 
 _MAX_RATING = 2
@@ -46,6 +47,7 @@ def backfill_negative_review_replies(db, store_id: int) -> int:
             review_text=review.content, reply_text=final_reply.content,
             is_manual=True, is_synthetic=False, source="backfill",
             source_review_id=review.id, source_reply_id=final_reply.id,
+            embedding=compute_golden_example_embedding(review.content),
             created_at=final_reply.created_at,
         ))
         inserted += 1

@@ -27,6 +27,16 @@ def _no_anthropic_key(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_voyage_key(monkeypatch):
+    """_no_anthropic_key와 같은 이유 — 임베딩 API도 실제로 호출되지 않게
+    막는다. fetch_golden_examples는 임베딩 호출이 실패하면 최신순 폴백으로
+    안전하게 넘어가도록 설계돼 있어(app/llm/rag.py), 이 fixture가 있어도
+    기존 테스트들이 깨지지 않는다 — 오히려 실제 API 키가 우연히 설정된
+    환경에서 과금 호출이 나가는 것을 막아준다."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _mock_generate_ai_reply(monkeypatch):
     """모든 리뷰(no_issue 포함)가 generate_ai_reply(RAG)를 타므로(2026-08-24),
     실제 Claude API를 호출하지 않도록 기본값으로 monkeypatch한다. 생성 결과

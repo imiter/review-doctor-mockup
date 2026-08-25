@@ -69,6 +69,8 @@ def test_today_excludes_already_answered_same_day_scenario(client, seeded_user, 
     # 이 테스트가 관심 없는 부수효과라면 test_reviews.py의 기존 관례대로
     # no-op으로 막는다.
     monkeypatch.setattr(reply_onboarding_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reply_onboarding_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
+    monkeypatch.setattr(reply_onboarding_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
     first = client.get("/reply-onboarding/today", headers=auth_headers).json()
     answered_id = first[0]["id"]
     client.post(f"/reply-onboarding/scenarios/{answered_id}/answer", json={"content": "실제 답글"}, headers=auth_headers)
@@ -139,6 +141,7 @@ def test_answer_promotes_to_golden_example_and_triggers_style_refresh(client, db
     _patch_llm(monkeypatch)
     refreshed = []
     monkeypatch.setattr(reply_onboarding_mod, "refresh_store_style_profile_background", lambda store_id: refreshed.append(store_id))
+    monkeypatch.setattr(reply_onboarding_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
 
     scenarios = client.post("/reply-onboarding/wizard", headers=auth_headers).json()
     target = next(s for s in scenarios if s["category"] == "hygiene")
@@ -165,6 +168,7 @@ def test_answer_promotes_even_when_identical_to_draft(client, db_session, seeded
 
     _patch_llm(monkeypatch, draft_text="이대로 괜찮아요")
     monkeypatch.setattr(reply_onboarding_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reply_onboarding_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
     scenarios = client.post("/reply-onboarding/wizard", headers=auth_headers).json()
     target = next(s for s in scenarios if s["category"] == "hygiene")
     assert target["draft_text"] == "이대로 괜찮아요"
@@ -186,6 +190,7 @@ def test_answer_already_answered_returns_409(client, seeded_user, auth_headers, 
 
     _patch_llm(monkeypatch)
     monkeypatch.setattr(reply_onboarding_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reply_onboarding_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
     scenarios = client.post("/reply-onboarding/wizard", headers=auth_headers).json()
     target = scenarios[0]
     client.post(f"/reply-onboarding/scenarios/{target['id']}/answer", json={"content": "답변"}, headers=auth_headers)

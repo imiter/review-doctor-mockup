@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
 from app.llm.generate import generate_ai_reply
+from app.llm.rag import compute_golden_example_embedding_background
 from app.llm.style_profile import refresh_store_style_profile_background
 from app.models import GoldenExample, ReplyStyle, Review, ReviewReply, Subscription, User
 from app.plan import effective_plan, replies_used_today
@@ -177,14 +178,17 @@ def save_final_reply(
     # 저장했으면 "진짜 사장님 목소리"로 보고 골든 예시로 승격한다.
     # 초안을 그대로 복붙했으면(AI 산출물 그대로) 승격하지 않는다.
     if draft is None or draft.content != reply.content:
-        db.add(GoldenExample(
+        example = GoldenExample(
             store_id=review.store_id, category=review.category,
             review_text=review.content, reply_text=reply.content,
             is_manual=True, is_synthetic=False, source="organic",
             source_review_id=review.id, source_reply_id=reply.id,
             created_at=datetime.now(timezone.utc),
-        ))
+        )
+        db.add(example)
+        db.flush()  # 배경 작업에 넘길 id를 얻으려면 INSERT를 먼저 반영해야 한다
         background_tasks.add_task(refresh_store_style_profile_background, review.store_id)
+        background_tasks.add_task(compute_golden_example_embedding_background, example.id)
 
     db.commit()
     return {"id": reply.id, "content": reply.content}

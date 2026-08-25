@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
+from app.llm.rag import compute_golden_example_embedding
 from app.models import GoldenExample, Store
 
 _SEED_EXAMPLES: dict[str, tuple[str, str]] = {
@@ -58,6 +59,14 @@ _SEED_EXAMPLES: dict[str, tuple[str, str]] = {
 
 
 def seed_synthetic_golden_examples(db: Session) -> int:
+    # 카테고리당 review_text가 모든 매장에 동일하므로 임베딩도 카테고리당
+    # 한 번만 계산해 재사용한다(같은 텍스트를 매장 수만큼 반복 호출하지
+    # 않기 위해서).
+    embeddings_by_category = {
+        category: compute_golden_example_embedding(review_text)
+        for category, (review_text, _) in _SEED_EXAMPLES.items()
+    }
+
     inserted = 0
     store_ids = db.scalars(select(Store.id)).all()
     for store_id in store_ids:
@@ -75,6 +84,7 @@ def seed_synthetic_golden_examples(db: Session) -> int:
                 store_id=store_id, category=category,
                 review_text=review_text, reply_text=reply_text,
                 is_manual=False, is_synthetic=True, source="synthetic",
+                embedding=embeddings_by_category[category],
                 created_at=datetime.now(timezone.utc),
             ))
             inserted += 1

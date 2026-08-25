@@ -32,6 +32,7 @@ def test_save_final_reply_transitions_status_and_blocks_duplicate(client, db_ses
     from app.routers import reviews as reviews_mod
 
     monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
 
     review = make_review(db_session, seeded_user["store"], platforms, rating=5)
 
@@ -288,6 +289,7 @@ def test_save_final_reply_promotes_edited_problem_review_to_golden_example(clien
 
     calls = []
     monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: calls.append(store_id))
+    monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
 
     res = client.post(
         f"/reviews/{review.id}/reply", json={"style_id": None, "content": "제가 직접 고친 답글입니다."}, headers=auth_headers,
@@ -321,6 +323,7 @@ def test_save_final_reply_does_not_promote_when_final_matches_draft_verbatim(cli
     db_session.commit()
 
     monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
 
     client.post(
         f"/reviews/{review.id}/reply", json={"style_id": None, "content": "AI 초안 그대로입니다."}, headers=auth_headers,
@@ -347,6 +350,7 @@ def test_save_final_reply_promotes_no_issue_review_too(client, db_session, seede
     db_session.commit()
 
     monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
 
     client.post(
         f"/reviews/{review.id}/reply", json={"style_id": None, "content": "감사합니다!"}, headers=auth_headers,

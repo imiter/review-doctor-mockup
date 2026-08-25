@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
 from app.llm.onboarding import find_uncovered_categories, get_or_create_scenario
+from app.llm.rag import compute_golden_example_embedding_background
 from app.llm.style_profile import refresh_store_style_profile_background
 from app.models import GoldenExample, OnboardingScenario, Store, User
 from app.plan import kst_today
@@ -125,15 +126,17 @@ def answer_scenario(
 
     # 온보딩은 사장님이 직접 검토·제출한 것이므로, save_final_reply(코어
     # 설계)의 초안-대조 승격 판정과 달리 diff 비교 없이 항상 승격한다.
-    db.add(GoldenExample(
+    example = GoldenExample(
         store_id=scenario.store_id, category=scenario.category,
         review_text=scenario.virtual_review_text, reply_text=body.content,
         is_manual=True, is_synthetic=False, source="onboarding",
         created_at=datetime.now(timezone.utc),
-    ))
+    )
+    db.add(example)
     scenario.status = "answered"
     db.commit()
     background_tasks.add_task(refresh_store_style_profile_background, scenario.store_id)
+    background_tasks.add_task(compute_golden_example_embedding_background, example.id)
     return _row(scenario)
 
 

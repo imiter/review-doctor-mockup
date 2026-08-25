@@ -7,7 +7,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import JSON, BigInteger, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -257,6 +257,7 @@ class GoldenExample(Base):
     source: Mapped[str] = mapped_column(String(16))
     source_review_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("reviews.id"))
     source_reply_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("review_replies.id"))
+    embedding: Mapped[list[float] | None] = mapped_column(ARRAY(Float).with_variant(JSON(), "sqlite"))
     created_at: Mapped[datetime]
 
 

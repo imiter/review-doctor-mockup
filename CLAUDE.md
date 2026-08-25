@@ -554,7 +554,43 @@ Mock 데이터로만 계산됐으나, 실 SaaS 전환 로드맵 3번의 다음 �
 결과 원인은 검색 방식이 아니라 `fetch_golden_examples`가 카테고리당 3개만
 반환해 같은 카테고리 리뷰마다 거의 같은 예시가 반복 주입되는 것으로 진단—
 벡터 DB 전환은 보류하고 이 메뉴 그라운딩부터 마무리하기로 확인받았다. 벡터
-DB 여부는 아직 재검토 대상으로 열려 있다.
+DB 여부는 재검토 대상으로 남겼고, 실제로 메뉴 그라운딩 마무리 직후 같은
+날 다시 진행하기로 결정했다(아래 "골든 예시 벡터 검색" 절 참고).
+
+### 골든 예시 벡터 검색 (예외 허용, "벡터 DB 미사용" 원칙 번복)
+원래 golden_examples 검색은 "검색은 category 필터만 쓴다(벡터 DB
+미사용)"는 명시적 설계 결정이었으나(위 "LLM 기반 답글 생성" 절), 사용자가
+다시 요청해 실제로 도입했다(2026-08-26). Anthropic은 임베딩을 API로
+제공하지 않아 별도 벤더가 필요했는데, Voyage AI(`voyage-4` 모델,
+1024차원)를 선택했다 — Anthropic이 공식 추천하는 임베딩 파트너이고,
+계정당 2억 토큰이 무료라 이 프로젝트 규모(골든 예시 수백 건)에서는
+사실상 비용이 들지 않는다(`VOYAGE_API_KEY` 환경변수, voyageai.com에서
+발급, `backend/app/llm/embedding.py`).
+
+**pgvector는 쓰지 않는다** — store당 골든 예시가 많아야 수백 건이라 별도
+벡터 확장/인덱스를 설치·운영할 실익이 없다고 판단해, `golden_examples`에
+`embedding DOUBLE PRECISION[]` 컬럼(nullable)만 추가하고 순위 계산은
+`app/llm/rag.py`가 애플리케이션 레벨에서 코사인 유사도로 직접 한다(선형
+스캔, 이 규모에서 충분히 빠름). category 필터는 그대로 유지한다(정밀도
+보존 — 배달 불만이 위생 불만 예시를 끌어오면 안 되므로) — 그 안에서만
+순위를 최신순 대신 리뷰 내용과의 의미적 유사도로 매긴다. 이렇게 카테고리당
+예시 풀이 3개보다 많으면, 리뷰 내용에 따라 실제로 다른 예시가 뽑히게
+된다(원래 진단한 "정형화" 원인 해결).
+
+`embedding`이 없는 행(백필 전, 또는 Voyage 호출 실패로 저장 시점에 못
+채운 행)은 배제하지 않고 유사도 순위 뒤에 최신순으로 붙는다 — 부분
+백필 상태에서도 기존과 동일하게 동작한다. Voyage 호출 자체가 실패하면
+(키 미설정, API 장애 등) 전체를 기존처럼 최신순 폴백으로 돌린다(답글
+생성이 임베딩 API 가용성에 발목잡히면 안 된다는, 이 프로젝트의 다른
+LLM 폴백들과 동일한 원칙). golden_examples를 만드는 4곳(사장님이 직접
+저장하는 `save_final_reply`, 답글 온보딩 `answer_scenario`, 백필
+스크립트 2개) 전부 생성 시점에 `review_text`를 벡터화해 저장한다 —
+요청 경로(save_final_reply/answer_scenario)는 FastAPI `BackgroundTasks`로
+응답 이후에 계산해 Voyage 호출 지연이 저장 요청 자체를 느리게 만들지
+않는다(`refresh_store_style_profile_background`와 동일한 패턴, 자체
+`SessionLocal` 사용). 기존에 이미 쌓여있던 골든 예시(약 760여 건)는
+`backend/scripts/backfill_golden_example_embeddings.py`로 한 번에
+채웠다 — 여러 번 실행해도 안전하다(`embedding IS NULL`인 행만 대상).
 
 ### 모바일 앱 (예외 허용)
 원래 "Flutter 앱 구현 금지"로 모바일 앱 자체를 범위 밖으로 뒀으나, 웹과 같은
@@ -605,8 +641,10 @@ baemin_shop_brands, brand_ad_click_metrics, payments.
   빈 배열로 남고, 다음 동기화부터 채워진다(소급 백필 없음).
 - golden_examples: RAG few-shot 소스. 사장님이 직접 쓰거나 승인한 진짜
   답글(is_manual=true)과 예시 부족 시 보충하는 순수 AI 생성 모범답안
-  (is_synthetic=true)을 함께 담는다. 검색은 category 필터만 쓴다(벡터
-  DB 미사용).
+  (is_synthetic=true)을 함께 담는다. 검색은 category로 먼저 거르고, 그
+  안에서 embedding(Voyage AI 벡터, nullable) 기반 코사인 유사도로 순위를
+  매긴다(2026-08-26, 위 "골든 예시 벡터 검색" 절 참고) — 별도 벡터
+  인덱스(pgvector 등) 없이 애플리케이션에서 직접 계산한다.
 - store_style_profile: 매장별 답글 스타일 규칙(5~7줄) 캐싱. 진짜
   골든 예시로만 재생성한다.
 - review_replies: AI 추천 답글 Mock과 사장 최종 답글.
