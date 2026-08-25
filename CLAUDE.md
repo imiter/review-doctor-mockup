@@ -567,15 +567,38 @@ DB 여부는 재검토 대상으로 남겼고, 실제로 메뉴 그라운딩 마
 사실상 비용이 들지 않는다(`VOYAGE_API_KEY` 환경변수, voyageai.com에서
 발급, `backend/app/llm/embedding.py`).
 
-**pgvector는 쓰지 않는다** — store당 골든 예시가 많아야 수백 건이라 별도
-벡터 확장/인덱스를 설치·운영할 실익이 없다고 판단해, `golden_examples`에
-`embedding DOUBLE PRECISION[]` 컬럼(nullable)만 추가하고 순위 계산은
-`app/llm/rag.py`가 애플리케이션 레벨에서 코사인 유사도로 직접 한다(선형
-스캔, 이 규모에서 충분히 빠름). category 필터는 그대로 유지한다(정밀도
-보존 — 배달 불만이 위생 불만 예시를 끌어오면 안 되므로) — 그 안에서만
-순위를 최신순 대신 리뷰 내용과의 의미적 유사도로 매긴다. 이렇게 카테고리당
-예시 풀이 3개보다 많으면, 리뷰 내용에 따라 실제로 다른 예시가 뽑히게
-된다(원래 진단한 "정형화" 원인 해결).
+**처음엔 pgvector 없이 구현했다가 사용자 지적으로 다시 만들었다**
+(2026-08-26). store당 골든 예시가 많아야 수백 건이라는 이유로 별도 벡터
+확장 없이 `embedding DOUBLE PRECISION[]` 컬럼 + 애플리케이션 레벨 코사인
+유사도(선형 스캔)로 1차 구현했는데, 사용자가 "pgvector까지 구현해야
+벡터 DB가 완성되지 왜 멋대로 판단하냐"고 지적했다 — 맞는 지적이었다.
+"벡터 DB 구축"을 명시적으로 요청받았는데 그 핵심(실제 벡터 데이터베이스
+기술)을 임의로 생략하고 사후에 설명하는 방식으로 진행한 것 자체가
+잘못이었다. 다시 확인해 **완전히 pgvector로 전환**했다 — `golden_examples.
+embedding`은 실제 `vector(1024)` 타입이고, 순위는 `ORDER BY embedding <->
+:query`로 Postgres가 SQL 레벨에서 직접 계산한다(SQLAlchemy에서는
+pgvector-python의 `.cosine_distance()` 컴패리터, `app/llm/rag.py`).
+Railway 프로덕션 Postgres는 pgvector 0.8.6이 이미 설치돼 있었지만, 로컬
+개발 DB(Docker 컨테이너 `baemin-verify-db2`, 원래 plain `postgres:16`
+이미지)는 확장 자체가 없어서 `pgvector/pgvector:pg16` 이미지로 교체했다
+(`pg_dump`/`pg_restore`로 기존 로컬 데이터 보존, 컨테이너 이름/포트 15432는
+그대로 유지). category 필터는 그대로 유지한다(정밀도 보존 — 배달 불만이
+위생 불만 예시를 끌어오면 안 되므로) — 그 안에서만 순위를 최신순 대신
+리뷰 내용과의 의미적 유사도로 매긴다. 이렇게 카테고리당 예시 풀이
+3개보다 많으면, 리뷰 내용에 따라 실제로 다른 예시가 뽑히게 된다(원래
+진단한 "정형화" 원인 해결 — 실측: food_quality 카테고리 예시 6개 중
+"고기가 질기고 양이 적었다"는 쿼리엔 대창 질김 리뷰가, "숯불향이
+안 난다"는 쿼리엔 삶은 맛 관련 리뷰들이 서로 다르게 1순위로 뽑힘).
+
+pgvector는 SQLite에 없는 Postgres 전용 확장이라, 이 프로젝트의 나머지
+전체 테스트가 쓰는 in-memory SQLite로는 `ORDER BY <->` 실행 자체를
+검증할 수 없다 — `embedding` 컬럼은 `Vector(1024).with_variant(JSON
+(none_as_null=True), "sqlite")`로 타입만 SQLite에서도 테이블 생성이
+되게 맞추고(그 variant로는 `<->` 연산자를 못 씀), 실제 순위 계산 검증은
+로컬 Postgres(pgvector 설치됨)를 쓰는 `tests/test_llm_rag_pgvector.py`
+하나만 별도로 한다(로컬에 Postgres가 없는 환경, 예: CI에서는 자동
+스킵). 이 프로젝트에서 유일하게 "실행하려면 실 Postgres가 있어야 하는"
+테스트 파일이다.
 
 `embedding`이 없는 행(백필 전, 또는 Voyage 호출 실패로 저장 시점에 못
 채운 행)은 배제하지 않고 유사도 순위 뒤에 최신순으로 붙는다 — 부분
@@ -588,9 +611,18 @@ LLM 폴백들과 동일한 원칙). golden_examples를 만드는 4곳(사장님�
 요청 경로(save_final_reply/answer_scenario)는 FastAPI `BackgroundTasks`로
 응답 이후에 계산해 Voyage 호출 지연이 저장 요청 자체를 느리게 만들지
 않는다(`refresh_store_style_profile_background`와 동일한 패턴, 자체
-`SessionLocal` 사용). 기존에 이미 쌓여있던 골든 예시(약 760여 건)는
+`SessionLocal` 사용). 기존에 이미 쌓여있던 골든 예시(실측 28건, 앞선
+"760여 건"은 리뷰 테이블 건수와 착각한 오기)는
 `backend/scripts/backfill_golden_example_embeddings.py`로 한 번에
 채웠다 — 여러 번 실행해도 안전하다(`embedding IS NULL`인 행만 대상).
+review_text가 빈 문자열인 행(별점만 있고 내용 없는 리뷰)은 건너뛴다 —
+Voyage가 배치 안에 빈 문자열이 하나라도 있으면 요청 전체를 400으로
+거부한다(실측 확인).
+
+이 작업 중 SQLite JSON 타입의 별개 버그도 발견해 고쳤다 — `none_as_null`
+기본값(False)이면 Python `None`이 SQL `NULL`이 아니라 JSON 리터럴
+"null"(텍스트)로 저장돼, `embedding.is_(None)` 같은 `IS NULL` 조회가
+전혀 매칭되지 않았다(백필 스크립트 테스트에서 실측 확인).
 
 ### 모바일 앱 (예외 허용)
 원래 "Flutter 앱 구현 금지"로 모바일 앱 자체를 범위 밖으로 뒀으나, 웹과 같은
@@ -642,9 +674,9 @@ baemin_shop_brands, brand_ad_click_metrics, payments.
 - golden_examples: RAG few-shot 소스. 사장님이 직접 쓰거나 승인한 진짜
   답글(is_manual=true)과 예시 부족 시 보충하는 순수 AI 생성 모범답안
   (is_synthetic=true)을 함께 담는다. 검색은 category로 먼저 거르고, 그
-  안에서 embedding(Voyage AI 벡터, nullable) 기반 코사인 유사도로 순위를
-  매긴다(2026-08-26, 위 "골든 예시 벡터 검색" 절 참고) — 별도 벡터
-  인덱스(pgvector 등) 없이 애플리케이션에서 직접 계산한다.
+  안에서 embedding(pgvector `vector(1024)`, Voyage AI로 계산, nullable)
+  기반 코사인 거리로 Postgres가 SQL 레벨에서 직접 순위를 매긴다
+  (2026-08-26, 위 "골든 예시 벡터 검색" 절 참고).
 - store_style_profile: 매장별 답글 스타일 규칙(5~7줄) 캐싱. 진짜
   골든 예시로만 재생성한다.
 - review_replies: AI 추천 답글 Mock과 사장 최종 답글.

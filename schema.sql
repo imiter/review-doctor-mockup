@@ -18,6 +18,9 @@
 
 BEGIN;
 
+-- golden_examples.embedding(벡터 검색, 2026-08-26)이 쓰는 pgvector 확장.
+CREATE EXTENSION IF NOT EXISTS vector;
+
 DROP TABLE IF EXISTS
     payments, brand_ad_click_metrics, baemin_shop_brands, review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
     ad_performance_metrics, ad_campaigns, repurchase_metrics, daily_settlements, review_replies,
@@ -319,11 +322,11 @@ CREATE INDEX idx_alerts_store_unread ON alerts(store_id, is_read);
 --       진짜 답글(is_manual=true)과, 예시가 부족할 때만 보충하는 순수
 --       AI 생성 모범답안(is_synthetic=true)을 함께 담는다. 검색은 이
 --       테이블 하나만 필터링하면 끝나야 한다(조인 없음). embedding은
---       review_text를 Voyage AI로 벡터화한 값(2026-08-26 추가) — category
---       필터 안에서 새 리뷰와 의미적으로 가까운 예시를 우선 뽑는 데 쓴다.
---       store당 예시 수가 많아야 수백 건이라 별도 벡터 인덱스(pgvector 등)
---       없이 애플리케이션에서 코사인 유사도로 순위만 매긴다 — nullable이라
---       백필 전/임베딩 실패 행은 최신순으로 폴백한다(app/llm/rag.py 참고).
+--       review_text를 Voyage AI(voyage-4, 1024차원)로 벡터화한 값
+--       (2026-08-26 추가) — category 필터 안에서 새 리뷰와 의미적으로
+--       가까운 예시를 pgvector의 <-> 연산자로 직접 순위 매기는 데 쓴다
+--       (app/llm/rag.py). nullable이라 백필 전/임베딩 실패 행은 최신순으로
+--       폴백한다.
 -- ----------------------------------------------------------------------------
 CREATE TABLE golden_examples (
     id               BIGSERIAL PRIMARY KEY,
@@ -337,7 +340,7 @@ CREATE TABLE golden_examples (
                      CHECK (source IN ('backfill', 'organic', 'onboarding', 'synthetic')),
     source_review_id BIGINT       REFERENCES reviews(id) ON DELETE SET NULL,
     source_reply_id  BIGINT       REFERENCES review_replies(id) ON DELETE SET NULL,
-    embedding        DOUBLE PRECISION[],
+    embedding        vector(1024),
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 

@@ -7,7 +7,8 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import JSON, BigInteger, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import JSON, BigInteger, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -257,10 +258,16 @@ class GoldenExample(Base):
     source: Mapped[str] = mapped_column(String(16))
     source_review_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("reviews.id"))
     source_reply_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("review_replies.id"))
-    # none_as_null=True — SQLite JSON 타입은 기본값(False)이면 Python None을
-    # SQL NULL이 아니라 JSON 리터럴 "null"(텍스트)로 저장해, embedding.is_(None)
-    # 같은 IS NULL 조회가 전혀 매칭되지 않는다(실측 확인, 2026-08-26).
-    embedding: Mapped[list[float] | None] = mapped_column(ARRAY(Float).with_variant(JSON(none_as_null=True), "sqlite"))
+    # pgvector 실 타입(Postgres) — ORDER BY embedding <-> :query로 DB가 직접
+    # 거리 계산을 한다(app/llm/rag.py). SQLite는 vector 타입 자체가 없어
+    # 유닛 테스트(in-memory SQLite)의 Base.metadata.create_all이 깨지지
+    # 않도록 JSON으로만 대체한다 — 이 variant로는 <-> 연산자를 쓸 수
+    # 없으므로, 실제 순위 계산 테스트는 로컬 Postgres(pgvector 설치됨)를
+    # 쓰는 tests/test_llm_rag_pgvector.py에서만 검증한다. none_as_null=True는
+    # SQLite JSON 기본값(False)이면 Python None이 SQL NULL이 아니라 JSON
+    # 리터럴 "null"(텍스트)로 저장돼 embedding.is_(None) 조회가 전혀
+    # 매칭되지 않는 문제를 막는다(실측 확인, 2026-08-26).
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024).with_variant(JSON(none_as_null=True), "sqlite"))
     created_at: Mapped[datetime]
 
 
