@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.llm import client
 from app.llm.rag import count_recent_same_category, fetch_golden_examples
-from app.models import BaeminShopBrand, ReplyStyle, Review, Store, StorePlatformConnection, StoreStyleProfile
+from app.models import BaeminShopBrand, BrandMenuInfo, ReplyStyle, Review, Store, StorePlatformConnection, StoreStyleProfile
 
 _FALLBACK_STYLE_RULES = "아직 학습된 스타일이 없습니다. 정중하고 진솔한 사과문 원칙을 따르세요."
 
@@ -80,11 +80,83 @@ def _resolve_display_name(db: Session, store: Store, review: Review) -> str:
     return name.split(" / ")[0].strip() or store.name
 
 
-def _build_system_prompt(display_name: str, style_rules: str, examples, tone_instruction: str) -> str:
+def _normalize_menu_name(name: str) -> str:
+    """메뉴명 비교용 정규화. 리뷰의 menu_summary(주문 시점 표시명, 예:
+    "[양념조절가능]숯불양념바베큐치킨")와 brand_menu_info.menu_items의
+    등록명(예: "숯불양념바베큐치킨:")은 프로모션 태그·트레일링 콜론 등
+    표기가 서로 달라 정확히 일치하지 않는다 — 대괄호 태그를 지우고
+    앞뒤 공백/콜론을 정리해 느슨하게 비교한다."""
+    name = re.sub(r"\[[^\]]*\]", "", name)
+    return name.strip().rstrip(":").strip()
+
+
+def _find_menu_context(db: Session, store: Store, review: Review) -> str | None:
+    """리뷰의 실제 메뉴 구성/가게 소개 정보를 배민에서 가져온 그라운딩
+    데이터(brand_menu_info)에서 찾는다. 원래 이 프로젝트엔 "메뉴" 데이터가
+    전혀 없어서, AI가 리뷰 텍스트만 보고 메뉴 구성을 추측하다 틀린 답글을
+    쓰는 문제가 실사용 중 확인됐다(2026-08-26 — "치킨마요는 밥만 많고
+    고기가 없다"는 불만에 실제로는 정량대로 들어간 걸 사장님이 직접
+    정정해야 했음). 연결 정보가 없거나(가게 미연결) 아직 메뉴 동기화 전
+    이면(review_sync.py가 첫 실행 때 채움) None을 반환하고, 호출부는 이
+    섹션을 그냥 생략한다 — 메뉴 그라운딩은 있으면 좋은 보강 정보지 필수
+    전제가 아니다."""
+    if not review.platform_shop_no:
+        return None
+
+    info = db.scalar(
+        select(BrandMenuInfo)
+        .join(StorePlatformConnection, BrandMenuInfo.connection_id == StorePlatformConnection.id)
+        .where(
+            StorePlatformConnection.store_id == store.id,
+            BrandMenuInfo.shop_no == review.platform_shop_no,
+        )
+    )
+    if info is None:
+        return None
+
+    lines = []
+    if info.store_intro:
+        lines.append(f"[가게 소개]\n{info.store_intro}")
+    if info.food_origin:
+        lines.append(f"[원산지]\n{info.food_origin}")
+    if info.menu_intro:
+        lines.append(f"[메뉴 소개]\n{info.menu_intro}")
+
+    target = _normalize_menu_name(review.menu_summary or "")
+    matched = None
+    if target:
+        for item in info.menu_items or []:
+            item_name = _normalize_menu_name(item.get("name", ""))
+            if item_name and (item_name in target or target in item_name):
+                matched = item
+                break
+    if matched:
+        detail = f"[고객이 주문한 메뉴: {matched['name']}]"
+        if matched.get("composition"):
+            detail += f"\n실제 구성: {matched['composition']}"
+        if matched.get("desc"):
+            detail += f"\n메뉴 설명: {matched['desc']}"
+        lines.append(detail)
+
+    return "\n\n".join(lines) if lines else None
+
+
+def _build_system_prompt(display_name: str, style_rules: str, examples, tone_instruction: str, menu_context: str | None = None) -> str:
     example_block = "\n\n".join(
         f'예시 {i}: 리뷰 "{ex.review_text}" / 답글 "{ex.reply_text}"'
         for i, ex in enumerate(examples, start=1)
     ) if examples else "(아직 참고할 예시가 없습니다.)"
+
+    menu_section = f"""
+
+[가게/메뉴 실제 정보 — 사실 근거용]
+아래는 배민에 등록된 이 가게의 실제 소개글과 메뉴 구성이다. 리뷰가 특정
+메뉴나 재료를 언급하면 반드시 이 정보를 근거로 삼아라 — 실제 메뉴
+구성과 다른 원인(예: "신메뉴라서", "양을 줄였다")을 추측해서 쓰지 마라.
+여기 없는 내용(오늘 그 배치의 조리 상태 등)은 사장님만 아는 사실이니
+지어내지 말고 일반적인 사과로 넘어가라.
+
+{menu_context}""" if menu_context else ""
 
     return f"""너는 "{display_name}"의 사장님을 대신해 배달앱 리뷰에 답글을 쓴다.
 
@@ -93,7 +165,7 @@ def _build_system_prompt(display_name: str, style_rules: str, examples, tone_ins
 
 [답글 톤]
 {tone_instruction}
-
+{menu_section}
 [참고 예시 — 스타일 참고 전용]
 아래는 이 가게 사장님이 실제로 쓴(또는 승인한) 답글 예시다.
 **절대 지켜야 할 규칙**: 이 예시들은 말투·태도·구조(원인 설명 → 사과 →
@@ -141,6 +213,7 @@ def generate_ai_reply(db: Session, review: Review, store: Store, style: ReplySty
     )
 
     display_name = _resolve_display_name(db, store, review)
-    system_prompt = _build_system_prompt(display_name, style_rules, examples, tone_instruction)
+    menu_context = _find_menu_context(db, store, review)
+    system_prompt = _build_system_prompt(display_name, style_rules, examples, tone_instruction, menu_context)
     user_message = _build_user_message(review, category_label, repeat_count)
     return client.call_sonnet(system_prompt, user_message, max_tokens=800)

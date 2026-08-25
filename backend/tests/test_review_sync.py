@@ -5,10 +5,11 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.credential_crypto import CredentialCryptoError, encrypt_credential
-from app.models import AdCampaign, Alert, BaeminShopBrand, BrandAdClickMetric, DailySettlement, Order, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
+from app.models import AdCampaign, Alert, BaeminShopBrand, BrandAdClickMetric, BrandMenuInfo, DailySettlement, Order, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
 from app.review_sync import sync_reviews_for_job, upsert_brand_ad_click_metric, upsert_daily_settlement, upsert_order, upsert_repurchase_metric
 from scrapers.baemin_ads import BaeminAdsScrapeError
 from scrapers.baemin_auth import BaeminLoginError
+from scrapers.baemin_menu import BaeminMenuScrapeError
 from scrapers.baemin_reviews import BaeminScrapeError
 from scrapers.baemin_stats import BaeminStatsScrapeError
 
@@ -75,6 +76,10 @@ def sync_setup(db_session, seeded_user, platforms, monkeypatch):
     monkeypatch.setattr(review_sync_mod, "fetch_orders", lambda page, start_date, end_date, **kwargs: [])
     monkeypatch.setattr(review_sync_mod, "fetch_brand_click_metrics", lambda page, shop_no, months: [])
     monkeypatch.setattr(review_sync_mod, "fetch_settlement_breakdown_details", lambda page, start_date, end_date, **kwargs: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_brand_menu_info",
+        lambda page, shop_no: {"store_intro": "", "food_origin": "", "menu_intro": "", "menu_items": []},
+    )
 
     return job, conn
 
@@ -2489,3 +2494,105 @@ def test_sync_falls_back_to_default_category_when_classification_fails(db_sessio
     review = db_session.query(Review).filter_by(external_review_id=1001).one()
     assert review.category == "no_issue"
     assert review.is_sensitive is False
+
+
+_MENU_DATA = {
+    "store_intro": "100% 순살 닭다리살만 씁니다.",
+    "food_origin": "닭고기(국내산)",
+    "menu_intro": "야들야들한 닭다리살",
+    "menu_items": [{"name": "치킨마요", "desc": "", "composition": "치킨+마요+밥", "price": 8900}],
+}
+
+
+def test_sync_fetches_and_stores_brand_menu_info_when_missing(db_session, sync_setup, monkeypatch):
+    """브랜드의 brand_menu_info가 아직 없으면(최초 동기화) 메뉴 정보를
+    가져와 저장해야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_brand_menu_info", lambda page, shop_no: _MENU_DATA)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    info = db_session.query(BrandMenuInfo).filter_by(connection_id=conn.id, shop_no=str(_FakeSession.shop_no)).one()
+    assert info.store_intro == _MENU_DATA["store_intro"]
+    assert info.food_origin == _MENU_DATA["food_origin"]
+    assert info.menu_intro == _MENU_DATA["menu_intro"]
+    assert info.menu_items == _MENU_DATA["menu_items"]
+
+
+def test_sync_skips_brand_menu_info_fetch_when_recently_synced(db_session, sync_setup, monkeypatch):
+    """메뉴는 거의 안 바뀌므로 최근에(_MENU_INFO_MAX_AGE_DAYS 이내) 이미
+    동기화됐으면 다시 가져오면 안 된다 — 카드 클릭 비용 낭비."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    db_session.add(BrandMenuInfo(
+        connection_id=conn.id, shop_no=str(_FakeSession.shop_no),
+        store_intro="기존 소개", food_origin="기존 원산지", menu_intro="기존 메뉴 소개",
+        menu_items=[], updated_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_brand_menu_info",
+        lambda page, shop_no: pytest.fail("should not be called"),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    info = db_session.query(BrandMenuInfo).filter_by(connection_id=conn.id, shop_no=str(_FakeSession.shop_no)).one()
+    assert info.store_intro == "기존 소개"  # 그대로 유지 — 재조회 안 함
+
+
+def test_sync_refetches_brand_menu_info_when_stale(db_session, sync_setup, monkeypatch):
+    """_MENU_INFO_MAX_AGE_DAYS보다 오래된 메뉴 정보는 다시 가져와야 한다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    db_session.add(BrandMenuInfo(
+        connection_id=conn.id, shop_no=str(_FakeSession.shop_no),
+        store_intro="오래된 소개", food_origin="오래된 원산지", menu_intro="오래된 메뉴 소개",
+        menu_items=[], updated_at=datetime.now(timezone.utc) - timedelta(days=31),
+    ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_brand_menu_info", lambda page, shop_no: _MENU_DATA)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    info = db_session.query(BrandMenuInfo).filter_by(connection_id=conn.id, shop_no=str(_FakeSession.shop_no)).one()
+    assert info.store_intro == _MENU_DATA["store_intro"]  # 갱신됨
+
+
+def test_sync_menu_info_failure_does_not_fail_whole_job(db_session, sync_setup, monkeypatch):
+    """메뉴 정보 동기화 실패는 매출/재주문율 실패와 같은 부분 실패로
+    다뤄야 한다 — 리뷰 동기화 자체를 막으면 안 된다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
+
+    def _raise(page, shop_no):
+        raise BaeminMenuScrapeError("메뉴관리 페이지 이동에 실패했습니다")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_brand_menu_info", _raise)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert "메뉴 정보 동기화 실패" in job.error_message
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review is not None  # 리뷰 동기화는 정상 진행됨
+    assert db_session.query(BrandMenuInfo).count() == 0

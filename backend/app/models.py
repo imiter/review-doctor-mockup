@@ -8,7 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import JSON, BigInteger, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -89,6 +89,22 @@ class BaeminShopBrand(Base):
     connection_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("store_platform_connections.id"))
     shop_no: Mapped[str] = mapped_column(String(20))
     shop_name: Mapped[str] = mapped_column(String(200))
+
+    connection: Mapped["StorePlatformConnection"] = relationship()
+
+
+class BrandMenuInfo(Base):
+    __tablename__ = "brand_menu_info"
+    __table_args__ = (UniqueConstraint("connection_id", "shop_no"),)
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    connection_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("store_platform_connections.id"))
+    shop_no: Mapped[str] = mapped_column(String(20))
+    store_intro: Mapped[str | None] = mapped_column(Text)
+    food_origin: Mapped[str | None] = mapped_column(Text)
+    menu_intro: Mapped[str | None] = mapped_column(Text)
+    menu_items: Mapped[list[dict]] = mapped_column(JSONB().with_variant(JSON(), "sqlite"), default=list)
+    updated_at: Mapped[datetime]
 
     connection: Mapped["StorePlatformConnection"] = relationship()
 

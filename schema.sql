@@ -476,4 +476,25 @@ CREATE TABLE onboarding_scenarios (
     UNIQUE (store_id, category)
 );
 
+-- ----------------------------------------------------------------------------
+-- 24. brand_menu_info — 브랜드(shop_no)별 배민 메뉴관리 화면의 가게소개/원산지/
+--     메뉴소개 텍스트와 전체 메뉴 항목(이름/설명/구성/가격)을 저장한다. RAG
+--     답글 생성이 리뷰의 menu_summary와 매칭되는 실제 메뉴 구성("치킨마요는
+--     정량대로 닭이 들어간다" 같은 사실)을 참고할 수 있게 하기 위함
+--     (2026-08-26, no_issue RAG 통합 이후 메뉴 그라운딩 부재가 실제 오답
+--     원인으로 확인돼 추가). menu_items는 자주 조회/조인할 필요가 없는
+--     통째 참고용 데이터라 정규화하지 않고 JSONB 배열로 저장한다.
+-- ----------------------------------------------------------------------------
+CREATE TABLE brand_menu_info (
+    id            BIGSERIAL PRIMARY KEY,
+    connection_id BIGINT       NOT NULL REFERENCES store_platform_connections(id) ON DELETE CASCADE,
+    shop_no       VARCHAR(20)  NOT NULL,
+    store_intro   TEXT,
+    food_origin   TEXT,
+    menu_intro    TEXT,
+    menu_items    JSONB        NOT NULL DEFAULT '[]',
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    UNIQUE (connection_id, shop_no)
+);
+
 COMMIT;

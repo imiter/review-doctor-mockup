@@ -18,6 +18,7 @@ from app.models import (
     Alert,
     BaeminShopBrand,
     BrandAdClickMetric,
+    BrandMenuInfo,
     DailySettlement,
     Order,
     RepurchaseMetric,
@@ -33,6 +34,7 @@ from app.llm.classify import ClassificationError, classify_review
 from app.llm.generate import generate_ai_reply
 from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics, fetch_cpc_booking, map_click_metrics_by_date
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
+from scrapers.baemin_menu import BaeminMenuScrapeError, fetch_brand_menu_info
 from scrapers.baemin_reply_submit import BaeminReplySubmitError, submit_reply
 from scrapers.baemin_reviews import BaeminScrapeError, extract_owner_reply, fetch_all_reviews, map_review
 from scrapers.baemin_stats import (
@@ -55,6 +57,52 @@ from scrapers.baemin_stats import (
     parse_baemin_datetime,
     recent_months,
 )
+
+
+_MENU_INFO_MAX_AGE_DAYS = 30
+
+
+def menu_info_needs_refresh(db: Session, connection_id: int, shop_no: int) -> bool:
+    """메뉴는 리뷰·매출과 달리 거의 안 바뀌는 데이터라, 매 동기화마다 다시
+    가져오면 카드 클릭 비용(정산 상세와 같은 종류)만 낭비다. 없거나
+    `_MENU_INFO_MAX_AGE_DAYS`보다 오래됐을 때만 다시 가져온다."""
+    row = db.scalar(
+        select(BrandMenuInfo.updated_at).where(
+            BrandMenuInfo.connection_id == connection_id,
+            BrandMenuInfo.shop_no == str(shop_no),
+        )
+    )
+    if row is None:
+        return True
+    # updated_at은 항상 UTC로 저장한다. Postgres(TIMESTAMPTZ)는 읽어올 때도
+    # aware datetime을 돌려주지만, 테스트에 쓰는 SQLite는 tzinfo를 버리고
+    # naive로 돌려준다(baemin_stats.py의 동일 패턴 참고) — aware와 비교하면
+    # TypeError가 나므로 naive면 UTC로 간주해 보정한다.
+    if row.tzinfo is None:
+        row = row.replace(tzinfo=timezone.utc)
+    return row < datetime.now(timezone.utc) - timedelta(days=_MENU_INFO_MAX_AGE_DAYS)
+
+
+def upsert_brand_menu_info(db: Session, connection_id: int, shop_no: int, menu_data: dict) -> None:
+    existing = db.scalar(
+        select(BrandMenuInfo).where(
+            BrandMenuInfo.connection_id == connection_id,
+            BrandMenuInfo.shop_no == str(shop_no),
+        )
+    )
+    if existing is None:
+        db.add(BrandMenuInfo(
+            connection_id=connection_id, shop_no=str(shop_no),
+            store_intro=menu_data["store_intro"], food_origin=menu_data["food_origin"],
+            menu_intro=menu_data["menu_intro"], menu_items=menu_data["menu_items"],
+            updated_at=datetime.now(timezone.utc),
+        ))
+    else:
+        existing.store_intro = menu_data["store_intro"]
+        existing.food_origin = menu_data["food_origin"]
+        existing.menu_intro = menu_data["menu_intro"]
+        existing.menu_items = menu_data["menu_items"]
+        existing.updated_at = datetime.now(timezone.utc)
 
 
 def upsert_shop_brand(db: Session, connection_id: int, shop_no: int, shop_name: str) -> None:
@@ -302,12 +350,22 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
     # 사실이 눈에 보여야 하고, 전부 실패했을 때도 어느 매장이 왜 실패했는지
     # 전부 알 수 있어야 한다.
     failed_shops: list[str] = []
+    # 메뉴 정보 동기화 실패도 매출/재주문율/입금과 같은 종류의 "부분 실패"다 —
+    # 리뷰 동기화 자체를 막으면 안 되므로 별도로 모은다.
+    menu_errors: list[str] = []
 
     try:
         for shop_no, shop_name in session.shops:
             # 매장 발견 자체는 로그인 단계에서 이미 끝났으므로, 이후 리뷰
             # 조회가 이 매장에서 실패해도 브랜드 이름은 저장해둔다.
             upsert_shop_brand(db, conn.id, shop_no, shop_name)
+
+            if menu_info_needs_refresh(db, conn.id, shop_no):
+                try:
+                    menu_data = fetch_brand_menu_info(session.page, shop_no)
+                    upsert_brand_menu_info(db, conn.id, shop_no, menu_data)
+                except BaeminMenuScrapeError as e:
+                    menu_errors.append(f"{shop_name}: {e}")
 
             try:
                 raw_reviews = fetch_all_reviews(session.page, shop_no, existing_ids=existing_ids)
@@ -738,6 +796,8 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
         messages.append(f"매출/재주문율/입금 동기화 실패: {'; '.join(stats_errors)}")
     if auto_reply_errors:
         messages.append(f"자동 답글 실패: {'; '.join(auto_reply_errors)}")
+    if menu_errors:
+        messages.append(f"메뉴 정보 동기화 실패: {'; '.join(menu_errors)}")
     if messages:
         job.error_message = " / ".join(messages)
     job.finished_at = datetime.now(timezone.utc)

@@ -284,3 +284,71 @@ def test_generate_ai_reply_falls_back_to_store_name_when_no_brand_match(db_sessi
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
     assert '"치킨대장"' in captured["system"]
+
+
+def test_generate_ai_reply_includes_matched_menu_composition(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """리뷰의 menu_summary와 이름이 매칭되는 실제 메뉴 구성을 프롬프트에
+    포함해야 한다 — "치킨마요는 밥만 많고 고기가 없다"는 불만에 AI가
+    실제 구성을 모른 채 틀린 원인을 추측하던 문제(2026-08-26)를 고친
+    회귀 테스트."""
+    from app.models import BrandMenuInfo, StorePlatformConnection
+
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    connection = db_session.scalar(
+        select(StorePlatformConnection).where(StorePlatformConnection.store_id == sid)
+    )
+    db_session.add(BrandMenuInfo(
+        connection_id=connection.id, shop_no="14804318",
+        store_intro="100% 순살 닭다리살만 씁니다.",
+        food_origin="닭고기(국내산)",
+        menu_intro="연육염지닭 사용",
+        menu_items=[
+            {"name": "치킨마요:", "desc": "든든한 한 끼", "composition": "치킨마요[닭다리살 정량]+공기밥", "price": 8900},
+        ],
+        updated_at=datetime.now(timezone.utc),
+    ))
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="치킨마요", rating=5,
+        content="치킨마요에 밥양만 많고 고기가 거의없어서", customer_nickname="손님",
+        platform_shop_no="14804318", category="no_issue", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["system"] = system
+        return "..."
+
+    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+
+    generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert "치킨마요[닭다리살 정량]+공기밥" in captured["system"]
+    assert "100% 순살 닭다리살만 씁니다" in captured["system"]
+
+
+def test_generate_ai_reply_omits_menu_section_when_no_brand_menu_info(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="치킨마요", rating=5, content="맛있어요",
+        customer_nickname="손님", platform_shop_no="14804318", category="no_issue",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["system"] = system
+        return "..."
+
+    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+
+    generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert "가게/메뉴 실제 정보" not in captured["system"]
