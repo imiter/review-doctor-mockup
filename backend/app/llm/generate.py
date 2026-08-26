@@ -38,6 +38,35 @@ _SENSITIVE_TONE_OVERRIDE = (
     "페르소나 톤과 무관하게 이모지 없이 차분하고 진중하게 작성하세요."
 )
 
+# 이모지 유니코드 대역 — 실사용 중 민감 리뷰(is_sensitive/sentiment_conflict)에
+# "이모지 없이"라고 지시해도 이모지가 섞여 나오는 문제가 확인됐다(2026-08-26).
+# 원인은 [참고 예시]에 넣는 골든 예시 자체가 사장님의 실제 과거 답글이라 이모지가
+# 섞여있는 경우가 많아, 프롬프트 지시문과 few-shot 예시가 서로 모순되는
+# 신호를 주기 때문이다 — 텍스트 지시만으로는 안정적으로 이길 수 없다. 그래서
+# 민감 리뷰일 때는 (1) 프롬프트에 넣는 예시 텍스트에서부터 이모지를 지워
+# 모순되는 신호 자체를 없애고, (2) 최종 생성 결과에서도 한 번 더 걸러내
+# 확정적으로 보장한다.
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"  # 이모지·픽토그램(표정, 사물, 확장 심볼 등)
+    "\U00002600-\U000026FF"  # 기타 심볼(☀☎ 등)
+    "\U00002700-\U000027BF"  # 딩뱃(✅❌ 등)
+    "\U0001F1E6-\U0001F1FF"  # 국기(지역 표시 문자)
+    "\U00002B00-\U00002BFF"  # 화살표/별 등 기타 심볼(⭐ 등)
+    "\U0000FE0F"              # variation selector-16 (이모지 표시 강제)
+    "\U0000200D"              # zero-width joiner (복합 이모지 결합)
+    "]+"
+)
+
+
+def _strip_emoji(text: str) -> str:
+    without_emoji = _EMOJI_PATTERN.sub("", text)
+    # 이모지 양옆에 공백이 있던 자리(예: "안녕 😊 하세요")가 이중 공백으로
+    # 남는 것과, 줄 끝에 이모지만 있던 자리(예: "감사합니다😊\n")가 그대로
+    # 남는 것을 정리한다. 문단을 나누는 줄바꿈 자체는 건드리지 않는다.
+    collapsed = re.sub(r"[ \t]{2,}", " ", without_emoji)
+    return re.sub(r"[ \t]+\n", "\n", collapsed).strip()
+
 CATEGORY_LABELS = {
     "food_quality": "음식 품질(맛/온도/양)",
     "delivery": "배달(지연/파손)",
@@ -141,9 +170,12 @@ def _find_menu_context(db: Session, store: Store, review: Review) -> str | None:
     return "\n\n".join(lines) if lines else None
 
 
-def _build_system_prompt(display_name: str, style_rules: str, examples, tone_instruction: str, menu_context: str | None = None) -> str:
+def _build_system_prompt(display_name: str, style_rules: str, examples, tone_instruction: str, menu_context: str | None = None, *, strip_example_emoji: bool = False) -> str:
+    def _example_reply(ex) -> str:
+        return _strip_emoji(ex.reply_text) if strip_example_emoji else ex.reply_text
+
     example_block = "\n\n".join(
-        f'예시 {i}: 리뷰 "{ex.review_text}" / 답글 "{ex.reply_text}"'
+        f'예시 {i}: 리뷰 "{ex.review_text}" / 답글 "{_example_reply(ex)}"'
         for i, ex in enumerate(examples, start=1)
     ) if examples else "(아직 참고할 예시가 없습니다.)"
 
@@ -206,14 +238,15 @@ def generate_ai_reply(db: Session, review: Review, store: Store, style: ReplySty
     repeat_count = count_recent_same_category(db, store.id, review.category, days=30)
     category_label = CATEGORY_LABELS.get(review.category, review.category)
 
-    tone_instruction = (
-        _SENSITIVE_TONE_OVERRIDE
-        if review.is_sensitive or review.sentiment_conflict
-        else style.tone_instruction
-    )
+    tone_overridden = review.is_sensitive or review.sentiment_conflict
+    tone_instruction = _SENSITIVE_TONE_OVERRIDE if tone_overridden else style.tone_instruction
 
     display_name = _resolve_display_name(db, store, review)
     menu_context = _find_menu_context(db, store, review)
-    system_prompt = _build_system_prompt(display_name, style_rules, examples, tone_instruction, menu_context)
+    system_prompt = _build_system_prompt(
+        display_name, style_rules, examples, tone_instruction, menu_context,
+        strip_example_emoji=tone_overridden,
+    )
     user_message = _build_user_message(review, category_label, repeat_count)
-    return client.call_sonnet(system_prompt, user_message, max_tokens=800)
+    content = client.call_sonnet(system_prompt, user_message, max_tokens=800)
+    return _strip_emoji(content) if tone_overridden else content

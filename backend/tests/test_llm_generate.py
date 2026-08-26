@@ -193,6 +193,84 @@ def test_generate_ai_reply_overrides_tone_when_sentiment_conflict(db_session, se
     assert reply_styles.tone_instruction not in captured["system"]
 
 
+def test_generate_ai_reply_strips_emoji_from_output_when_sensitive(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """텍스트 지시("이모지 없이")만으로는 few-shot 예시(사장님의 실제 과거
+    답글, 이모지 섞인 경우가 많음)와 신호가 충돌해 이모지가 새어나오는
+    문제가 실사용으로 확인됐다(2026-08-26) — 최종 출력에서 확정적으로
+    한 번 더 걸러낸다."""
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="치킨", rating=1, content="이물질이 나왔어요",
+        customer_nickname="손님", customer_order_count=1, category="hygiene",
+        is_sensitive=True, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        generate.client, "call_sonnet",
+        lambda system, user, **kw: "안녕하세요😊 죄송합니다🙏 확인하겠습니다😞",
+    )
+
+    result = generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert "😊" not in result and "🙏" not in result and "😞" not in result
+    assert result == "안녕하세요 죄송합니다 확인하겠습니다"
+
+
+def test_generate_ai_reply_keeps_emoji_when_not_sensitive(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="치킨", rating=5, content="맛있어요",
+        customer_nickname="손님", customer_order_count=1, category="no_issue",
+        is_sensitive=False, sentiment_conflict=False, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    monkeypatch.setattr(generate.client, "call_sonnet", lambda system, user, **kw: "감사합니다😊")
+
+    result = generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert result == "감사합니다😊"  # 민감 리뷰가 아니면 이모지를 그대로 둔다
+
+
+def test_generate_ai_reply_strips_emoji_from_examples_when_sensitive(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """프롬프트에 넣는 [참고 예시]에서부터 이모지를 지워, 지시문("이모지
+    없이")과 모순되는 신호 자체를 없앤다 — 출력만 사후 필터링하면 예시가
+    계속 이모지 섞인 톤을 보여줘 다른 부분(문장 구조, 격식)까지 영향을
+    줄 수 있다."""
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    db_session.add(GoldenExample(
+        store_id=sid, category="hygiene", review_text="예전 리뷰",
+        reply_text="안녕하세요😊 죄송합니다🙏",
+        is_manual=True, is_synthetic=False, source="backfill", created_at=datetime.now(timezone.utc),
+    ))
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="치킨", rating=1, content="이물질이 나왔어요",
+        customer_nickname="손님", customer_order_count=1, category="hygiene",
+        is_sensitive=True, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["system"] = system
+        return "..."
+
+    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+
+    generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert "😊" not in captured["system"] and "🙏" not in captured["system"]
+    assert "안녕하세요 죄송합니다" in captured["system"]  # 예시 내용 자체는 남아있음
+
+
 def test_generate_ai_reply_grounding_present_even_when_tone_overridden(db_session, seeded_user, platforms, reply_styles, monkeypatch):
     """톤이 override돼도 사장님 말투 그라운딩(store_style_profile)과 골든
     예시는 그대로 시스템 프롬프트에 남아있어야 한다 — 톤 레이어는 표면적
