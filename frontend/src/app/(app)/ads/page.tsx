@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Card } from "@/components/Card";
-import { ApiError, apiGet, apiPatch, apiPost, won } from "@/lib/api";
+import { RingGauge } from "@/components/RingGauge";
+import { ThresholdBar } from "@/components/ThresholdBar";
+import { ApiError, apiGet, apiPatch, apiPost, percent, won } from "@/lib/api";
 import { useStoreContext } from "@/lib/store-context";
 
 type RankRow = {
@@ -370,29 +372,49 @@ export default function AdsPage() {
           {performance.map((p) => (
             <div key={p.campaign_id} className="rounded-xl border border-border-subtle bg-surface-2 p-4">
               <p className="text-sm font-medium">
-                {p.display_name ? `${p.display_name} · ${p.category}` : p.category}
+                {p.display_name ?? p.category}
               </p>
-              <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+              {p.display_name && <p className="text-xs text-muted">{p.category}</p>}
+              <div className="mt-3 grid grid-cols-3 gap-3 text-xs">
+                <div>
+                  <p className="text-muted">광고비</p>
+                  <p className="font-semibold">{won(p.ad_spend)}</p>
+                </div>
+                <div>
+                  <p className="text-muted">클릭수</p>
+                  <p className="font-semibold">{p.clicks}회</p>
+                </div>
+                <div>
+                  <p className="text-muted">광고주문</p>
+                  <p className="font-semibold">{p.ad_orders}건</p>
+                </div>
+                <div>
+                  <p className="text-muted">광고매출</p>
+                  <p className="font-semibold">{won(p.ad_revenue)}</p>
+                </div>
                 <div>
                   <p className="text-muted">CPC</p>
                   <p className="font-semibold">{won(Math.round(p.cpc))}</p>
                 </div>
                 <div>
-                  <p className="text-muted">CVR</p>
-                  <p className="font-semibold">{(p.cvr * 100).toFixed(1)}%</p>
-                </div>
-                <div>
                   <p className="text-muted">AOV</p>
                   <p className="font-semibold">{won(Math.round(p.aov))}</p>
                 </div>
-                <div>
-                  <p className="text-muted">ACoS</p>
-                  <p className="font-semibold">{p.acos !== null ? `${p.acos}%` : "—"}</p>
-                </div>
               </div>
-              <div className="mt-3 flex items-center justify-between border-t border-border-subtle pt-3">
-                <span className="text-xs text-muted">성과 점수</span>
-                <span className="text-lg font-bold text-accent">{p.score ?? "—"}점</span>
+              <div className="mt-4 flex items-center justify-between gap-4 border-t border-border-subtle pt-3">
+                <div className="flex-1">
+                  <p className="text-xs text-muted">CVR</p>
+                  <p className="text-sm font-semibold">{percent(p.cvr)}</p>
+                  <p className="mt-2.5 text-xs text-muted">ACoS</p>
+                  {p.acos !== null ? (
+                    <div className="mt-1">
+                      <ThresholdBar value={p.acos} />
+                    </div>
+                  ) : (
+                    <p className="text-sm font-semibold">—</p>
+                  )}
+                </div>
+                <RingGauge value={p.score ?? 0} size={64} strokeWidth={6} />
               </div>
             </div>
           ))}

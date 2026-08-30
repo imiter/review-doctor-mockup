@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Card } from "@/components/Card";
 import { Modal } from "@/components/Modal";
+import { RingGauge } from "@/components/RingGauge";
+import { ThresholdBar } from "@/components/ThresholdBar";
 import { apiGet, percent, won } from "@/lib/api";
 import { useStoreContext } from "@/lib/store-context";
 
@@ -24,10 +26,6 @@ type DashboardResponse = {
   unread_alerts: number;
 };
 type Alert = { id: number; alert_type: string; message: string; created_at: string };
-type AdPerformance = {
-  category: string; cpc: number; cvr: number; aov: number; acos: number | null; score: number | null;
-  order_share: number | null; clicks: number; ad_orders: number;
-};
 type ClickPerformance = {
   shop_no: string; period_days: number; ad_spend: number; impressions: number; clicks: number;
   ad_orders: number; ad_revenue: number; cpc: number; cvr: number; aov: number;
@@ -314,8 +312,21 @@ export default function DashboardPage() {
             )}
           </div>
           <button onClick={() => setOpenModal("ugacle")} className="w-full text-left">
-            <p className="text-2xl font-bold text-accent">{clickPerf?.score ?? "—"}점</p>
-            <p className="mt-1 text-xs text-muted">ACoS {clickPerf?.acos ?? "—"}%</p>
+            {clickPerf ? (
+              <div className="flex items-center gap-4">
+                <RingGauge value={clickPerf.score ?? 0} size={72} strokeWidth={7} />
+                <div className="flex-1">
+                  <p className="text-xs text-muted">ACoS {clickPerf.acos ?? "—"}%</p>
+                  {clickPerf.acos != null && (
+                    <div className="mt-2">
+                      <ThresholdBar value={clickPerf.acos} />
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <p className="text-2xl font-bold text-accent">—</p>
+            )}
           </button>
         </div>
         <ClickableCard title="매출 분석" onClick={() => setOpenModal("sales_breakdown")}>
@@ -323,10 +334,19 @@ export default function DashboardPage() {
           <p className="mt-1 text-xs text-muted">정산표 · 손익 상세 보기</p>
         </ClickableCard>
         <ClickableCard title="재주문율 (보정 후)" onClick={() => setOpenModal("repurchase")}>
-          <p className="text-2xl font-bold">
-            {dashboard.repurchase_rate_adjusted !== null ? percent(dashboard.repurchase_rate_adjusted) : "—"}
-          </p>
-          <p className="mt-1 text-xs text-muted">최근 7일 합산 기준</p>
+          {dashboard.repurchase_rate_adjusted !== null ? (
+            <RingGauge
+              value={dashboard.repurchase_rate_adjusted * 100}
+              size={56}
+              strokeWidth={6}
+              colorClassName="text-accent"
+              valueLabel={`${(dashboard.repurchase_rate_adjusted * 100).toFixed(1)}%`}
+              valueFontSize={13}
+            />
+          ) : (
+            <p className="text-2xl font-bold">—</p>
+          )}
+          <p className="mt-3 text-xs text-muted">최근 7일 합산 기준</p>
         </ClickableCard>
       </div>
 
