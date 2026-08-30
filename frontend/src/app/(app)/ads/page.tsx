@@ -9,6 +9,7 @@ import { useStoreContext } from "@/lib/store-context";
 type RankRow = {
   campaign_id: number;
   category: string;
+  display_name: string | null;
   current_cpc: number;
   target_rank: number;
   status: "active" | "paused";
@@ -38,6 +39,7 @@ type DistanceRankRow = {
 type PerformanceRow = {
   campaign_id: number;
   category: string;
+  display_name: string | null;
   ad_spend: number;
   clicks: number;
   ad_orders: number;
@@ -206,7 +208,7 @@ export default function AdsPage() {
                 const dropped = r.rank_status === "rank_dropped";
                 return (
                   <tr key={r.campaign_id} className="border-b border-border-subtle last:border-0">
-                    <td className="py-3">{r.category}</td>
+                    <td className="py-3">{r.display_name ? `${r.display_name} · ${r.category}` : r.category}</td>
                     <td>{won(r.current_cpc)}</td>
                     <td>{r.target_rank}위</td>
                     <td className={`font-semibold ${dropped ? "text-danger" : "text-success"}`}>
@@ -256,7 +258,9 @@ export default function AdsPage() {
             return (
             <div key={c.campaign_id}>
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-medium">{c.category}</p>
+                <p className="text-sm font-medium">
+                  {rank?.display_name ? `${rank.display_name} · ${c.category}` : c.category}
+                </p>
                 <button
                   onClick={() => handleRunCheck(c.campaign_id)}
                   disabled={!LIVE_CRAWL_ENABLED || runningCampaignId !== null}
@@ -365,7 +369,9 @@ export default function AdsPage() {
         <div className="grid gap-4 sm:grid-cols-2">
           {performance.map((p) => (
             <div key={p.campaign_id} className="rounded-xl border border-border-subtle bg-surface-2 p-4">
-              <p className="text-sm font-medium">{p.category}</p>
+              <p className="text-sm font-medium">
+                {p.display_name ? `${p.display_name} · ${p.category}` : p.category}
+              </p>
               <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
                 <div>
                   <p className="text-muted">CPC</p>
