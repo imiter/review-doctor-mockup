@@ -411,6 +411,38 @@ def test_sync_all_shops_failing_marks_job_failed(db_session, sync_setup, monkeyp
     assert db_session.query(Review).count() == 0
 
 
+def test_run_review_sync_job_marks_job_failed_when_sync_raises_unexpectedly(db_session, sync_setup, monkeypatch):
+    """run_review_sync_job은 sync_reviews_for_job이 던지는 예상 밖 예외(예: DB
+    커넥션 자체가 죽어서 나는 오류)를 잡아 잡을 failed로 기록해야 한다 —
+    안 그러면 그 잡이 pending에 영원히 갇혀서 이후 모든 동기화 시도(수동+
+    스케줄러)가 "이미 진행 중"으로 막힌다(2026-08-30 실측 사고: 크롤 워커의
+    DB 커넥션이 idle 중 죽어있어 run_review_sync_job의 첫 줄 db.get(...)에서
+    바로 예외가 났는데 아무도 안 잡아서 잡이 계속 pending으로 남았다)."""
+    import app.review_sync as review_sync_mod
+    from sqlalchemy.orm import sessionmaker
+
+    job, conn = sync_setup
+
+    # run_review_sync_job은 자기만의 세션(SessionLocal())을 여는데, 테스트
+    # DB(db_session)와 같은 SQLite 엔진에 바인딩된 세션메이커로 바꿔치기해야
+    # 두 세션이 같은 테스트 DB를 보게 된다.
+    test_sessionmaker = sessionmaker(bind=db_session.get_bind(), autoflush=False)
+    monkeypatch.setattr(review_sync_mod, "SessionLocal", test_sessionmaker)
+
+    def _boom(job, conn, db):
+        raise RuntimeError("커넥션이 끊겼습니다 (시뮬레이션)")
+
+    monkeypatch.setattr(review_sync_mod, "sync_reviews_for_job", _boom)
+
+    review_sync_mod.run_review_sync_job(job.id)
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.error_message is not None
+    assert "커넥션이 끊겼습니다" in job.error_message
+    assert job.finished_at is not None
+
+
 def test_sync_upserts_shop_brand_name_change_without_duplicate(db_session, sync_setup, monkeypatch):
     """이전 동기화에서 저장된 브랜드명이 배민 쪽에서 바뀐 경우, 재동기화 시
     기존 baemin_shop_brands 행을 갱신해야지 중복 행을 만들면 안 된다."""

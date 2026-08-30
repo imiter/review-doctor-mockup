@@ -6,6 +6,7 @@
 세션은 이미 닫혀 있기 때문이다.
 """
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select, update
@@ -58,6 +59,7 @@ from scrapers.baemin_stats import (
     recent_months,
 )
 
+logger = logging.getLogger(__name__)
 
 _MENU_INFO_MAX_AGE_DAYS = 30
 
@@ -830,5 +832,32 @@ def run_review_sync_job(job_id: int) -> None:
             )
         )
         sync_reviews_for_job(job, conn, db)
+    except Exception as e:  # noqa: BLE001 — 백그라운드 작업이라 여기서 못 잡으면 FastAPI가
+        # 로그에만 찍고 삼켜버려서 잡이 pending/running에 영원히 갇힌다(2026-08-30
+        # 실측 — DB 커넥션이 죽어있어 job = db.get(...) 첫 줄에서부터 예외가 났는데
+        # 아무도 안 잡아서 스케줄러가 6시간 경과 판정을 할 때까지 그 매장 동기화가
+        # 전부 막혔다). 원인이 이 db 세션의 커넥션 자체일 수 있으니 상태 기록은
+        # 완전히 새 세션으로 한다.
+        logger.exception("동기화 잡 처리 중 예상치 못한 오류 job_id=%s", job_id)
+        _mark_job_failed_with_fresh_session(job_id, str(e))
     finally:
         db.close()
+
+
+def _mark_job_failed_with_fresh_session(job_id: int, error: str) -> None:
+    """run_review_sync_job이 실패했을 때 job.status를 "failed"로 기록한다.
+    실패 원인이 원래 세션의 DB 커넥션 자체(끊김/타임아웃)일 수 있어 그 세션을
+    재사용하면 기록도 똑같이 실패하므로, 완전히 새 세션을 연다 — app/db.py의
+    pool_pre_ping이 죽은 커넥션을 자동으로 재검증/재연결해준다."""
+    recovery_db = SessionLocal()
+    try:
+        job = recovery_db.get(ReviewSyncJob, job_id)
+        if job is not None and job.status in ("pending", "running"):
+            job.status = "failed"
+            job.error_message = f"동기화 처리 중 예외 발생: {error}"[:500]
+            job.finished_at = datetime.now(timezone.utc)
+            recovery_db.commit()
+    except Exception:  # noqa: BLE001 — 실패 기록 자체가 실패해도 여기서 죽으면 안 된다
+        logger.exception("동기화 실패 상태 기록 중에도 오류 발생 job_id=%s", job_id)
+    finally:
+        recovery_db.close()
