@@ -11,6 +11,7 @@ import hmac
 import logging
 import os
 import pathlib
+import re
 import subprocess
 import threading
 import time
@@ -30,6 +31,7 @@ from app.models import (
     AdCampaign,
     AdPerformanceMetric,
     AdRankSnapshot,
+    BaeminShopBrand,
     BrandAdClickMetric,
     Order,
     Platform,
@@ -74,6 +76,25 @@ def _crawler_subprocess_env() -> dict:
     extra = os.pathsep.join(str(pathlib.Path(c) / "platform-tools") for c in candidates)
     env["PATH"] = f"{extra}{os.pathsep}{env.get('PATH', '')}"
     return env
+
+
+def _resolve_campaign_display_name(db: Session, store_id: int, shop_no: str | None) -> str | None:
+    """캠페인의 shop_no로 실제 배민 브랜드명을 찾는다. app/llm/generate.py의
+    _resolve_display_name과 동일한 조회·정제 로직(태그/카테고리 번호 제거)을
+    쓰되, 리뷰 답글과 달리 store.name으로 폴백하지 않는다 — shop_no가 없거나
+    브랜드를 못 찾으면 이 캠페인은 애초에 특정 매장을 가리키지 않는다는
+    뜻이라 대표 매장 이름을 대신 보여주면 오히려 오해를 준다."""
+    if not shop_no:
+        return None
+    brand = db.scalar(
+        select(BaeminShopBrand)
+        .join(StorePlatformConnection, BaeminShopBrand.connection_id == StorePlatformConnection.id)
+        .where(StorePlatformConnection.store_id == store_id, BaeminShopBrand.shop_no == shop_no)
+    )
+    if brand is None:
+        return None
+    name = re.sub(r"^\[[^\]]*\]\s*", "", brand.shop_name)
+    return name.split(" / ")[0].strip() or None
 
 
 def _latest_distance_points(db: Session, campaign: AdCampaign) -> list[dict]:
@@ -148,6 +169,7 @@ def ads_performance(
         result.append({
             "campaign_id": c.id,
             "category": c.category,
+            "display_name": _resolve_campaign_display_name(db, sid, c.shop_no),
             "current_cpc": c.current_cpc,
             "status": c.status,
             "period_days": days,
@@ -700,6 +722,7 @@ def ads_rank_monitoring(
             result.append({
                 "campaign_id": c.id,
                 "category": c.category,
+                "display_name": _resolve_campaign_display_name(db, sid, c.shop_no),
                 "current_cpc": c.current_cpc,
                 "target_rank": c.target_rank,
                 "status": c.status,
@@ -721,6 +744,7 @@ def ads_rank_monitoring(
         result.append({
             "campaign_id": c.id,
             "category": c.category,
+            "display_name": None,  # shop_no 없는 Mock 카테고리 캠페인은 특정 매장이 아니라 브랜드명이 없다
             "current_cpc": c.current_cpc,
             "target_rank": c.target_rank,
             "status": c.status,

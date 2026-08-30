@@ -12,7 +12,7 @@ from fastapi import HTTPException
 import app.routers.ads as ads_module
 from app.auth import hash_password
 from app.credential_crypto import encrypt_credential
-from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BrandAdClickMetric, Order, Store, StorePlatformConnection, Subscription, User
+from app.models import AdCampaign, AdPerformanceMetric, AdRankSnapshot, BaeminShopBrand, BrandAdClickMetric, Order, Store, StorePlatformConnection, Subscription, User
 
 
 def make_campaign(db_session, store, current_cpc=400, target_rank=3, shop_no=None):
@@ -764,3 +764,59 @@ def test_internal_apply_bid_starts_background_job(client, db_session, seeded_use
     assert res.status_code == 200
     assert res.json() == {"status": "started"}
     assert called == {"campaign_id": campaign.id, "amount": 125}
+
+
+def test_rank_monitoring_includes_display_name_when_shop_no_matches(client, db_session, seeded_user, platforms, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
+    connection = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+    ).first()
+    db_session.add(BaeminShopBrand(
+        connection_id=connection.id, shop_no="12345",
+        shop_name="[음식배달] 치밥대장 노원당고개점 / 치킨 99999",
+    ))
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="12345")
+    db_session.commit()
+
+    row = client.get("/ads/rank-monitoring", headers=auth_headers).json()[0]
+    assert row["campaign_id"] == campaign.id
+    assert row["display_name"] == "치밥대장 노원당고개점"
+
+
+def test_rank_monitoring_display_name_null_when_no_shop_no(client, db_session, seeded_user, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
+    campaign = make_campaign(db_session, seeded_user["store"])
+    db_session.commit()
+
+    row = client.get("/ads/rank-monitoring", headers=auth_headers).json()[0]
+    assert row["campaign_id"] == campaign.id
+    assert row["display_name"] is None
+
+
+def test_rank_monitoring_display_name_null_when_shop_no_has_no_matching_brand(client, db_session, seeded_user, auth_headers):
+    """shop_no는 있지만 아직 브랜드 목록 동기화 전이라 baemin_shop_brands에
+    해당 행이 없는 경우 — store.name으로 폴백하지 않고 None이어야 한다."""
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="99999")
+    db_session.commit()
+
+    row = client.get("/ads/rank-monitoring", headers=auth_headers).json()[0]
+    assert row["campaign_id"] == campaign.id
+    assert row["display_name"] is None
+
+
+def test_ads_performance_includes_display_name(client, db_session, seeded_user, platforms, auth_headers):
+    _upgrade_to_pro(db_session, seeded_user["user"].id)
+    connection = db_session.query(StorePlatformConnection).filter_by(
+        store_id=seeded_user["store"].id, platform_id=platforms["baemin"].id,
+    ).first()
+    db_session.add(BaeminShopBrand(
+        connection_id=connection.id, shop_no="12345",
+        shop_name="[음식배달] 치밥대장 노원당고개점 / 치킨 99999",
+    ))
+    campaign = make_campaign(db_session, seeded_user["store"], shop_no="12345")
+    db_session.commit()
+
+    row = client.get("/ads/performance", headers=auth_headers).json()[0]
+    assert row["campaign_id"] == campaign.id
+    assert row["display_name"] == "치밥대장 노원당고개점"
