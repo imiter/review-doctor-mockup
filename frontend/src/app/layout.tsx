@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Delivery Review & Store Insight",
+  title: "스토어 타겟",
   description: "배달매장 사장을 위한 DB 설계 중심 MVP — Mock 데이터/API",
 };
 

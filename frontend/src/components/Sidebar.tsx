@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useStoreContext } from "@/lib/store-context";
+import { Logo } from "@/components/Logo";
 
 const ICONS = {
   dashboard: (
@@ -100,11 +101,11 @@ export function Sidebar() {
 
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col overflow-y-auto border-r border-border-subtle bg-surface">
-      <div className="flex items-center gap-2 px-5 py-5">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-sm font-bold text-white">D</div>
+      <div className="flex items-center gap-2.5 px-5 py-5">
+        <Logo size={32} />
         <div>
-          <p className="text-sm font-semibold leading-tight">Delivery Review</p>
-          <p className="text-[11px] text-muted leading-tight">& Store Insight</p>
+          <p className="text-sm font-semibold leading-tight">스토어 타겟</p>
+          <p className="text-[11px] text-muted leading-tight">Store Target</p>
         </div>
       </div>
 

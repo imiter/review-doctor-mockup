@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { ApiError, apiPost, getToken, setToken } from "@/lib/api";
 import { kakaoAuthorizeUrl } from "@/lib/kakao";
+import { Logo } from "@/components/Logo";
 
 type TokenResponse = { access_token: string };
 
@@ -43,13 +44,11 @@ function LoginForm() {
   return (
     <main className="flex min-h-screen items-center justify-center px-4">
       <div className="w-full max-w-sm rounded-2xl border border-border-subtle bg-surface p-8 shadow-2xl shadow-black/40">
-        <div className="mb-8 flex items-center gap-2">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent text-lg font-bold text-white">
-            D
-          </div>
+        <div className="mb-8 flex items-center gap-2.5">
+          <Logo size={36} />
           <div>
-            <p className="text-base font-semibold">Delivery Review</p>
-            <p className="text-xs text-muted">& Store Insight</p>
+            <p className="text-base font-semibold">스토어 타겟</p>
+            <p className="text-xs text-muted">Store Target</p>
           </div>
         </div>
 
