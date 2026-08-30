@@ -649,6 +649,19 @@ Voyage가 배치 안에 빈 문자열이 하나라도 있으면 요청 전체를
 클라이언트(앱)로도 보여준다"는 범위다. 복잡한 권한/다중 사업자 권한 관리는
 여전히 금지 — 웹과 동일하게 사장 1명 = 로그인 1개 기준으로 만든다.
 
+실제 구현은 이 저장소(review-docter) 안이 아니라 별도 저장소
+`/Users/kunhee/Developer/ReviewDocterMobile`에서 진행한다(2026-08-28,
+사용자 결정) — RoomFinder(`/Users/kunhee/Developer/Roomfinder/RoomFinder`)와
+같은 레벨의 독립 프로젝트로 분리했다. 백엔드 API는 이 저장소의 FastAPI를
+그대로 호출한다(위 원칙 그대로 유지, 새 엔드포인트 없음). RoomFinder의
+구조(feature 기반 폴더, React Navigation, TanStack Query, Zustand,
+react-native-keychain 토큰 저장)를 그대로 따르되, 색상 팔레트는 RoomFinder의
+베이지 톤이 아니라 review-docter 웹(`frontend/src/app/globals.css`)의
+다크 테마 토큰을 그대로 이식했다 — 앱과 웹이 같은 브랜드로 보이도록. 카카오
+로그인은 RoomFinder처럼 네이티브 SDK 토큰 방식인데 이 저장소의
+`/kakao/callback`은 웹과 동일한 authorization code 방식만 받아 아직
+미해결 — 첫 MVP는 이메일 로그인으로만 시작했다.
+
 ## 개인정보 원칙
 - 실제 개인정보는 저장하지 않는다.
 - 전화번호는 원문 대신 phone_hash로만 저장한다.
