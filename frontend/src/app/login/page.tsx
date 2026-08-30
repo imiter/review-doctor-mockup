@@ -100,7 +100,7 @@ function LoginForm() {
         </p>
 
         <button
-          onClick={(e) => submit(e, "demo@dris.kr", "demo1234!")}
+          onClick={(e) => submit(e, "demo@dris.kr", "Dntm156!@")}
           disabled={loading}
           className="mt-3 w-full rounded-lg border border-border-subtle py-2.5 text-sm text-muted transition hover:border-accent hover:text-foreground disabled:opacity-50"
         >
