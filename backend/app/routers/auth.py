@@ -1,6 +1,7 @@
 """이메일 로그인/회원가입(이메일 인증) + 카카오 소셜 로그인. 전화번호는 phone_hash로만 저장."""
 
 import hashlib
+from collections import defaultdict
 import logging
 from datetime import date, datetime, timedelta, timezone
 
@@ -26,6 +27,29 @@ from app.models import SignupVerification, SocialAccount, Store, Subscription, U
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# 프로세스 메모리 내 카운터 — Railway는 이 서비스를 단일 인스턴스로만 띄우므로
+# (numReplicas 미지정) 여러 서버 간 카운터 불일치 문제가 없다. 배포/재시작 시
+# 초기화되는 건 알려진 한계로 남겨둔다(관리자 페이지 설계 문서 참고).
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_LOCKOUT_WINDOW = timedelta(minutes=15)
+_login_failures: dict[str, list[datetime]] = defaultdict(list)
+
+
+def _check_login_lockout(email: str) -> None:
+    now = datetime.now(timezone.utc)
+    recent = [t for t in _login_failures[email] if now - t < _LOGIN_LOCKOUT_WINDOW]
+    _login_failures[email] = recent
+    if len(recent) >= _LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(429, "너무 많이 실패했어요. 15분 후 다시 시도해주세요")
+
+
+def _record_login_failure(email: str) -> None:
+    _login_failures[email].append(datetime.now(timezone.utc))
+
+
+def _reset_login_failures(email: str) -> None:
+    _login_failures.pop(email, None)
 
 
 class EmailCodeRequest(BaseModel):
@@ -241,9 +265,12 @@ def confirm_password_reset(body: PasswordResetConfirmBody, db: Session = Depends
 
 @router.post("/login")
 def login(body: LoginRequest, db: Session = Depends(get_db)):
+    _check_login_lockout(body.email)
     user = db.scalar(select(User).where(User.email == body.email))
     if user is None or user.password_hash is None or not verify_password(body.password, user.password_hash):
+        _record_login_failure(body.email)
         raise HTTPException(401, "이메일 또는 비밀번호가 올바르지 않습니다")
+    _reset_login_failures(body.email)
     return TokenResponse(access_token=create_token(user.id), user=_user_dict(user))
 
 
