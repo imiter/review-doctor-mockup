@@ -151,15 +151,36 @@ _EXPANDED_MENU_COL_X_FRACTIONS = [0.1078, 0.3033, 0.4989, 0.6944, 0.8900]
 _EXPANDED_MENU_ROW_Y_FRACTIONS = [0.2215, 0.3095, 0.3955, 0.4810]
 
 
+def _match_grid_column(row: list[str], category_label: str) -> int | None:
+    """그리드 라벨 한 행에서 category_label과 매칭되는 열 인덱스를 찾는다.
+
+    정확히 일치하면 바로 반환하고, 아니면 그리드 라벨이 category_label의
+    접두사인 경우도 매칭으로 인정한다 — 배민 가게정보 API(fetch_shop_info가
+    돌려주는 카테고리)가 화면의 "메뉴 전체보기" 탭보다 더 세분화된 값을
+    주는 경우가 실 계정에서 확인됐다(2026-08-31, 곱도리탕 캠페인 순위
+    확인 시도 중 재현): API는 "찜·탕·찌개"인데 실제 탭은 "찜·탕"이라 정확
+    일치 검사가 항상 실패해 모든 지점이 NAV_ERROR로 스킵됐다. "·"로
+    하위분류가 이어붙는 배민 카테고리 표기 특성상, 탭 라벨이
+    category_label의 접두사이면 같은 카테고리로 취급해도 안전하다
+    (예: "고기" ⊂ "고기·구이")."""
+    if category_label in row:
+        return row.index(category_label)
+    for idx, label in enumerate(row):
+        if category_label.startswith(label):
+            return idx
+    return None
+
+
 def _tap_expanded_menu_category(driver, category_label: str) -> bool:
     """펼침 패널에서 category_label 위치를 좌표로 계산해 탭한다.
 
     이 패널은 element 기반 탐색이 불가능해(위 설명 참고) 알려진 그리드
-    좌표표를 쓴다. category_label이 이 표에 없으면 False를 반환한다."""
+    좌표표를 쓴다. category_label이 이 표에(정확히든 접두사로든) 없으면
+    False를 반환한다."""
     for row_idx, row in enumerate(_EXPANDED_MENU_GRID):
-        if category_label not in row:
+        col_idx = _match_grid_column(row, category_label)
+        if col_idx is None:
             continue
-        col_idx = row.index(category_label)
         size = driver.get_window_size()
         x = int(size["width"] * _EXPANDED_MENU_COL_X_FRACTIONS[col_idx])
         y = int(size["height"] * _EXPANDED_MENU_ROW_Y_FRACTIONS[row_idx])
