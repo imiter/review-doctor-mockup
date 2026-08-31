@@ -163,8 +163,14 @@ def admin_set_plan(
         db.flush()
 
     if body.plan == "pro":
+        # billing.py의 _approve_payment와 동일한 패턴: 기존 만료일이 아직 남아있으면
+        # 그 날짜부터 연장하고, 없거나 이미 지났으면 오늘부터 시작한다. 무조건
+        # "오늘 + days"로 덮어쓰면 이미 유료로 몇 달 남은 사용자에게 관리자가 지원
+        # 차원에서 며칠을 더 얹어주려다 오히려 구독 기간을 단축시키는 사고가 난다.
+        today = kst_today()
+        base = sub.expires_at if (sub.expires_at is not None and sub.expires_at > today) else today
         sub.plan = "pro"
-        sub.expires_at = kst_today() + timedelta(days=days)
+        sub.expires_at = base + timedelta(days=days)
     else:
         sub.plan = "basic"
         sub.expires_at = None

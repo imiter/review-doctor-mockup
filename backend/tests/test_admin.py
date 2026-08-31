@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from app.models import Payment, ReplySetting, ReviewSyncJob, Store, StorePlatformConnection, User
+from app.models import Payment, ReplySetting, ReviewSyncJob, Store, StorePlatformConnection, Subscription, User
 
 
 def test_user_role_defaults_to_owner(db_session):
@@ -205,6 +205,28 @@ def test_admin_set_plan_to_pro_sets_expires_at_from_days(client, db_session, see
     body = res.json()
     assert body["plan"] == "pro"
     assert body["expires_at"] == str(date.today() + timedelta(days=14))
+
+
+def test_admin_set_plan_to_pro_extends_existing_future_expiry(client, db_session, seeded_user, auth_headers):
+    # 이미 Pro로 30일 남은 사용자에게 관리자가 "7일 더" 부여하면, 오늘부터 7일이
+    # 아니라 기존 만료일(오늘+30일)부터 7일을 더 연장해서 오늘+37일이 돼야 한다.
+    # billing.py의 _approve_payment(결제 승인 자동 연장)와 동일한 규칙이다 —
+    # 그렇지 않으면 관리자의 지원성 플랜 부여가 오히려 구독을 단축시킨다.
+    _promote_to_admin(db_session, seeded_user["user"])
+    sub = db_session.scalar(select(Subscription).where(Subscription.user_id == seeded_user["user"].id))
+    sub.plan = "pro"
+    sub.expires_at = date.today() + timedelta(days=30)
+    db_session.commit()
+
+    res = client.patch(
+        f"/admin/users/{seeded_user['user'].id}/plan",
+        json={"plan": "pro", "days": 7},
+        headers=auth_headers,
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["plan"] == "pro"
+    assert body["expires_at"] == str(date.today() + timedelta(days=37))
 
 
 def test_admin_set_plan_to_pro_defaults_to_30_days(client, db_session, seeded_user, auth_headers):

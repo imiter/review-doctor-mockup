@@ -15,12 +15,28 @@ def _clear_login_failures():
     auth_router._login_failures.clear()
 
 
-def test_login_locks_out_after_five_failures(client, seeded_user):
+def test_correct_password_succeeds_even_when_locked_out(client, seeded_user):
+    # 잠금은 비밀번호 검증보다 먼저 체크되면 안 된다 — 그러면 이메일만 아는
+    # 제3자가 틀린 비밀번호로 5번 찔러보는 것만으로 진짜 계정 소유자를 자기
+    # 계정에서 영구히 못 들어오게 만들 수 있다(타겟 DoS). 맞는 비밀번호는
+    # 잠금 상태와 무관하게 항상 성공해야 한다.
     for _ in range(5):
         res = client.post("/auth/login", json={"email": "demo@dris.kr", "password": "wrong-password"})
         assert res.status_code == 401
 
     res = client.post("/auth/login", json={"email": "demo@dris.kr", "password": "demo1234!"})
+    assert res.status_code == 200
+
+
+def test_wrong_password_still_locked_out_after_five_failures(client, seeded_user):
+    # 브루트포스 방어 자체는 그대로 유지된다 — 틀린 비밀번호로 6번째 시도하면
+    # 여전히 429로 막혀야 한다(위 테스트는 "맞는" 비밀번호가 뚫는다는 것만
+    # 확인하고, 이 테스트는 "틀린" 비밀번호는 계속 막힌다는 것을 확인한다).
+    for _ in range(5):
+        res = client.post("/auth/login", json={"email": "demo@dris.kr", "password": "wrong-password"})
+        assert res.status_code == 401
+
+    res = client.post("/auth/login", json={"email": "demo@dris.kr", "password": "still-wrong"})
     assert res.status_code == 429
 
 

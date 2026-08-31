@@ -105,14 +105,21 @@ export default function AdminUsersPage() {
                 />
                 <span className="text-xs text-muted">일간 Pro 부여</span>
                 <button
-                  onClick={() => changePlan(r.user_id, "pro")}
+                  onClick={() => {
+                    const days = daysInputs[r.user_id] || "30";
+                    if (!confirm(`${r.nickname}님에게 Pro ${days}일을 부여할까요? (기존 만료일이 남아있으면 그 날짜부터 연장됩니다)`)) return;
+                    changePlan(r.user_id, "pro");
+                  }}
                   disabled={savingId === r.user_id}
                   className="rounded-lg border border-accent px-3 py-1.5 text-xs text-accent transition hover:bg-accent-soft disabled:opacity-50"
                 >
                   Pro로 변경
                 </button>
                 <button
-                  onClick={() => changePlan(r.user_id, "basic")}
+                  onClick={() => {
+                    if (!confirm(`${r.nickname}님을 Basic으로 변경할까요? 구독이 즉시 만료됩니다.`)) return;
+                    changePlan(r.user_id, "basic");
+                  }}
                   disabled={savingId === r.user_id}
                   className="rounded-lg border border-border-subtle px-3 py-1.5 text-xs text-muted transition hover:text-foreground disabled:opacity-50"
                 >

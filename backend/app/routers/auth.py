@@ -38,14 +38,25 @@ _login_failures: dict[str, list[datetime]] = defaultdict(list)
 
 def _check_login_lockout(email: str) -> None:
     now = datetime.now(timezone.utc)
-    recent = [t for t in _login_failures[email] if now - t < _LOGIN_LOCKOUT_WINDOW]
-    _login_failures[email] = recent
+    recent = [t for t in _login_failures.get(email, []) if now - t < _LOGIN_LOCKOUT_WINDOW]
+    if recent:
+        _login_failures[email] = recent
+    else:
+        _login_failures.pop(email, None)
     if len(recent) >= _LOGIN_MAX_ATTEMPTS:
         raise HTTPException(429, "너무 많이 실패했어요. 15분 후 다시 시도해주세요")
 
 
 def _record_login_failure(email: str) -> None:
     _login_failures[email].append(datetime.now(timezone.utc))
+    if len(_login_failures) > 10_000:
+        now = datetime.now(timezone.utc)
+        for key in list(_login_failures.keys()):
+            recent = [t for t in _login_failures[key] if now - t < _LOGIN_LOCKOUT_WINDOW]
+            if recent:
+                _login_failures[key] = recent
+            else:
+                del _login_failures[key]
 
 
 def _reset_login_failures(email: str) -> None:
@@ -265,13 +276,19 @@ def confirm_password_reset(body: PasswordResetConfirmBody, db: Session = Depends
 
 @router.post("/login")
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    _check_login_lockout(body.email)
+    # 비밀번호가 맞으면 잠금 상태와 무관하게 항상 성공시킨다 — 잠금을 비밀번호
+    # 검증보다 먼저 체크하면, 이메일만 아는 제3자가 틀린 비밀번호 5번을 보내는
+    # 것만으로 진짜 계정 소유자를 자기 계정에서 영구히 못 들어오게 만들 수 있다
+    # (그 계정으로 대응해야 할 관리자 계정이라면 더 치명적). 브루트포스 방어는
+    # 그대로 유지된다 — 거부되는 시도는 정의상 전부 틀린 비밀번호이므로, 아래
+    # lockout 체크/기록 경로가 여전히 그걸 막는다.
     user = db.scalar(select(User).where(User.email == body.email))
-    if user is None or user.password_hash is None or not verify_password(body.password, user.password_hash):
-        _record_login_failure(body.email)
-        raise HTTPException(401, "이메일 또는 비밀번호가 올바르지 않습니다")
-    _reset_login_failures(body.email)
-    return TokenResponse(access_token=create_token(user.id), user=_user_dict(user))
+    if user is not None and user.password_hash is not None and verify_password(body.password, user.password_hash):
+        _reset_login_failures(body.email)
+        return TokenResponse(access_token=create_token(user.id), user=_user_dict(user))
+    _check_login_lockout(body.email)
+    _record_login_failure(body.email)
+    raise HTTPException(401, "이메일 또는 비밀번호가 올바르지 않습니다")
 
 
 @router.post("/kakao/callback")
