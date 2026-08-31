@@ -151,6 +151,22 @@ _EXPANDED_MENU_COL_X_FRACTIONS = [0.1078, 0.3033, 0.4989, 0.6944, 0.8900]
 _EXPANDED_MENU_ROW_Y_FRACTIONS = [0.2215, 0.3095, 0.3955, 0.4810]
 
 
+# fetch_shop_info API 카테고리가 실제 탭과 접두사 관계조차 아닌, 배민
+# 자체적으로 API 분류와 화면 탭 분류가 서로 다른 경우를 위한 명시적
+# 치환표다 — 접두사 매칭(_match_grid_column)으로는 구조적으로 잡을 수
+# 없다("분식"은 "백반·죽·국수"의 접두사가 아니다). 실측/사용자 확인으로
+# 알려진 것만 적어둔다(2026-08-31, 행복가성비 컵밥&우동 캠페인 — 사용자가
+# 실제 배민 앱에서 이 매장이 "분식" 탭에 있다고 확인). 모르는 값은 그대로
+# 통과시켜 기존 정확/접두사 매칭 경로가 이어서 시도하게 한다.
+_CATEGORY_LABEL_OVERRIDES = {
+    "백반·죽·국수": "분식",
+}
+
+
+def _resolve_category_label(category_label: str) -> str:
+    return _CATEGORY_LABEL_OVERRIDES.get(category_label, category_label)
+
+
 def _match_grid_column(row: list[str], category_label: str) -> int | None:
     """그리드 라벨 한 행에서 category_label과 매칭되는 열 인덱스를 찾는다.
 
@@ -223,6 +239,7 @@ def _wait_for_text(driver, label: str, timeout: float = _FIND_TIMEOUT_SEC):
 
 def navigate_to_category(driver, category_label: str) -> None:
     """홈 화면에서 카테고리 탭까지 이동해 category_label 탭을 클릭한다."""
+    category_label = _resolve_category_label(category_label)
     entry_elements = _wait_for_text(driver, _HOME_CATEGORY_ENTRY_LABEL)
     if not entry_elements:
         raise RuntimeError(f"홈 화면에서 '{_HOME_CATEGORY_ENTRY_LABEL}' 카테고리 진입점을 찾지 못했습니다")

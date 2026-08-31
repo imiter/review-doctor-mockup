@@ -1,4 +1,4 @@
-from baemin_navigator import _match_grid_column, contains_mountain_lot
+from baemin_navigator import _match_grid_column, _resolve_category_label, contains_mountain_lot
 
 
 def test_contains_mountain_lot_detects_mountain_lot_address():
@@ -44,3 +44,21 @@ def test_match_grid_column_returns_none_when_no_match():
 def test_match_grid_column_does_not_match_unrelated_category():
     row = ["한식", "고기", "양식", "아시안", "야식"]
     assert _match_grid_column(row, "일식") is None
+
+
+def test_resolve_category_label_applies_known_override():
+    # 실측 케이스(2026-08-31, 행복가성비 컵밥&우동 캠페인, 사용자 확인):
+    # API 카테고리 "백반·죽·국수"는 그리드 어느 라벨의 접두사도 아니라서
+    # 접두사 매칭으로는 못 잡는다 — 실제로는 "분식" 탭에 속한다.
+    assert _resolve_category_label("백반·죽·국수") == "분식"
+
+
+def test_resolve_category_label_passes_through_unknown_category():
+    assert _resolve_category_label("찜·탕·찌개") == "찜·탕·찌개"
+    assert _resolve_category_label("치킨") == "치킨"
+
+
+def test_match_grid_column_matches_after_override_resolution():
+    row = ["패스트푸드", "찜·탕", "족발·보쌈", "분식", "카페·디저트"]
+    resolved = _resolve_category_label("백반·죽·국수")
+    assert _match_grid_column(row, resolved) == 3
