@@ -10,3 +10,9 @@ def test_user_role_defaults_to_owner(db_session):
     db_session.refresh(user)
 
     assert user.role == "owner"
+
+
+def test_auth_me_includes_role(client, seeded_user, auth_headers):
+    res = client.get("/auth/me", headers=auth_headers)
+    assert res.status_code == 200
+    assert res.json()["role"] == "owner"

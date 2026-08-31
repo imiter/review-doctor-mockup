@@ -78,6 +78,7 @@ def _user_dict(user: User) -> dict:
         "nickname": user.nickname,
         "has_phone": user.phone_hash is not None,
         "marketing_agreed": user.marketing_agreed,
+        "role": user.role,
     }
 
 
