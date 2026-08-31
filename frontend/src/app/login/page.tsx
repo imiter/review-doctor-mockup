@@ -7,7 +7,7 @@ import { ApiError, apiPost, getToken, setToken } from "@/lib/api";
 import { kakaoAuthorizeUrl } from "@/lib/kakao";
 import { Logo } from "@/components/Logo";
 
-type TokenResponse = { access_token: string };
+type TokenResponse = { access_token: string; user: { role: string } };
 
 function LoginForm() {
   const router = useRouter();
@@ -33,7 +33,7 @@ function LoginForm() {
         password: overridePassword ?? password,
       });
       setToken(res.access_token);
-      router.push("/dashboard");
+      router.push(res.user.role === "admin" ? "/ops-4k9x2m" : "/dashboard");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "로그인에 실패했습니다");
     } finally {
