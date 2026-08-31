@@ -1723,7 +1723,13 @@ docker exec baemin-verify-db2 psql -U postgres -d delivery_insight -c \
 
 - [ ] **Step 4: 프로덕션 반영 (배포 + 수동 SQL, 이 계획 범위 밖 — 별도 승인 후 진행)**
 
-이 플랜을 다 구현하고 나면, 실제 배포는 별도로 사용자 승인을 받고 진행한다:
-1. `git push` 후 Railway 백엔드/프론트 재배포
-2. Railway 프로덕션 Postgres에 SSH 터널로 접속해 `ALTER TABLE users ADD COLUMN role ...` 실행(Step 2와 동일한 SQL)
+이 플랜을 다 구현하고 나면, 실제 배포는 별도로 사용자 승인을 받고 진행한다.
+**순서가 중요하다 — 반드시 ALTER TABLE을 먼저, 배포를 나중에 한다.** 새 백엔드
+코드는 `SELECT`에 `users.role`을 명시적으로 포함하므로, 컬럼이 없는 채로
+먼저 배포하면 배포 순간부터 `ALTER TABLE`이 끝날 때까지 `/auth/login`·
+`/auth/me`를 포함한 인증이 걸린 API 전체가 500을 반환한다(최종 전체 리뷰,
+2026-09-01, 발견). `ALTER TABLE`은 `DEFAULT 'owner'`가 있어 기존(구) 백엔드
+코드에서는 완전히 무해하므로, 배포 전에 미리 실행해도 안전하다:
+1. Railway 프로덕션 Postgres에 SSH 터널로 접속해 `ALTER TABLE users ADD COLUMN role ...` 실행(Step 2와 동일한 SQL) — 아직 구 백엔드가 떠 있는 상태에서 먼저 실행한다.
+2. `git push` 후 Railway 백엔드/프론트 재배포.
 3. 본인 계정만 `UPDATE users SET role = 'admin' WHERE email = '...'`로 승격(데모 계정은 승격하지 않음 — 데모 계정은 과제 심사자 등 제3자가 로그인할 수 있으므로 절대 admin으로 두지 않는다)
