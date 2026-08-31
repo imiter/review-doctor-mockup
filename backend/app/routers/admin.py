@@ -2,6 +2,9 @@
 수동 변경. require_admin으로 전부 보호된다. 설계 배경은
 docs/superpowers/specs/2026-09-01-admin-panel-design.md 참고."""
 
+from datetime import timedelta
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
@@ -10,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.auth import require_admin
 from app.db import get_db
 from app.models import Payment, Platform, ReplySetting, ReviewSyncJob, Store, StorePlatformConnection, Subscription, User
-from app.plan import effective_plan
+from app.plan import effective_plan, kst_today
 
 router = APIRouter(tags=["admin"])
 
@@ -131,3 +134,40 @@ def admin_list_users(
             "store_count": store_count,
         })
     return rows
+
+
+class AdminPlanUpdateRequest(BaseModel):
+    plan: Literal["basic", "pro"]
+    days: int | None = None
+
+
+@router.patch("/admin/users/{user_id}/plan")
+def admin_set_plan(
+    user_id: int,
+    body: AdminPlanUpdateRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    target_user = db.get(User, user_id)
+    if target_user is None:
+        raise HTTPException(404, "사용자를 찾을 수 없습니다")
+
+    days = body.days if body.days is not None else 30
+    if body.plan == "pro" and not (1 <= days <= 365):
+        raise HTTPException(422, "days는 1~365 사이여야 합니다")
+
+    sub = db.scalar(select(Subscription).where(Subscription.user_id == user_id))
+    if sub is None:
+        sub = Subscription(user_id=user_id, plan="basic", daily_reply_limit=10, started_at=kst_today())
+        db.add(sub)
+        db.flush()
+
+    if body.plan == "pro":
+        sub.plan = "pro"
+        sub.expires_at = kst_today() + timedelta(days=days)
+    else:
+        sub.plan = "basic"
+        sub.expires_at = None
+
+    db.commit()
+    return {"user_id": user_id, "plan": sub.plan, "expires_at": sub.expires_at}

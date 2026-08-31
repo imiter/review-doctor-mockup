@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -190,3 +190,68 @@ def test_admin_users_no_query_returns_recent_users(client, db_session, seeded_us
     res = client.get("/admin/users", headers=auth_headers)
     assert res.status_code == 200
     assert len(res.json()) >= 1
+
+
+def test_admin_set_plan_to_pro_sets_expires_at_from_days(client, db_session, seeded_user, auth_headers):
+    _promote_to_admin(db_session, seeded_user["user"])
+
+    res = client.patch(
+        f"/admin/users/{seeded_user['user'].id}/plan",
+        json={"plan": "pro", "days": 14},
+        headers=auth_headers,
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["plan"] == "pro"
+    assert body["expires_at"] == str(date.today() + timedelta(days=14))
+
+
+def test_admin_set_plan_to_pro_defaults_to_30_days(client, db_session, seeded_user, auth_headers):
+    _promote_to_admin(db_session, seeded_user["user"])
+
+    res = client.patch(
+        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "pro"}, headers=auth_headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["expires_at"] == str(date.today() + timedelta(days=30))
+
+
+def test_admin_set_plan_to_basic_clears_expires_at(client, db_session, seeded_user, auth_headers):
+    _promote_to_admin(db_session, seeded_user["user"])
+    client.patch(
+        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "pro", "days": 30}, headers=auth_headers,
+    )
+
+    res = client.patch(
+        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "basic"}, headers=auth_headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["plan"] == "basic"
+    assert res.json()["expires_at"] is None
+
+
+def test_admin_set_plan_rejects_out_of_range_days(client, db_session, seeded_user, auth_headers):
+    _promote_to_admin(db_session, seeded_user["user"])
+
+    res = client.patch(
+        f"/admin/users/{seeded_user['user'].id}/plan",
+        json={"plan": "pro", "days": 400},
+        headers=auth_headers,
+    )
+    assert res.status_code == 422
+
+
+def test_admin_set_plan_404_for_unknown_user(client, db_session, seeded_user, auth_headers):
+    _promote_to_admin(db_session, seeded_user["user"])
+
+    res = client.patch("/admin/users/999999/plan", json={"plan": "pro"}, headers=auth_headers)
+    assert res.status_code == 404
+
+
+def test_admin_set_plan_rejects_invalid_plan_value(client, db_session, seeded_user, auth_headers):
+    _promote_to_admin(db_session, seeded_user["user"])
+
+    res = client.patch(
+        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "enterprise"}, headers=auth_headers,
+    )
+    assert res.status_code == 422
