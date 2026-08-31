@@ -24,6 +24,7 @@ class User(Base):
     nickname: Mapped[str] = mapped_column(String(50))
     phone_hash: Mapped[str | None] = mapped_column(String(64))
     marketing_agreed: Mapped[bool] = mapped_column(default=False)
+    role: Mapped[str] = mapped_column(String(10), default="owner")
     created_at: Mapped[datetime]
 
     stores: Mapped[list["Store"]] = relationship(back_populates="user")

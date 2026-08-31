@@ -38,6 +38,7 @@ CREATE TABLE users (
     nickname         VARCHAR(50)  NOT NULL,
     phone_hash       CHAR(64),                     -- SHA-256 hex. 전화번호 원문 저장 금지
     marketing_agreed BOOLEAN      NOT NULL DEFAULT FALSE,
+    role             VARCHAR(10)  NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'admin')),
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
