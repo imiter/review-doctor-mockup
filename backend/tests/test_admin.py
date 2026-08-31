@@ -1,6 +1,8 @@
 from datetime import date, datetime, timezone
 
-from app.models import Payment, User
+from sqlalchemy import select
+
+from app.models import Payment, ReplySetting, ReviewSyncJob, Store, StorePlatformConnection, User
 
 
 def test_user_role_defaults_to_owner(db_session):
@@ -61,3 +63,75 @@ def test_admin_payments_filters_by_status(client, db_session, seeded_user, auth_
     assert len(body) == 1
     assert body[0]["order_id"] == "order-b"
     assert body[0]["fail_reason"] == "카드 한도 초과"
+
+
+def test_admin_stores_only_includes_baemin_connections_with_credentials(
+    client, db_session, seeded_user, platforms, auth_headers,
+):
+    _promote_to_admin(db_session, seeded_user["user"])
+    store = seeded_user["store"]
+
+    # seeded_user가 이미 만들어둔 연결은 credential_ciphertext가 NULL이라 제외돼야 한다
+    res = client.get("/admin/stores", headers=auth_headers)
+    assert res.status_code == 200
+    assert res.json() == []
+
+
+def test_admin_stores_includes_latest_sync_job_and_auto_reply_state(
+    client, db_session, seeded_user, platforms, reply_styles, auth_headers,
+):
+    _promote_to_admin(db_session, seeded_user["user"])
+    store = seeded_user["store"]
+
+    conn = db_session.scalar(
+        select(StorePlatformConnection).where(StorePlatformConnection.store_id == store.id)
+    )
+    conn.credential_ciphertext = "encrypted-blob"
+    db_session.add(ReplySetting(
+        store_id=store.id, style_id=reply_styles.id, auto_reply_enabled=True, auto_reply_min_rating=5,
+    ))
+    db_session.add(ReviewSyncJob(
+        store_id=store.id, platform_id=platforms["baemin"].id, status="success", triggered_by="scheduled",
+        reviews_fetched=3, reviews_inserted=1,
+        started_at=datetime(2026, 8, 30, 4, 0, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 8, 30, 4, 5, tzinfo=timezone.utc),
+    ))
+    # 더 최근 실패 잡 — 이게 "최신"으로 선택돼야 한다
+    db_session.add(ReviewSyncJob(
+        store_id=store.id, platform_id=platforms["baemin"].id, status="failed", triggered_by="manual",
+        error_message="매장 목록을 확인하지 못했습니다",
+        started_at=datetime(2026, 8, 31, 4, 0, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 8, 31, 4, 1, tzinfo=timezone.utc),
+    ))
+    db_session.commit()
+
+    res = client.get("/admin/stores", headers=auth_headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert len(body) == 1
+    row = body[0]
+    assert row["store_name"] == store.name
+    assert row["owner_email"] == "demo@dris.kr"
+    assert row["auto_reply_enabled"] is True
+    assert row["last_sync"]["status"] == "failed"
+    assert row["last_sync"]["triggered_by"] == "manual"
+    assert row["last_sync"]["error_message"] == "매장 목록을 확인하지 못했습니다"
+
+
+def test_admin_stores_handles_store_with_no_sync_history(
+    client, db_session, seeded_user, platforms, auth_headers,
+):
+    _promote_to_admin(db_session, seeded_user["user"])
+    store = seeded_user["store"]
+    conn = db_session.scalar(
+        select(StorePlatformConnection).where(StorePlatformConnection.store_id == store.id)
+    )
+    conn.credential_ciphertext = "encrypted-blob"
+    db_session.commit()
+
+    res = client.get("/admin/stores", headers=auth_headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert len(body) == 1
+    assert body[0]["last_sync"] is None
+    assert body[0]["auto_reply_enabled"] is False  # reply_settings 행이 아예 없을 때의 기본값
