@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select
 
 from app.models import Payment, ReplySetting, ReviewSyncJob, Store, StorePlatformConnection, User
@@ -255,3 +256,27 @@ def test_admin_set_plan_rejects_invalid_plan_value(client, db_session, seeded_us
         f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "enterprise"}, headers=auth_headers,
     )
     assert res.status_code == 422
+
+
+@pytest.mark.parametrize("path", ["/admin/payments", "/admin/stores", "/admin/users"])
+def test_admin_get_endpoints_reject_non_admin(client, seeded_user, auth_headers, path):
+    res = client.get(path, headers=auth_headers)
+    assert res.status_code == 403
+
+
+def test_admin_toggle_auto_reply_rejects_non_admin(client, seeded_user, auth_headers):
+    res = client.patch(
+        f"/admin/stores/{seeded_user['store'].id}/auto-reply",
+        json={"enabled": True},
+        headers=auth_headers,
+    )
+    assert res.status_code == 403
+
+
+def test_admin_set_plan_rejects_non_admin(client, seeded_user, auth_headers):
+    res = client.patch(
+        f"/admin/users/{seeded_user['user'].id}/plan",
+        json={"plan": "pro"},
+        headers=auth_headers,
+    )
+    assert res.status_code == 403
