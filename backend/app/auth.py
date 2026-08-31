@@ -59,3 +59,12 @@ def get_user_default_store_id(user: User, db: Session) -> int:
     if store_id is None:
         raise HTTPException(404, "연결된 매장이 없습니다")
     return store_id
+
+
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    """관리자 전용 라우트에서 쓰는 FastAPI dependency. require_pro_plan과 같은 패턴 —
+    프론트에서만 막으면 개발자도구로 백엔드를 직접 두드려 우회할 수 있으므로 백엔드에서도
+    강제해야 한다."""
+    if user.role != "admin":
+        raise HTTPException(403, "관리자 권한이 필요합니다")
+    return user
