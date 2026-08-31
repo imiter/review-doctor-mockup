@@ -164,3 +164,29 @@ def test_admin_toggle_auto_reply_404_when_no_settings(client, db_session, seeded
         f"/admin/stores/{store.id}/auto-reply", json={"enabled": True}, headers=auth_headers,
     )
     assert res.status_code == 404
+
+
+def test_admin_users_search_by_email_or_nickname(client, db_session, seeded_user, auth_headers):
+    _promote_to_admin(db_session, seeded_user["user"])
+    other = User(
+        email="another@example.com", nickname="다른사장",
+        password_hash="x", marketing_agreed=False, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(other)
+    db_session.commit()
+
+    res = client.get("/admin/users?q=demo", headers=auth_headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert len(body) == 1
+    assert body[0]["email"] == "demo@dris.kr"
+    assert body[0]["plan"] == "basic"
+    assert body[0]["store_count"] == 1
+
+
+def test_admin_users_no_query_returns_recent_users(client, db_session, seeded_user, auth_headers):
+    _promote_to_admin(db_session, seeded_user["user"])
+
+    res = client.get("/admin/users", headers=auth_headers)
+    assert res.status_code == 200
+    assert len(res.json()) >= 1

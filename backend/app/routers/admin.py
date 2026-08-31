@@ -4,12 +4,13 @@ docs/superpowers/specs/2026-09-01-admin-panel-design.md 참고."""
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.db import get_db
-from app.models import Payment, Platform, ReplySetting, ReviewSyncJob, Store, StorePlatformConnection, User
+from app.models import Payment, Platform, ReplySetting, ReviewSyncJob, Store, StorePlatformConnection, Subscription, User
+from app.plan import effective_plan
 
 router = APIRouter(tags=["admin"])
 
@@ -102,3 +103,31 @@ def admin_toggle_auto_reply(
     rs.auto_reply_enabled = body.enabled
     db.commit()
     return {"store_id": store_id, "auto_reply_enabled": rs.auto_reply_enabled}
+
+
+@router.get("/admin/users")
+def admin_list_users(
+    q: str | None = None,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    query = select(User).order_by(User.created_at.desc()).limit(50)
+    if q:
+        like = f"%{q}%"
+        query = query.where(or_(User.email.ilike(like), User.nickname.ilike(like)))
+    users = db.scalars(query).all()
+
+    rows = []
+    for u in users:
+        sub = db.scalar(select(Subscription).where(Subscription.user_id == u.id))
+        store_count = db.scalar(select(func.count(Store.id)).where(Store.user_id == u.id)) or 0
+        rows.append({
+            "user_id": u.id,
+            "email": u.email,
+            "nickname": u.nickname,
+            "created_at": u.created_at,
+            "plan": effective_plan(sub),
+            "expires_at": sub.expires_at if sub else None,
+            "store_count": store_count,
+        })
+    return rows
