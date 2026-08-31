@@ -63,6 +63,7 @@ _DESKTOP_USER_AGENT = (
 )
 
 _LOGIN_URL = "https://self.baemin.com/login"
+_SHOP_LIST_READ_ATTEMPTS = 3
 
 
 class BaeminLoginError(Exception):
@@ -161,7 +162,6 @@ def _discover_all_shops(page) -> list[tuple[int, str]]:
         page.keyboard.press("Escape")
         page.wait_for_timeout(1_000)
         review_button.click(timeout=15_000)
-    shop_select = page.get_by_role("combobox").nth(1)
     # click()은 버튼 자체의 등장만 기다린다 — 그 뒤에 렌더링되는 select의
     # <option>들은 별도로 기다려야 한다. Locator.all()은 auto-wait를 하지 않고
     # 호출 시점에 DOM에 있는 것만 즉시 읽으므로, 기다리지 않으면 아직 옵션이
@@ -169,19 +169,29 @@ def _discover_all_shops(page) -> list[tuple[int, str]]:
     # 잘못된 에러(실제로는 타이밍 문제일 뿐)를 내게 된다. state="attached"만
     # 확인하는 이유는 네이티브 select의 option은 Playwright의 "visible" 판정이
     # 불안정하기 때문 — DOM에 붙었는지만 확인하면 충분하다.
-    shop_select.locator("option").first.wait_for(state="attached")
-    shops = _read_shop_options(shop_select)
-    if not shops:
-        # "첫 <option>이 DOM에 붙음"과 "실제 매장 값 옵션들까지 다 채워짐" 사이에
-        # 여전히 간격이 있는 경우가 실 계정(4개 브랜드 계정)에서 재현됐다
-        # (2026-08-31) — 옵션이 플레이스홀더 하나만 먼저 붙고 나머지는 조금
-        # 늦게 채워지는 것으로 보인다. 그래서 빈 결과면 바로 실패 처리하지
-        # 않고 한 번 더 기다렸다가 다시 읽는다.
-        page.wait_for_timeout(1_500)
-        shops = _read_shop_options(shop_select)
-    if not shops:
-        raise BaeminLoginError("매장 목록을 확인하지 못했습니다")
-    return shops
+    #
+    # 이 "붙었지만 아직 안 채워짐" 타이밍 문제는 실 계정(4개 브랜드 계정)에서
+    # 두 가지 다른 증상으로 재현됐다(2026-08-31): (1) 옵션이 플레이스홀더
+    # 하나만 먼저 붙고 나머지는 늦게 채워져 빈 리스트로 읽히는 경우, (2)
+    # 리스트 자체는 채워졌지만 특정 옵션의 inner_text() 읽기가 30초
+    # 타임아웃까지 걸리는 경우(매번 다른 인덱스에서 재현 — 특정 옵션이
+    # 아니라 접근성 트리 갱신 자체가 늦는 것으로 보임). 두 증상 다 "다시
+    # 시도하면 되는" 일시적 타이밍 문제라, select를 새로 찾는 것부터
+    # 다시 하는 재시도 루프로 둘 다 같이 흡수한다.
+    last_error: Exception | None = None
+    for attempt in range(_SHOP_LIST_READ_ATTEMPTS):
+        if attempt > 0:
+            page.wait_for_timeout(1_500)
+        shop_select = page.get_by_role("combobox").nth(1)
+        try:
+            shop_select.locator("option").first.wait_for(state="attached")
+            shops = _read_shop_options(shop_select)
+        except PlaywrightTimeoutError as e:
+            last_error = e
+            continue
+        if shops:
+            return shops
+    raise BaeminLoginError("매장 목록을 확인하지 못했습니다") from last_error
 
 
 def login(login_id: str, password: str, headless: bool = True) -> BaeminSession:

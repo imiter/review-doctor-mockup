@@ -129,13 +129,66 @@ def test_discover_all_shops_retries_read_once_when_first_read_is_empty():
 
 
 def test_discover_all_shops_raises_when_retry_read_still_empty():
-    """재시도까지 두 번 다 빈 리스트면 진짜 실패로 취급해 에러를 던져야 한다
-    — 무한정 재시도하며 조용히 매달리면 안 된다."""
+    """재시도까지 다 빈 리스트면(총 _SHOP_LIST_READ_ATTEMPTS번) 진짜 실패로
+    취급해 에러를 던져야 한다 — 무한정 재시도하며 조용히 매달리면 안 된다."""
     fake_page = MagicMock()
 
     review_button = MagicMock()
     shop_select = MagicMock()
-    shop_select.locator.return_value.all.side_effect = [[], []]
+    shop_select.locator.return_value.all.side_effect = [[], [], []]
+    combobox_locator = MagicMock()
+    combobox_locator.nth.return_value = shop_select
+
+    def _get_by_role(role, name=None):
+        if role == "button":
+            return review_button
+        if role == "combobox":
+            return combobox_locator
+        return MagicMock()
+
+    fake_page.get_by_role.side_effect = _get_by_role
+
+    with pytest.raises(BaeminLoginError, match="매장 목록을 확인하지 못했습니다"):
+        _discover_all_shops(fake_page)
+
+
+def test_discover_all_shops_retries_after_option_read_timeout():
+    """리스트 자체는 채워졌어도 특정 옵션의 inner_text() 읽기가 타임아웃나는
+    경우가 실 계정에서 재현됐다(2026-08-31, 블랙닭갈비 캠페인 순위 확인
+    시도 중 — 매번 다른 옵션 인덱스에서 재현돼 특정 옵션이 아니라 접근성
+    트리 갱신 자체가 늦는 것으로 보인다). 빈 리스트뿐 아니라 이 타임아웃도
+    같은 재시도 루프로 흡수해야 한다."""
+    fake_page = MagicMock()
+
+    review_button = MagicMock()
+    shop_select = MagicMock()
+    shop_select.locator.return_value.all.side_effect = [
+        PlaywrightTimeoutError("Locator.inner_text: Timeout 30000ms exceeded."),
+        [_fake_option("14804914", "블랙닭갈비 노원당고개점")],
+    ]
+    combobox_locator = MagicMock()
+    combobox_locator.nth.return_value = shop_select
+
+    def _get_by_role(role, name=None):
+        if role == "button":
+            return review_button
+        if role == "combobox":
+            return combobox_locator
+        return MagicMock()
+
+    fake_page.get_by_role.side_effect = _get_by_role
+
+    shops = _discover_all_shops(fake_page)
+
+    assert shops == [(14804914, "블랙닭갈비 노원당고개점")]
+
+
+def test_discover_all_shops_raises_after_exhausting_all_attempts_on_timeout():
+    fake_page = MagicMock()
+
+    review_button = MagicMock()
+    shop_select = MagicMock()
+    shop_select.locator.return_value.all.side_effect = PlaywrightTimeoutError("timeout")
     combobox_locator = MagicMock()
     combobox_locator.nth.return_value = shop_select
 
