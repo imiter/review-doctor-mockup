@@ -125,7 +125,7 @@ def test_discover_all_shops_retries_read_once_when_first_read_is_empty():
     shops = _discover_all_shops(fake_page)
 
     assert shops == [(14804318, "테스트 매장")]
-    fake_page.wait_for_timeout.assert_any_call(1_500)
+    fake_page.wait_for_timeout.assert_any_call(2_000)
 
 
 def test_discover_all_shops_raises_when_retry_read_still_empty():
@@ -135,7 +135,7 @@ def test_discover_all_shops_raises_when_retry_read_still_empty():
 
     review_button = MagicMock()
     shop_select = MagicMock()
-    shop_select.locator.return_value.all.side_effect = [[], [], []]
+    shop_select.locator.return_value.all.side_effect = lambda: []  # 매 시도 항상 빈 리스트
     combobox_locator = MagicMock()
     combobox_locator.nth.return_value = shop_select
 

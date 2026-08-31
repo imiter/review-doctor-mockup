@@ -63,7 +63,7 @@ _DESKTOP_USER_AGENT = (
 )
 
 _LOGIN_URL = "https://self.baemin.com/login"
-_SHOP_LIST_READ_ATTEMPTS = 3
+_SHOP_LIST_READ_ATTEMPTS = 10
 
 
 class BaeminLoginError(Exception):
@@ -178,10 +178,17 @@ def _discover_all_shops(page) -> list[tuple[int, str]]:
     # 아니라 접근성 트리 갱신 자체가 늦는 것으로 보임). 두 증상 다 "다시
     # 시도하면 되는" 일시적 타이밍 문제라, select를 새로 찾는 것부터
     # 다시 하는 재시도 루프로 둘 다 같이 흡수한다.
+    #
+    # 재시도 3회(1.5초 간격, 총 4.5초)로 처음 고쳤으나, 실 계정에서 그 예산을
+    # 다 쓰고도 계속 실패하는 경우가 반복 재현됐다(2026-08-31, 같은 세션 안에서
+    # 여러 캠페인에 걸쳐 간헐적으로 재현 — 특정 캠페인 문제가 아니라 계정
+    # 공통 로그인 단계의 변동성). 이 함수는 어차피 몇 분씩 걸리는 백그라운드
+    # 크롤 잡의 초반부라 몇십 초 더 기다리는 비용이 무시할 만한 수준이므로,
+    # 재시도 예산을 훨씬 넉넉하게(10회, 2초 간격, 최대 18초) 늘렸다.
     last_error: Exception | None = None
     for attempt in range(_SHOP_LIST_READ_ATTEMPTS):
         if attempt > 0:
-            page.wait_for_timeout(1_500)
+            page.wait_for_timeout(2_000)
         shop_select = page.get_by_role("combobox").nth(1)
         try:
             shop_select.locator("option").first.wait_for(state="attached")
