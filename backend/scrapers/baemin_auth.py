@@ -139,6 +139,17 @@ def capture_failure_diagnostics(page, label: str) -> str:
     )
 
 
+def _read_shop_options(shop_select) -> list[tuple[int, str]]:
+    options = shop_select.locator("option").all()
+    shops: list[tuple[int, str]] = []
+    for option in options:
+        value = option.get_attribute("value")
+        if not value or not value.isdigit():
+            continue  # "선택하세요" 같은 플레이스홀더 옵션은 건너뛴다
+        shops.append((int(value), option.inner_text().strip()))
+    return shops
+
+
 def _discover_all_shops(page) -> list[tuple[int, str]]:
     review_button = page.get_by_role("button", name="리뷰관리 리뷰관리")
     try:
@@ -159,13 +170,15 @@ def _discover_all_shops(page) -> list[tuple[int, str]]:
     # 확인하는 이유는 네이티브 select의 option은 Playwright의 "visible" 판정이
     # 불안정하기 때문 — DOM에 붙었는지만 확인하면 충분하다.
     shop_select.locator("option").first.wait_for(state="attached")
-    options = shop_select.locator("option").all()
-    shops: list[tuple[int, str]] = []
-    for option in options:
-        value = option.get_attribute("value")
-        if not value or not value.isdigit():
-            continue  # "선택하세요" 같은 플레이스홀더 옵션은 건너뛴다
-        shops.append((int(value), option.inner_text().strip()))
+    shops = _read_shop_options(shop_select)
+    if not shops:
+        # "첫 <option>이 DOM에 붙음"과 "실제 매장 값 옵션들까지 다 채워짐" 사이에
+        # 여전히 간격이 있는 경우가 실 계정(4개 브랜드 계정)에서 재현됐다
+        # (2026-08-31) — 옵션이 플레이스홀더 하나만 먼저 붙고 나머지는 조금
+        # 늦게 채워지는 것으로 보인다. 그래서 빈 결과면 바로 실패 처리하지
+        # 않고 한 번 더 기다렸다가 다시 읽는다.
+        page.wait_for_timeout(1_500)
+        shops = _read_shop_options(shop_select)
     if not shops:
         raise BaeminLoginError("매장 목록을 확인하지 못했습니다")
     return shops

@@ -97,6 +97,61 @@ def test_discover_all_shops_skips_non_digit_placeholder_value():
     assert shops == [(99999, "유일한매장")]
 
 
+def test_discover_all_shops_retries_read_once_when_first_read_is_empty():
+    """첫 <option>이 DOM에 붙는 시점과 실제 매장 옵션들까지 다 채워지는 시점
+    사이에 간격이 있어 첫 읽기가 빈 리스트로 나온 실 계정 사례가 재현됐다
+    (2026-08-31, 4개 브랜드 계정). 바로 실패시키지 않고 한 번 더 기다렸다가
+    다시 읽어서 성공해야 한다."""
+    fake_page = MagicMock()
+
+    review_button = MagicMock()
+    shop_select = MagicMock()
+    shop_select.locator.return_value.all.side_effect = [
+        [],  # 첫 읽기 — 아직 옵션이 안 채워짐
+        [_fake_option("14804318", "테스트 매장")],  # 재시도 — 채워짐
+    ]
+    combobox_locator = MagicMock()
+    combobox_locator.nth.return_value = shop_select
+
+    def _get_by_role(role, name=None):
+        if role == "button":
+            return review_button
+        if role == "combobox":
+            return combobox_locator
+        return MagicMock()
+
+    fake_page.get_by_role.side_effect = _get_by_role
+
+    shops = _discover_all_shops(fake_page)
+
+    assert shops == [(14804318, "테스트 매장")]
+    fake_page.wait_for_timeout.assert_any_call(1_500)
+
+
+def test_discover_all_shops_raises_when_retry_read_still_empty():
+    """재시도까지 두 번 다 빈 리스트면 진짜 실패로 취급해 에러를 던져야 한다
+    — 무한정 재시도하며 조용히 매달리면 안 된다."""
+    fake_page = MagicMock()
+
+    review_button = MagicMock()
+    shop_select = MagicMock()
+    shop_select.locator.return_value.all.side_effect = [[], []]
+    combobox_locator = MagicMock()
+    combobox_locator.nth.return_value = shop_select
+
+    def _get_by_role(role, name=None):
+        if role == "button":
+            return review_button
+        if role == "combobox":
+            return combobox_locator
+        return MagicMock()
+
+    fake_page.get_by_role.side_effect = _get_by_role
+
+    with pytest.raises(BaeminLoginError, match="매장 목록을 확인하지 못했습니다"):
+        _discover_all_shops(fake_page)
+
+
 def test_discover_all_shops_retries_click_once_after_late_modal(monkeypatch):
     """로그인 직후 Escape 한 번으로는 못 닫는, 뒤늦게 뜨는 프로모션 모달이
     실 계정에서 재현됐다(2026-08-19, "리뷰관리" 버튼 클릭이 30초 타임아웃).
