@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
-import { ApiError, apiPost, getToken, setToken } from "@/lib/api";
+import { Suspense, useEffect, useState } from "react";
+import { ApiError, apiGet, apiPost, getToken, setToken } from "@/lib/api";
 import { kakaoAuthorizeUrl } from "@/lib/kakao";
 import { Logo } from "@/components/Logo";
 
@@ -17,9 +17,13 @@ function LoginForm() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  if (typeof window !== "undefined" && getToken()) {
-    router.replace("/dashboard");
-  }
+  useEffect(() => {
+    if (!getToken()) return;
+    apiGet<{ role: string }>("/auth/me")
+      .then((me) => router.replace(me.role === "admin" ? "/ops-4k9x2m" : "/dashboard"))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const resetSuccess = searchParams.get("reset") === "success";
 
