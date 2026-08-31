@@ -119,7 +119,34 @@ def test_generate_ai_reply_omits_complaint_framing_for_no_issue_review(db_sessio
     assert "조금 더 매우면 맛있을 것 같아요" in captured["user"]
 
 
-def test_generate_ai_reply_includes_persona_tone_instruction_when_not_sensitive(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+def test_generate_ai_reply_includes_persona_tone_instruction_when_no_issue(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="치킨", rating=5, content="맛있게 잘 먹었어요",
+        customer_nickname="손님", customer_order_count=1, category="no_issue",
+        is_sensitive=False, sentiment_conflict=False, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["system"] = system
+        return "..."
+
+    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+
+    generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert reply_styles.tone_instruction in captured["system"]
+
+
+def test_generate_ai_reply_overrides_tone_for_non_sensitive_complaint(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """2026-08-31 실사용 확인: food_quality처럼 is_sensitive/sentiment_conflict
+    둘 다 아닌 일반 불만 리뷰에도 이모지가 섞여 나온다는 지적을 받고, 톤 오버라이드
+    범위를 "no_issue가 아닌 모든 리뷰"로 넓힌 회귀 테스트."""
     sid = seeded_user["store"].id
     pid = platforms["baemin"].id
     review = Review(
@@ -140,7 +167,8 @@ def test_generate_ai_reply_includes_persona_tone_instruction_when_not_sensitive(
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
-    assert reply_styles.tone_instruction in captured["system"]
+    assert generate._COMPLAINT_TONE_OVERRIDE in captured["system"]
+    assert reply_styles.tone_instruction not in captured["system"]
 
 
 def test_generate_ai_reply_overrides_tone_when_sensitive(db_session, seeded_user, platforms, reply_styles, monkeypatch):
@@ -164,7 +192,7 @@ def test_generate_ai_reply_overrides_tone_when_sensitive(db_session, seeded_user
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
-    assert generate._SENSITIVE_TONE_OVERRIDE in captured["system"]
+    assert generate._COMPLAINT_TONE_OVERRIDE in captured["system"]
     assert reply_styles.tone_instruction not in captured["system"]  # 페르소나 톤이 완전히 대체됐는지
 
 
@@ -189,7 +217,7 @@ def test_generate_ai_reply_overrides_tone_when_sentiment_conflict(db_session, se
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
-    assert generate._SENSITIVE_TONE_OVERRIDE in captured["system"]
+    assert generate._COMPLAINT_TONE_OVERRIDE in captured["system"]
     assert reply_styles.tone_instruction not in captured["system"]
 
 
@@ -219,7 +247,7 @@ def test_generate_ai_reply_strips_emoji_from_output_when_sensitive(db_session, s
     assert result == "안녕하세요 죄송합니다 확인하겠습니다"
 
 
-def test_generate_ai_reply_keeps_emoji_when_not_sensitive(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+def test_generate_ai_reply_keeps_emoji_for_no_issue_review(db_session, seeded_user, platforms, reply_styles, monkeypatch):
     sid = seeded_user["store"].id
     pid = platforms["baemin"].id
     review = Review(
@@ -234,7 +262,7 @@ def test_generate_ai_reply_keeps_emoji_when_not_sensitive(db_session, seeded_use
 
     result = generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
-    assert result == "감사합니다😊"  # 민감 리뷰가 아니면 이모지를 그대로 둔다
+    assert result == "감사합니다😊"  # no_issue(칭찬/무난) 리뷰면 이모지를 그대로 둔다
 
 
 def test_generate_ai_reply_strips_emoji_from_examples_when_sensitive(db_session, seeded_user, platforms, reply_styles, monkeypatch):

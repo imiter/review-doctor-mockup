@@ -124,14 +124,19 @@ def test_get_or_create_scenario_reuses_skipped_scenario_without_regenerating(db_
     assert scenario.status == "skipped"
 
 
-def test_get_or_create_scenario_uses_store_configured_style_over_default(db_session, seeded_user, reply_styles, monkeypatch):
+def test_default_style_uses_store_configured_style_over_default(db_session, seeded_user, reply_styles):
     """_default_style이 reply_settings에 지정된 스타일을 우선시하는지 검증한다
-    — reply_styles fixture 스타일과 톤 지시문이 다른 두 번째 스타일을 만들고
-    reply_settings로 그쪽을 가리키게 한 뒤, 실제로 생성된 시스템 프롬프트에
-    설정된 스타일의 tone_instruction만 들어가고 fixture 스타일의
-    tone_instruction은 들어가지 않는지 확인한다(어느 스타일이든 하나만
-    있어도 통과하는 약한 assertion이 아니라, 진짜로 "설정된" 스타일이
-    선택됐는지를 구분해서 증명한다)."""
+    — reply_styles fixture 스타일과 다른 두 번째 스타일을 만들고 reply_settings로
+    그쪽을 가리키게 한 뒤, 반환된 스타일이 fixture 스타일이 아니라 진짜로
+    "설정된" 스타일인지 id로 구분해서 증명한다.
+
+    원래는 get_or_create_scenario가 생성한 프롬프트에 설정된 스타일의
+    tone_instruction이 그대로 들어가는지로 간접 검증했으나, 톤 오버라이드
+    범위가 "no_issue가 아닌 모든 리뷰"로 넓어지면서(2026-08-31) onboarding이
+    항상 불만 카테고리로 호출하는 이 경로는 tone_instruction이 항상
+    _COMPLAINT_TONE_OVERRIDE로 대체돼 더 이상 프롬프트로는 스타일 선택을
+    구분할 수 없다 — 그래서 _default_style을 직접 단위 테스트하는 쪽으로
+    바꿨다."""
     store = seeded_user["store"]
     configured_style = ReplyStyle(
         name="담백한 손맛", description="테스트용",
@@ -145,20 +150,11 @@ def test_get_or_create_scenario_uses_store_configured_style_over_default(db_sess
     db_session.add(ReplySetting(store_id=store.id, style_id=configured_style.id))
     db_session.commit()
 
-    monkeypatch.setattr(onboarding.client, "call_haiku", lambda system, user, **kw: "가상 리뷰 본문")
+    result = onboarding._default_style(db_session, store)
 
-    captured = {}
-
-    def _fake_call_sonnet(system, user, **kw):
-        captured["system"] = system
-        return "마중물 초안"
-
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
-
-    onboarding.get_or_create_scenario(db_session, store, "delivery")
-
-    assert configured_style.tone_instruction in captured["system"]
-    assert reply_styles.tone_instruction not in captured["system"]
+    assert result is not None
+    assert result.id == configured_style.id
+    assert result.id != reply_styles.id
 
 
 def test_generate_virtual_review_uses_category_label(monkeypatch):

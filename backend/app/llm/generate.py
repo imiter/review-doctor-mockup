@@ -17,10 +17,13 @@ no_issue로 묶이기 때문에, 템플릿 경로는 이런 리뷰의 구체적 
 
 페르소나(reply_styles.tone_instruction)는 표면적 톤(이모지 사용량, 격식
 수준)만 조절하는 얇은 레이어다 — 원인 설명·사과의 실질적 근거는 항상
-store_style_profile(사장님 말투 그라운딩)과 골든 예시에서만 온다. 위생/안전
-민감 사안이거나 별점-내용이 어긋나는 리뷰는 페르소나 선택과 무관하게
-_SENSITIVE_TONE_OVERRIDE로 강제 전환한다(설계 문서
-2026-08-24-persona-rag-integration-design.md 참고)."""
+store_style_profile(사장님 말투 그라운딩)과 골든 예시에서만 온다. no_issue가
+아닌 모든 불만 리뷰(위생/안전 민감 사안, 별점-내용 불일치 포함)는 페르소나
+선택과 무관하게 _COMPLAINT_TONE_OVERRIDE로 강제 전환한다(설계 문서
+2026-08-24-persona-rag-integration-design.md 참고, 2026-08-31 실사용 중
+food_quality 등 일반 불만 리뷰에도 이모지가 섞여 나오는 문제가 확인돼
+is_sensitive/sentiment_conflict 두 조건에서 "no_issue가 아닌 모든 불만"으로
+범위를 넓혔다)."""
 
 import re
 
@@ -33,19 +36,22 @@ from app.models import BaeminShopBrand, BrandMenuInfo, ReplyStyle, Review, Store
 
 _FALLBACK_STYLE_RULES = "아직 학습된 스타일이 없습니다. 정중하고 진솔한 사과문 원칙을 따르세요."
 
-_SENSITIVE_TONE_OVERRIDE = (
-    "위생/안전 문제이거나 별점과 내용이 어긋나는 민감한 리뷰입니다. "
+_COMPLAINT_TONE_OVERRIDE = (
+    "불만이 담긴 리뷰입니다(위생/안전 문제이거나 별점과 내용이 어긋나는 경우 포함). "
     "페르소나 톤과 무관하게 이모지 없이 차분하고 진중하게 작성하세요."
 )
 
-# 이모지 유니코드 대역 — 실사용 중 민감 리뷰(is_sensitive/sentiment_conflict)에
+# 이모지 유니코드 대역 — 실사용 중 불만 리뷰(is_sensitive/sentiment_conflict)에
 # "이모지 없이"라고 지시해도 이모지가 섞여 나오는 문제가 확인됐다(2026-08-26).
 # 원인은 [참고 예시]에 넣는 골든 예시 자체가 사장님의 실제 과거 답글이라 이모지가
 # 섞여있는 경우가 많아, 프롬프트 지시문과 few-shot 예시가 서로 모순되는
 # 신호를 주기 때문이다 — 텍스트 지시만으로는 안정적으로 이길 수 없다. 그래서
-# 민감 리뷰일 때는 (1) 프롬프트에 넣는 예시 텍스트에서부터 이모지를 지워
+# 불만 리뷰일 때는 (1) 프롬프트에 넣는 예시 텍스트에서부터 이모지를 지워
 # 모순되는 신호 자체를 없애고, (2) 최종 생성 결과에서도 한 번 더 걸러내
-# 확정적으로 보장한다.
+# 확정적으로 보장한다. 처음엔 is_sensitive/sentiment_conflict 두 조건에만
+# 적용했는데, food_quality처럼 그 둘에 안 걸리는 일반 불만 리뷰에도 이모지가
+# 섞여 나오는 게 실사용 중 확인돼(2026-08-31) category != "no_issue" 전체로
+# 넓혔다.
 _EMOJI_PATTERN = re.compile(
     "["
     "\U0001F300-\U0001FAFF"  # 이모지·픽토그램(표정, 사물, 확장 심볼 등)
@@ -238,8 +244,8 @@ def generate_ai_reply(db: Session, review: Review, store: Store, style: ReplySty
     repeat_count = count_recent_same_category(db, store.id, review.category, days=30)
     category_label = CATEGORY_LABELS.get(review.category, review.category)
 
-    tone_overridden = review.is_sensitive or review.sentiment_conflict
-    tone_instruction = _SENSITIVE_TONE_OVERRIDE if tone_overridden else style.tone_instruction
+    tone_overridden = review.category != "no_issue" or review.is_sensitive or review.sentiment_conflict
+    tone_instruction = _COMPLAINT_TONE_OVERRIDE if tone_overridden else style.tone_instruction
 
     display_name = _resolve_display_name(db, store, review)
     menu_context = _find_menu_context(db, store, review)
