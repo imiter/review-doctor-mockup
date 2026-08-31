@@ -2,7 +2,8 @@
 수동 변경. require_admin으로 전부 보호된다. 설계 배경은
 docs/superpowers/specs/2026-09-01-admin-panel-design.md 참고."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -82,3 +83,22 @@ def admin_list_stores(admin: User = Depends(require_admin), db: Session = Depend
             "auto_reply_enabled": rs.auto_reply_enabled if rs is not None else False,
         })
     return rows
+
+
+class AutoReplyToggleRequest(BaseModel):
+    enabled: bool
+
+
+@router.patch("/admin/stores/{store_id}/auto-reply")
+def admin_toggle_auto_reply(
+    store_id: int,
+    body: AutoReplyToggleRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    rs = db.scalar(select(ReplySetting).where(ReplySetting.store_id == store_id))
+    if rs is None:
+        raise HTTPException(404, "답글 설정이 없습니다")
+    rs.auto_reply_enabled = body.enabled
+    db.commit()
+    return {"store_id": store_id, "auto_reply_enabled": rs.auto_reply_enabled}

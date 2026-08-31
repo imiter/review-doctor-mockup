@@ -135,3 +135,32 @@ def test_admin_stores_handles_store_with_no_sync_history(
     assert len(body) == 1
     assert body[0]["last_sync"] is None
     assert body[0]["auto_reply_enabled"] is False  # reply_settings 행이 아예 없을 때의 기본값
+
+
+def test_admin_toggle_auto_reply_updates_setting(
+    client, db_session, seeded_user, reply_styles, auth_headers,
+):
+    _promote_to_admin(db_session, seeded_user["user"])
+    store = seeded_user["store"]
+    rs = ReplySetting(store_id=store.id, style_id=reply_styles.id, auto_reply_enabled=True, auto_reply_min_rating=5)
+    db_session.add(rs)
+    db_session.commit()
+
+    res = client.patch(
+        f"/admin/stores/{store.id}/auto-reply", json={"enabled": False}, headers=auth_headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["auto_reply_enabled"] is False
+
+    db_session.refresh(rs)
+    assert rs.auto_reply_enabled is False
+
+
+def test_admin_toggle_auto_reply_404_when_no_settings(client, db_session, seeded_user, auth_headers):
+    _promote_to_admin(db_session, seeded_user["user"])
+    store = seeded_user["store"]
+
+    res = client.patch(
+        f"/admin/stores/{store.id}/auto-reply", json={"enabled": True}, headers=auth_headers,
+    )
+    assert res.status_code == 404
