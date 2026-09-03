@@ -131,29 +131,43 @@ export default function BillingPage() {
           {history.length === 0 ? (
             <p className="text-sm text-muted">결제 내역이 없습니다.</p>
           ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border-subtle text-xs text-muted">
-                  <th className="py-2 text-left">일시</th>
-                  <th className="py-2 text-left">금액</th>
-                  <th className="py-2 text-left">상태</th>
-                </tr>
-              </thead>
-              <tbody>
+            <>
+              {/* 좁은 화면에서는 표 대신 카드 목록으로 — 가로 스크롤 없이 한 화면 폭에 맞춘다 */}
+              <div className="space-y-2 md:hidden">
                 {history.map((p) => (
-                  <tr key={p.order_id} className="border-b border-border-subtle last:border-0">
-                    <td className="py-2">{new Date(p.requested_at).toLocaleString("ko-KR")}</td>
-                    <td className="py-2">{won(p.amount)}</td>
-                    <td className="py-2">{STATUS_LABEL[p.status]}</td>
-                  </tr>
+                  <div key={p.order_id} className="flex items-center justify-between rounded-lg border border-border-subtle px-3 py-2.5 text-sm">
+                    <div>
+                      <p>{won(p.amount)}</p>
+                      <p className="text-xs text-muted">{new Date(p.requested_at).toLocaleString("ko-KR")}</p>
+                    </div>
+                    <span className="text-xs text-muted">{STATUS_LABEL[p.status]}</span>
+                  </div>
                 ))}
-              </tbody>
-            </table>
+              </div>
+              <table className="hidden w-full text-sm md:table">
+                <thead>
+                  <tr className="border-b border-border-subtle text-xs text-muted">
+                    <th className="py-2 text-left">일시</th>
+                    <th className="py-2 text-left">금액</th>
+                    <th className="py-2 text-left">상태</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((p) => (
+                    <tr key={p.order_id} className="border-b border-border-subtle last:border-0">
+                      <td className="py-2">{new Date(p.requested_at).toLocaleString("ko-KR")}</td>
+                      <td className="py-2">{won(p.amount)}</td>
+                      <td className="py-2">{STATUS_LABEL[p.status]}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
           )}
         </div>
       </Card>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Card title="Basic">
           <p className="text-2xl font-semibold">무료</p>
           <ul className="mt-3 space-y-1.5 text-sm text-muted">

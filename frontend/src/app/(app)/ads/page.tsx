@@ -193,53 +193,84 @@ export default function AdsPage() {
       </div>
 
       <Card title="순위 현황">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-border-subtle text-xs text-muted">
-                <th className="py-2 font-medium">카테고리</th>
-                <th className="font-medium">현재 CPC</th>
-                <th className="font-medium">목표 순위</th>
-                <th className="font-medium">현재 순위</th>
-                <th className="font-medium">상태</th>
-                <th className="font-medium">추천 액션</th>
-              </tr>
-            </thead>
-            <tbody>
+        {ranks.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted">등록된 광고 캠페인이 없습니다.</p>
+        ) : (
+          <>
+            {/* 좁은 화면에서는 표 대신 카드 목록으로 — 가로 스크롤 없이 한 화면 폭에 맞춘다 */}
+            <div className="space-y-3 md:hidden">
               {ranks.map((r) => {
                 const dropped = r.rank_status === "rank_dropped";
                 return (
-                  <tr key={r.campaign_id} className="border-b border-border-subtle last:border-0">
-                    <td className="py-3">{r.display_name ? `${r.display_name} · ${r.category}` : r.category}</td>
-                    <td>{won(r.current_cpc)}</td>
-                    <td>{r.target_rank}위</td>
-                    <td className={`font-semibold ${dropped ? "text-danger" : "text-success"}`}>
-                      {r.current_rank === null ? "—" : `${r.current_rank}위`}
-                    </td>
-                    <td>
+                  <div key={r.campaign_id} className="rounded-xl border border-border-subtle p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-sm font-medium">{r.display_name ? `${r.display_name} · ${r.category}` : r.category}</p>
                       <span
-                        className={`rounded px-2 py-0.5 text-xs font-medium ${
+                        className={`shrink-0 rounded px-2 py-0.5 text-xs font-medium ${
                           dropped ? "bg-danger-soft text-danger" : "bg-accent-soft text-accent"
                         }`}
                       >
                         {dropped ? "순위 밀림" : r.status === "active" ? "정상" : "일시정지"}
                       </span>
-                    </td>
-                    <td className="text-xs text-muted">
-                      {ACTION_LABEL[r.recommended_action]}
+                    </div>
+                    <dl className="mt-2 grid grid-cols-3 gap-2 text-xs text-muted">
+                      <div><dt>현재 CPC</dt><dd className="text-foreground">{won(r.current_cpc)}</dd></div>
+                      <div><dt>목표 순위</dt><dd className="text-foreground">{r.target_rank}위</dd></div>
+                      <div><dt>현재 순위</dt><dd className={`font-semibold ${dropped ? "text-danger" : "text-success"}`}>{r.current_rank === null ? "—" : `${r.current_rank}위`}</dd></div>
+                    </dl>
+                    <p className="mt-2 text-xs text-muted">
+                      추천 액션: {ACTION_LABEL[r.recommended_action]}
                       {r.suggested_cpc && ` (${won(r.suggested_cpc)})`}
-                    </td>
-                  </tr>
+                    </p>
+                  </div>
                 );
               })}
-              {ranks.length === 0 && (
-                <tr>
-                  <td colSpan={6} className="py-6 text-center text-sm text-muted">등록된 광고 캠페인이 없습니다.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+            </div>
+
+            <div className="hidden overflow-x-auto md:block">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-border-subtle text-xs text-muted">
+                    <th className="py-2 font-medium">카테고리</th>
+                    <th className="font-medium">현재 CPC</th>
+                    <th className="font-medium">목표 순위</th>
+                    <th className="font-medium">현재 순위</th>
+                    <th className="font-medium">상태</th>
+                    <th className="font-medium">추천 액션</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ranks.map((r) => {
+                    const dropped = r.rank_status === "rank_dropped";
+                    return (
+                      <tr key={r.campaign_id} className="border-b border-border-subtle last:border-0">
+                        <td className="py-3">{r.display_name ? `${r.display_name} · ${r.category}` : r.category}</td>
+                        <td>{won(r.current_cpc)}</td>
+                        <td>{r.target_rank}위</td>
+                        <td className={`font-semibold ${dropped ? "text-danger" : "text-success"}`}>
+                          {r.current_rank === null ? "—" : `${r.current_rank}위`}
+                        </td>
+                        <td>
+                          <span
+                            className={`rounded px-2 py-0.5 text-xs font-medium ${
+                              dropped ? "bg-danger-soft text-danger" : "bg-accent-soft text-accent"
+                            }`}
+                          >
+                            {dropped ? "순위 밀림" : r.status === "active" ? "정상" : "일시정지"}
+                          </span>
+                        </td>
+                        <td className="text-xs text-muted">
+                          {ACTION_LABEL[r.recommended_action]}
+                          {r.suggested_cpc && ` (${won(r.suggested_cpc)})`}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </Card>
 
       <Card title="반경별 실측 순위">
@@ -325,38 +356,57 @@ export default function AdsPage() {
               {c.points.length === 0 ? (
                 <p className="text-sm text-muted">아직 실측 데이터가 없습니다.</p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-border-subtle text-xs text-muted">
-                        <th className="py-2 font-medium">거리</th>
-                        <th className="font-medium">순위</th>
-                        <th className="font-medium">스캔 개수</th>
-                        <th className="font-medium">위 광고 수</th>
-                        <th className="font-medium">측정 시각</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {c.points.map((p) => (
-                        <tr key={p.point_label} className="border-b border-border-subtle last:border-0">
-                          <td className="py-3">{p.point_label}</td>
-                          <td
-                            className={`font-semibold ${
-                              p.current_rank > c.target_rank ? "text-danger" : "text-success"
-                            }`}
-                          >
+                <>
+                  {/* 좁은 화면에서는 표 대신 카드 목록으로 — 가로 스크롤 없이 한 화면 폭에 맞춘다 */}
+                  <div className="space-y-2 md:hidden">
+                    {c.points.map((p) => (
+                      <div key={p.point_label} className="rounded-lg border border-border-subtle p-3 text-sm">
+                        <div className="flex items-center justify-between">
+                          <p className="font-medium">{p.point_label}</p>
+                          <p className={`font-semibold ${p.current_rank > c.target_rank ? "text-danger" : "text-success"}`}>
                             {p.current_rank}위
-                          </td>
-                          <td>{p.total_scanned}개</td>
-                          <td>{p.ads_above}개</td>
-                          <td className="text-xs text-muted">
-                            {new Date(p.snapshot_at).toLocaleString("ko-KR")}
-                          </td>
+                          </p>
+                        </div>
+                        <p className="mt-1 text-xs text-muted">
+                          스캔 {p.total_scanned}개 · 위 광고 {p.ads_above}개 · {new Date(p.snapshot_at).toLocaleString("ko-KR")}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="hidden overflow-x-auto md:block">
+                    <table className="w-full text-left text-sm">
+                      <thead>
+                        <tr className="border-b border-border-subtle text-xs text-muted">
+                          <th className="py-2 font-medium">거리</th>
+                          <th className="font-medium">순위</th>
+                          <th className="font-medium">스캔 개수</th>
+                          <th className="font-medium">위 광고 수</th>
+                          <th className="font-medium">측정 시각</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody>
+                        {c.points.map((p) => (
+                          <tr key={p.point_label} className="border-b border-border-subtle last:border-0">
+                            <td className="py-3">{p.point_label}</td>
+                            <td
+                              className={`font-semibold ${
+                                p.current_rank > c.target_rank ? "text-danger" : "text-success"
+                              }`}
+                            >
+                              {p.current_rank}위
+                            </td>
+                            <td>{p.total_scanned}개</td>
+                            <td>{p.ads_above}개</td>
+                            <td className="text-xs text-muted">
+                              {new Date(p.snapshot_at).toLocaleString("ko-KR")}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               )}
             </div>
             );

@@ -268,8 +268,8 @@ function ReviewCard({
 
       {brandName && <p className="mt-3 text-xs text-muted">{brandName}</p>}
 
-      <div className={`flex items-start gap-5 ${brandName ? "mt-1.5" : "mt-4"}`}>
-        <div className="w-52 flex-shrink-0 space-y-1.5">
+      <div className={`flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-5 ${brandName ? "mt-1.5" : "mt-4"}`}>
+        <div className="space-y-1.5 sm:w-52 sm:flex-shrink-0">
           <div className="flex flex-wrap items-baseline gap-2">
             <span className="text-base font-semibold text-foreground">{review.customer_nickname}</span>
             <span className="text-xs text-muted">{review.customer_order_count}회 주문</span>
@@ -282,7 +282,7 @@ function ReviewCard({
             {review.menu_summary}
           </span>
         </div>
-        <div className="flex-1 space-y-3 rounded-xl bg-surface p-4">
+        <div className="min-w-0 flex-1 space-y-3 rounded-xl bg-surface p-4">
           {review.image_urls.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {review.image_urls.map((url) => (
