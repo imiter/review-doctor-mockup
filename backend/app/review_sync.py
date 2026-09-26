@@ -507,6 +507,11 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                     Review.is_sensitive.is_(False),
                     Review.sentiment_conflict.is_(False),
                 )
+                # 이번 동기화 중 방금 삽입된 리뷰를 제외한다. 신규 리뷰 루프에서
+                # review.status = "answered"로 변경했지만 아직 flush되지 않았으므로,
+                # DB 레벨에서는 여전히 status="unanswered"다. 이 쿼리를 flush 없이
+                # 실행하면 방금 답글을 달았던 리뷰가 backlog에 다시 걸려서 배민에
+                # 중복 제출될 수 있다(SQLAlchemy의 autoflush=False 세션 + identity map).
                 if newly_inserted_review_ids:
                     query = query.where(Review.id.notin_(newly_inserted_review_ids))
                 backlog = db.scalars(query).all()
