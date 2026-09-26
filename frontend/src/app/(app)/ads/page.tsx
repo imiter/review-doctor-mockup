@@ -275,7 +275,7 @@ export default function AdsPage() {
 
       <Card title="반경별 실측 순위">
         <p className="mb-3 text-xs text-muted">
-          가게 기준 거리(0km / 1.5~2.5km / 2.5~3.5km)에 따라 카테고리 순위가 어떻게
+          가게 기준 거리(0km / 1km / 2km / 3km)에 따라 카테고리 순위가 어떻게
           달라지는지 실기기 자동화로 실측한 값입니다. &quot;우리가게 순위 확인&quot;을
           누르면 에뮬레이터가 실제로 배민 앱을 조작해 새로 측정합니다(지점당 약 1분,
           완료까지 수 분 소요).

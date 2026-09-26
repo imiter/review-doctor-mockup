@@ -1,6 +1,7 @@
-"""가게 주소(0km) + 반경 구간(1.5~2.5km, 2.5~3.5km)에서 각 1지점씩,
-총 3개 지점을 순회하며 배민 카테고리 순위를 실측한다. 반경 구간은 매번
-가게 주소를 기점으로 다시 계산한다 — 이전 지점에서 누적으로 이어가지 않는다."""
+"""가게 주소(0km) + RING_KM_RANGES에 정의된 반경 지점(기본값: 1km, 2km)에서
+각 1지점씩, 총 4개 지점을 순회하며 배민 카테고리 순위를 실측한다. 각 반경
+지점은 매번 가게 주소를 기점으로 새 방위각을 뽑아 다시 계산한다 — 이전
+지점에서 누적으로 이어가지 않는다."""
 
 import csv
 import datetime
@@ -11,6 +12,7 @@ import sys
 from appium_driver import restart_app, set_mock_location, start_session
 from baemin_navigator import (
     MountainLotAddressError,
+    dismiss_ad_popup,
     navigate_to_category,
     scroll_and_collect,
     set_delivery_address_to_current_location,
@@ -62,6 +64,18 @@ def _sanitize_label(label: str) -> str:
     return label.replace("~", "-").replace(" ", "")
 
 
+def _format_point_label(min_km: float, max_km: float) -> str:
+    """RING_KM_RANGES 항목을 화면/CSV에 쓸 라벨로 바꾼다.
+
+    min_km == max_km(고정 거리 지점, 2026-09-23부터 기본값)면 "1km"처럼
+    간단히 쓴다 — "1.0~1.0km"로 나오면 화면에서 고정 거리와 구간을 구분하기
+    어렵다. 구간(min < max)이면 기존처럼 "1.5~2.5km" 형식을 그대로 쓴다
+    (하위 호환 — 구간 설정으로 되돌려도 그대로 동작)."""
+    if min_km == max_km:
+        return f"{min_km:g}km"
+    return f"{min_km:g}~{max_km:g}km"
+
+
 def _error_row(point_label: str, distance_km, bearing_deg, lat, lng, category: str, rank_label: str) -> dict:
     return {
         "timestamp": datetime.datetime.now().isoformat(),
@@ -98,6 +112,9 @@ def _crawl_point(driver, settings, point_label: str, distance_km, bearing_deg, l
     }
 
     try:
+        # 주소 등록 직후(restart_app 직후)뿐 아니라 카테고리 진입 시점에도
+        # 팝업이 뜬 사례가 실측 확인됐다(2026-09-23) — 안전하게 한 번 더 확인.
+        dismiss_ad_popup(driver)
         navigate_to_category(driver, settings.category_label)
         # scroll_and_collect의 스크롤 폭이 화면의 32%로 넓어지면서(누락 없이
         # 검증된 최대치) 한 번에 이동하는 거리가 늘었다 — 같은 스캔 깊이를
@@ -136,6 +153,7 @@ def _setup_address_for_store(driver, base_lat: float, base_lng: float) -> None:
     """가게 기준 주소(0km 지점) — 재샘플링 없이 1회만 시도한다."""
     set_mock_location(base_lat, base_lng)
     restart_app(driver, PACKAGE)
+    dismiss_ad_popup(driver)
     set_delivery_address_to_current_location(driver)
 
 
@@ -148,13 +166,14 @@ def _setup_address_for_ring(driver, base_lat: float, base_lng: float, min_km: fl
         point = sample_ring_point(base_lat, base_lng, min_km, max_km, rng)
         set_mock_location(point["lat"], point["lng"])
         restart_app(driver, PACKAGE)
+        dismiss_ad_popup(driver)
         try:
             set_delivery_address_to_current_location(driver)
             return point
         except MountainLotAddressError as e:
-            print(f"  [{min_km}~{max_km}km] 산 지번 주소라 건너뜀 (시도 {attempt}/{MAX_MOUNTAIN_LOT_RETRIES}): {e}")
+            print(f"  [{_format_point_label(min_km, max_km)}] 산 지번 주소라 건너뜀 (시도 {attempt}/{MAX_MOUNTAIN_LOT_RETRIES}): {e}")
     raise RingSamplingExhaustedError(
-        f"{MAX_MOUNTAIN_LOT_RETRIES}회 재시도해도 산 지번이 아닌 주소를 찾지 못했습니다 ({min_km}~{max_km}km)"
+        f"{MAX_MOUNTAIN_LOT_RETRIES}회 재시도해도 산 지번이 아닌 주소를 찾지 못했습니다 ({_format_point_label(min_km, max_km)})"
     )
 
 
@@ -194,9 +213,9 @@ def run():
             print(f"[0km] NAV_ERROR: {e}")
             rows.append(_error_row("0km", 0.0, None, base_lat, base_lng, settings.category_label, "NAV_ERROR"))
 
-        # 지점 2-3: 가게 주소 기준 반경 구간 — 매번 가게 주소부터 다시 계산
+        # 지점 2-3: 가게 주소 기준 반경 지점 — 매번 가게 주소부터 다시 계산
         for min_km, max_km in RING_KM_RANGES:
-            point_label = f"{min_km}~{max_km}km"
+            point_label = _format_point_label(min_km, max_km)
             try:
                 point = _setup_address_for_ring(driver, base_lat, base_lng, min_km, max_km, rng)
             except RingSamplingExhaustedError as e:

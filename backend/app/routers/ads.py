@@ -244,7 +244,9 @@ def ads_rank_by_distance(
     user: User = Depends(require_pro_plan),
     db: Session = Depends(get_db),
 ):
-    """가게 기준 반경별(0km/1.5~2.5km/2.5~3.5km) 카테고리 순위.
+    """가게 기준 반경별(0km/1km/2km/3km, crawler/config.py의 RING_KM_RANGES 참고 —
+    2026-09-23부터 배민 배달 반경 축소 대응으로 1.5~2.5km/2.5~3.5km 구간에서
+    고정 거리로 변경됨, 이후 경계를 찾기 위해 3km 지점 추가) 카테고리 순위.
 
     crawler/(Appium 실기기 자동화)로 실측 수집해 ingest_rank_snapshots.py가
     적재한 distance_km IS NOT NULL 행만 대상으로 한다 — 요청 시점에 실시간으로

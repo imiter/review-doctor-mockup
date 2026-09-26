@@ -22,6 +22,36 @@ def contains_mountain_lot(address_text: str) -> bool:
     return bool(_MOUNTAIN_LOT_PATTERN.search(address_text))
 
 
+def dismiss_ad_popup(driver) -> bool:
+    """배민이 가끔 띄우는 전면 광고/가입유도 팝업을 닫는다.
+
+    이전에는 이 팝업이 뜨면 뒤에 있는 홈/카테고리 요소가 전부 가려져 이후
+    탐색이 전부 실패했고, 사장님이 직접 앱을 나갔다 다시 들어와야 했다
+    (2026-09-23 실측 확인). 접근성 라벨(닫기/close, resource-id에 close가
+    들어간 요소)로만 닫기 버튼을 찾는다 — 찾은 요소만 클릭하므로 팝업이
+    없으면 그냥 아무 것도 안 하고 False를 반환한다(restart_app 직후 매번
+    호출해도 안전).
+
+    2026-09-23 최초 구현엔 이 방식이 실패했을 때 화면 비율 좌표로 우상단을
+    추정해 탭하는 폴백이 있었다 — 그런데 그 폴백을 트리거하던 "팝업 신호
+    문구"("가입하고 혜택받기" 등)가 실제 전면 팝업뿐 아니라 홈 화면에 항상
+    떠 있는 평범한 배너 카드에도 똑같이 등장해, 팝업이 전혀 없을 때도
+    오탭이 발생했다(실사용 중 재현 확인 — 그 좌표가 하필 "혜택모아보기"
+    탭과 겹쳐 매번 엉뚱한 탭으로 넘어가 카테고리 진입 자체가 막힘). 추측성
+    좌표 탭은 이렇게 "없는 걸 있다고 오판"할 위험이 실제로 크다는 게
+    증명돼 완전히 제거했다 — 확실한 근거(실제로 찾은 요소)가 있을 때만
+    클릭한다. 실제 팝업의 X 버튼에 접근성 라벨이 없는 경우까지 자동으로
+    닫으려면, 다음에 팝업이 뜨는 순간의 `adb shell uiautomator dump`가
+    필요하다(사용자 실측 제공 대기 중)."""
+    for xpath in ("//*[@content-desc='닫기']", "//*[contains(@resource-id, 'close')]"):
+        elements = driver.find_elements("xpath", xpath)
+        if elements:
+            elements[0].click()
+            time.sleep(1)
+            return True
+    return False
+
+
 _HOME_CATEGORY_ENTRY_LABEL = "피자"  # 홈 화면 카테고리 그리드에 항상 노출되는 안전한 진입점
 _LOGIN_PROMPT_MARKER_TEXT = "이메일 또는 아이디로 로그인"  # 실수로 로그인 화면이 뜬 경우 감지용
 _CATEGORY_EXPAND_BUTTON_DESC = "메뉴 전체보기 버튼"  # 카테고리 탭 바에 안 보이는 카테고리는 이 버튼으로 펼쳐야 나온다

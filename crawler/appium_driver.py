@@ -36,6 +36,17 @@ def start_session(package: str, device_name: str = "emulator-5554"):
     options.device_name = device_name
     options.app_package = package
     options.no_reset = True
+    # 2026-09-23 실측 확인: 배민 앱이 추석 시즌 아이콘(AppIconCustomV1 같은
+    # activity-alias)으로 배포되면서, Appium이 앱 실행 확인을 위해 기다리는
+    # "포그라운드 액티비티"가 그 별칭(alias) 이름 그대로인 경우와 실제
+    # 리다이렉트된 진짜 액티비티(RootContainerActivity)인 경우가 섞여서,
+    # 약 절반 확률로 "'.AppIconCustomV1'... never started" 타임아웃이 났다
+    # (restart_app을 지점마다/재시도마다 호출하므로 크롤 전체가 간헐적으로
+    # 멈추거나 재시도를 낭비하는 원인이었다). app_wait_activity="*"는
+    # "패키지 안의 아무 액티비티나 포그라운드에 오면 실행된 것으로 인정"
+    # 시켜 이 경합을 근본적으로 없앤다 — 재현 테스트에서 4회 연속 즉시
+    # 성공(0.2~0.3초)으로 확인됨.
+    options.app_wait_activity = "*"
     return webdriver.Remote("http://localhost:4723", options=options)
 
 
