@@ -2338,13 +2338,51 @@ def test_sync_does_not_create_negative_review_alert_for_high_rating(db_session, 
 
 
 def _enable_auto_reply(db_session, store_id, style_id):
-    from app.models import ReplySetting
+    from app.models import ReplySetting, Store, Subscription
+    from datetime import date
+
     db_session.add(ReplySetting(
         store_id=store_id, style_id=style_id, promo_text="", include_nickname=True,
         include_menu=True, include_store_name=True, promo_on_negative=False,
         auto_reply_enabled=True, auto_reply_min_rating=1,
     ))
+    store = db_session.get(Store, store_id)
+    db_session.query(Subscription).filter_by(user_id=store.user_id).update(
+        {"plan": "pro", "expires_at": date(2099, 1, 1)}
+    )
     db_session.commit()
+
+
+def test_sync_does_not_auto_reply_when_not_pro(db_session, sync_setup, reply_styles, monkeypatch):
+    """reply_settings.auto_reply_enabled=True인데 그 가게 주인이 Pro가
+    아니면(예: Pro였다가 다운그레이드) 자동답글이 실행되면 안 된다."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import ReplySetting, Review
+
+    job, conn = sync_setup
+    db_session.add(ReplySetting(
+        store_id=job.store_id, style_id=reply_styles.id, promo_text="", include_nickname=True,
+        include_menu=True, include_store_name=True, promo_on_negative=False,
+        auto_reply_enabled=True, auto_reply_min_rating=1,
+    ))
+    db_session.commit()
+    # seeded_user 기본 Subscription은 basic이라 별도 다운그레이드 불필요.
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])  # rating 5.0
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review.status == "unanswered"
 
 
 def test_sync_auto_replies_to_five_star_review_when_enabled(db_session, sync_setup, reply_styles, monkeypatch):

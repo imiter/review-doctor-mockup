@@ -30,9 +30,11 @@ from app.models import (
     ReviewSyncJob,
     Store,
     StorePlatformConnection,
+    Subscription,
 )
 from app.llm.classify import ClassificationError, classify_review
 from app.llm.generate import generate_ai_reply
+from app.plan import effective_plan
 from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics, fetch_cpc_booking, map_click_metrics_by_date
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 from scrapers.baemin_menu import BaeminMenuScrapeError, fetch_brand_menu_info
@@ -337,11 +339,17 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
     # 카테고리이고, 위생/안전 민감 사안도 아니고, 별점-내용 불일치도
     # 아닌, "진짜 순수 긍정"으로 분류된 리뷰만 대상이다(아래 elif 참고).
     _AUTO_REPLY_MIN_RATING_FLOOR = 5
+    store = db.get(Store, job.store_id)
+    # 설정 저장 시점(PUT /reply-settings)에도 Pro가 아니면 auto_reply_enabled를
+    # 켤 수 없게 막아뒀지만, Pro였다가 Basic으로 내려간 뒤에도 이미 켜둔 값이
+    # DB에 남아있을 수 있다 — 실제 비용(Sonnet 호출)과 배민 계정 쓰기가
+    # 발생하는 이 지점이 최종 관문이라 여기서도 다시 확인한다.
+    sub = db.scalar(select(Subscription).where(Subscription.user_id == store.user_id))
+    is_pro = effective_plan(sub) == "pro"
     reply_settings = db.scalar(select(ReplySetting).where(ReplySetting.store_id == job.store_id))
     auto_reply_style = None
-    if reply_settings is not None and reply_settings.auto_reply_enabled:
+    if reply_settings is not None and reply_settings.auto_reply_enabled and is_pro:
         auto_reply_style = db.get(ReplyStyle, reply_settings.style_id)
-    store = db.get(Store, job.store_id)
     # 자동 답글 실패는 stats_errors와 같은 종류의 "부분 실패"다 — 이 리뷰
     # 자체는 이미 정상 저장됐으므로 shop 전체를 실패로 보면 안 되고, 실패
     # 사실만 조용히 묻히지 않게 모아서 job.error_message에 남긴다.
