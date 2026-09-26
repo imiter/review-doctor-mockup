@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
-from app.models import ReplySetting, Subscription, User
+from app.models import ReplySetting, Store, Subscription, User
 from app.plan import effective_plan
 
 router = APIRouter(tags=["reply-settings"])
@@ -36,6 +36,9 @@ def get_reply_settings(
     db: Session = Depends(get_db),
 ):
     sid = store_id or get_user_default_store_id(user, db)
+    store = db.get(Store, sid)
+    if store is None or store.user_id != user.id:
+        raise HTTPException(404, "매장 없음")
     rs = db.scalar(select(ReplySetting).where(ReplySetting.store_id == sid))
     if rs is None:
         raise HTTPException(404, "답글 설정이 없습니다")
@@ -61,6 +64,9 @@ def update_reply_settings(
     db: Session = Depends(get_db),
 ):
     sid = store_id or get_user_default_store_id(user, db)
+    store = db.get(Store, sid)
+    if store is None or store.user_id != user.id:
+        raise HTTPException(404, "매장 없음")
     rs = db.scalar(select(ReplySetting).where(ReplySetting.store_id == sid))
     if rs is None:
         raise HTTPException(404, "답글 설정이 없습니다")

@@ -339,6 +339,12 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
     # 카테고리이고, 위생/안전 민감 사안도 아니고, 별점-내용 불일치도
     # 아닌, "진짜 순수 긍정"으로 분류된 리뷰만 대상이다(아래 elif 참고).
     _AUTO_REPLY_MIN_RATING_FLOOR = 5
+    # 배민 리뷰 목록 화면 자체가 구조적으로 도달 가능한 범위(약 6개월 전후,
+    # 스크래퍼 자체 문서 참고)를 넘어선 오래된 미답변 리뷰까지 소급 대상에
+    # 넣으면, 그 리뷰는 스캔 자체가 실패해서 영원히 실패만 반복하며 매
+    # 동기화마다 유료 Sonnet 호출 + 스크래핑 시간을 헛되이 쓰게 된다 —
+    # 실제 스캐너 한계보다 여유 있게 안전 마진을 두고 자른다.
+    _BACKLOG_SWEEP_MAX_AGE_DAYS = 150
     store = db.get(Store, job.store_id)
     # 설정 저장 시점(PUT /reply-settings)에도 Pro가 아니면 auto_reply_enabled를
     # 켤 수 없게 막아뒀지만, Pro였다가 Basic으로 내려간 뒤에도 이미 켜둔 값이
@@ -359,7 +365,6 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
     # 유일하므로, 중복 판별 집합은 매장 루프 전체에 걸쳐 하나만 공유한다.
     total_fetched = 0
     total_inserted = 0
-    newly_inserted_review_ids: list[int] = []  # 이 동기화 중에 새로 삽입된 리뷰 id 추적
     succeeded_any = False
     # 리뷰가 전부 실패해도(succeeded_any == False) 매출/재주문율/입금 중
     # 하나라도 성공해 실제로 DB에 커밋된 데이터가 있다면 job을 failed로
@@ -485,7 +490,6 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                         # 답글을 달 수 있다(review.status는 unanswered로 남음).
                         auto_reply_errors.append(f"리뷰 {review.id}(별점 {review.rating}): {e}")
                 existing_ids.add(m["external_review_id"])
-                newly_inserted_review_ids.append(review.id)
                 total_inserted += 1
 
             # 자동답글을 켜기 전부터 이미 DB에 있던 미답변 리뷰는 위
@@ -498,23 +502,28 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
             # 재확인하지 않고 DB status만 믿는다(설계 문서 결정 사항 3번,
             # 대상이 5점/no_issue/비민감으로 한정돼 위험은 낮다고 판단).
             if auto_reply_style is not None:
-                query = select(Review).where(
-                    Review.store_id == job.store_id,
-                    Review.platform_shop_no == str(shop_no),
-                    Review.status == "unanswered",
-                    Review.rating >= _AUTO_REPLY_MIN_RATING_FLOOR,
-                    Review.category == "no_issue",
-                    Review.is_sensitive.is_(False),
-                    Review.sentiment_conflict.is_(False),
-                )
-                # 이번 동기화 중 방금 삽입된 리뷰를 제외한다. 신규 리뷰 루프에서
-                # review.status = "answered"로 변경했지만 아직 flush되지 않았으므로,
-                # DB 레벨에서는 여전히 status="unanswered"다. 이 쿼리를 flush 없이
-                # 실행하면 방금 답글을 달았던 리뷰가 backlog에 다시 걸려서 배민에
-                # 중복 제출될 수 있다(SQLAlchemy의 autoflush=False 세션 + identity map).
-                if newly_inserted_review_ids:
-                    query = query.where(Review.id.notin_(newly_inserted_review_ids))
-                backlog = db.scalars(query).all()
+                # 신규 리뷰 루프에서 review.status = "answered"로 바꾼 게 아직
+                # DB에 반영 안 된 상태로 아래 SELECT가 나가면, 방금 답글단
+                # 리뷰가 여전히 status="unanswered"로 조회돼 같은 리뷰가 이번
+                # 동기화 안에서 배민에 중복 제출될 수 있다(SQLAlchemy
+                # autoflush=False 세션). 조회 직전에 명시적으로 flush해서 이
+                # 경합을 없앤다 — 특정 리뷰 id를 골라 제외하는 것보다 근본적인
+                # 방식이라(같은 shop_no가 배민 쪽 목록에 중복으로 나와 한
+                # 매장이 이번 동기화에서 두 번 순회되는 경우까지 같이 막아준다),
+                # 별도 추적 리스트도 필요 없다.
+                db.flush()
+                backlog = db.scalars(
+                    select(Review).where(
+                        Review.store_id == job.store_id,
+                        Review.platform_shop_no == str(shop_no),
+                        Review.status == "unanswered",
+                        Review.rating >= _AUTO_REPLY_MIN_RATING_FLOOR,
+                        Review.category == "no_issue",
+                        Review.is_sensitive.is_(False),
+                        Review.sentiment_conflict.is_(False),
+                        Review.created_at >= datetime.now(timezone.utc) - timedelta(days=_BACKLOG_SWEEP_MAX_AGE_DAYS),
+                    )
+                ).all()
                 for review in backlog:
                     try:
                         content = generate_ai_reply(db, review, store, auto_reply_style)
@@ -524,6 +533,15 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                             content=content, created_at=datetime.now(timezone.utc),
                         ))
                         review.status = "answered"
+                        # 실제 배민에 답글이 이미 나갔다 — 이 시점 이후 어디서
+                        # 무엇이 실패해 job 전체가 rollback되더라도, 방금 성공한
+                        # 이 제출 기록만은 절대 같이 날아가면 안 된다(날아가면
+                        # 다음 동기화 때 같은 리뷰에 또 제출해 배민에 중복 답글이
+                        # 달린다 — 신규 리뷰 경로는 rollback 시 Review 행 자체가
+                        # 사라져 다음 동기화가 owner_reply로 재감지하지만, 이
+                        # 소급 처리 경로는 행이 원래 있던 것이라 그 자기치유가
+                        # 없다). 그래서 여기서만 즉시 개별 커밋한다.
+                        db.commit()
                     except Exception as e:
                         auto_reply_errors.append(f"리뷰 {review.id}(별점 {review.rating}, 기존 미답변): {e}")
 

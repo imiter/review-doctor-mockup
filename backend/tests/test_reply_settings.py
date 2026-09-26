@@ -93,3 +93,41 @@ def test_update_reply_settings_allows_disabling_for_basic(client, db_session, se
     res = client.put("/reply-settings", json={"auto_reply_enabled": False}, headers=auth_headers)
     assert res.status_code == 200
     assert res.json()["auto_reply_enabled"] is False
+
+
+def test_update_reply_settings_rejects_other_users_store(client, db_session, seeded_user, reply_styles, auth_headers):
+    """store_id를 남의 매장으로 지정해도 404여야 한다 — reply_settings에는
+    소유권 확인이 없어서 원래는 아무 store_id나 조회/수정할 수 있었다."""
+    from datetime import date, datetime, timezone
+
+    from app.auth import hash_password
+    from app.models import Store, Subscription, User
+
+    other_user = User(
+        email="other@dris.kr", password_hash=hash_password("other1234!"), nickname="박사장",
+        phone_hash="b" * 64, marketing_agreed=True, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(other_user)
+    db_session.flush()
+
+    other_store = Store(
+        user_id=other_user.id, name="다른가게", category="분식",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(other_store)
+    db_session.flush()
+    db_session.add(Subscription(user_id=other_user.id, plan="basic", daily_reply_limit=10, started_at=date.today()))
+    db_session.commit()
+
+    make_settings(db_session, other_store, reply_styles)
+
+    get_res = client.get("/reply-settings", params={"store_id": other_store.id}, headers=auth_headers)
+    assert get_res.status_code == 404
+
+    put_res = client.put(
+        "/reply-settings",
+        params={"store_id": other_store.id},
+        json={"promo_text": "탈취된 문구"},
+        headers=auth_headers,
+    )
+    assert put_res.status_code == 404
