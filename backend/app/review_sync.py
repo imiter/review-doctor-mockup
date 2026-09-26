@@ -359,6 +359,7 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
     # 유일하므로, 중복 판별 집합은 매장 루프 전체에 걸쳐 하나만 공유한다.
     total_fetched = 0
     total_inserted = 0
+    newly_inserted_review_ids: list[int] = []  # 이 동기화 중에 새로 삽입된 리뷰 id 추적
     succeeded_any = False
     # 리뷰가 전부 실패해도(succeeded_any == False) 매출/재주문율/입금 중
     # 하나라도 성공해 실제로 DB에 커밋된 데이터가 있다면 job을 failed로
@@ -484,7 +485,42 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                         # 답글을 달 수 있다(review.status는 unanswered로 남음).
                         auto_reply_errors.append(f"리뷰 {review.id}(별점 {review.rating}): {e}")
                 existing_ids.add(m["external_review_id"])
+                newly_inserted_review_ids.append(review.id)
                 total_inserted += 1
+
+            # 자동답글을 켜기 전부터 이미 DB에 있던 미답변 리뷰는 위
+            # "새로 발견된 리뷰" 루프에 절대 안 걸린다(existing_ids로
+            # 걸러짐) — 그래서 한 번 자동답글을 켜도 과거 리뷰엔 영원히
+            # 소급 적용이 안 되는 문제가 실사용 중 발견됐다(2026-09-26).
+            # 이 매장(shop_no) 범위에서 조건을 만족하는 미답변 리뷰를 매
+            # 동기화마다 다시 훑어서 같은 생성·제출 로직을 재적용한다.
+            # 배민에 그 사이 사장님이 직접 답글을 달았을 가능성은 실시간
+            # 재확인하지 않고 DB status만 믿는다(설계 문서 결정 사항 3번,
+            # 대상이 5점/no_issue/비민감으로 한정돼 위험은 낮다고 판단).
+            if auto_reply_style is not None:
+                query = select(Review).where(
+                    Review.store_id == job.store_id,
+                    Review.platform_shop_no == str(shop_no),
+                    Review.status == "unanswered",
+                    Review.rating >= _AUTO_REPLY_MIN_RATING_FLOOR,
+                    Review.category == "no_issue",
+                    Review.is_sensitive.is_(False),
+                    Review.sentiment_conflict.is_(False),
+                )
+                if newly_inserted_review_ids:
+                    query = query.where(Review.id.notin_(newly_inserted_review_ids))
+                backlog = db.scalars(query).all()
+                for review in backlog:
+                    try:
+                        content = generate_ai_reply(db, review, store, auto_reply_style)
+                        submit_reply(session.page, shop_no, review.external_review_id, content)
+                        db.add(ReviewReply(
+                            review_id=review.id, reply_type="final", style_id=auto_reply_style.id,
+                            content=content, created_at=datetime.now(timezone.utc),
+                        ))
+                        review.status = "answered"
+                    except Exception as e:
+                        auto_reply_errors.append(f"리뷰 {review.id}(별점 {review.rating}, 기존 미답변): {e}")
 
         # 리뷰 동기화 성공 여부와 무관하게 매출/재주문율/입금은 별도로
         # 시도한다 — 리뷰가 전부 실패해도(예: 매장 목록이 비정상) 매출은

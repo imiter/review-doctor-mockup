@@ -2623,6 +2623,117 @@ def test_sync_auto_reply_does_not_promote_to_golden_examples(db_session, sync_se
     assert db_session.query(GoldenExample).count() == 0
 
 
+def test_sync_answers_preexisting_unanswered_review_when_pro(db_session, sync_setup, reply_styles, monkeypatch):
+    """자동답글을 켜기 전부터 이미 DB에 있던 미답변 5점/no_issue 리뷰도,
+    Pro 매장이면 다음 동기화 때 소급으로 답글이 달려야 한다."""
+    import app.review_sync as review_sync_mod
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    backlog_review = Review(
+        store_id=job.store_id, platform_id=job.platform_id, menu_summary="옛날메뉴",
+        external_review_id=9001, platform_shop_no=str(_FakeSession.shop_no),
+        rating=5, content="예전부터 있던 리뷰", customer_nickname="옛날고객",
+        customer_order_count=1, category="no_issue", is_sensitive=False,
+        sentiment_conflict=False, status="unanswered",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(backlog_review)
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])  # 이번엔 새 리뷰 없음
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "소급 답글입니다!")
+    submit_calls = []
+    monkeypatch.setattr(
+        review_sync_mod, "submit_reply",
+        lambda page, shop_no, external_review_id, content: submit_calls.append((shop_no, external_review_id, content)),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    db_session.refresh(backlog_review)
+    assert backlog_review.status == "answered"
+    assert submit_calls == [(fake_session.shop_no, 9001, "소급 답글입니다!")]
+    final_reply = db_session.query(ReviewReply).filter_by(review_id=backlog_review.id, reply_type="final").one()
+    assert final_reply.content == "소급 답글입니다!"
+
+
+def test_sync_skips_preexisting_review_not_matching_criteria(db_session, sync_setup, reply_styles, monkeypatch):
+    """기존 미답변 리뷰라도 조건(별점 5점/no_issue/비민감)을 만족 못 하면
+    소급 처리 대상에서 제외된다."""
+    import app.review_sync as review_sync_mod
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    backlog_review = Review(
+        store_id=job.store_id, platform_id=job.platform_id, menu_summary="옛날메뉴",
+        external_review_id=9002, platform_shop_no=str(_FakeSession.shop_no),
+        rating=5, content="불만 섞인 5점", customer_nickname="옛날고객2",
+        customer_order_count=1, category="food_quality", is_sensitive=False,
+        sentiment_conflict=False, status="unanswered",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(backlog_review)
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    db_session.refresh(backlog_review)
+    assert backlog_review.status == "unanswered"
+
+
+def test_sync_backlog_reply_failure_does_not_fail_whole_job(db_session, sync_setup, reply_styles, monkeypatch):
+    """소급 처리 중 하나가 실패해도(예: 배민 제출 오류) job 전체가 실패로
+    끝나면 안 되고, 실패 사실만 error_message에 남아야 한다(기존 신규 리뷰
+    경로의 auto_reply_errors 패턴과 동일)."""
+    import app.review_sync as review_sync_mod
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    backlog_review = Review(
+        store_id=job.store_id, platform_id=job.platform_id, menu_summary="옛날메뉴",
+        external_review_id=9003, platform_shop_no=str(_FakeSession.shop_no),
+        rating=5, content="예전부터 있던 리뷰", customer_nickname="옛날고객3",
+        customer_order_count=1, category="no_issue", is_sensitive=False,
+        sentiment_conflict=False, status="unanswered",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(backlog_review)
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "답글")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("배민 제출 실패")
+    monkeypatch.setattr(review_sync_mod, "submit_reply", _boom)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    db_session.refresh(job)
+    db_session.refresh(backlog_review)
+    assert job.status == "success"
+    assert backlog_review.status == "unanswered"
+    assert "자동 답글 실패" in job.error_message
+    assert "기존 미답변" in job.error_message
+
+
 def test_sync_falls_back_to_default_category_when_classification_fails(db_session, sync_setup, monkeypatch):
     import app.review_sync as review_sync_mod
 
