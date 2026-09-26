@@ -14,7 +14,7 @@ type ReplySettings = {
 type ReplyStyle = { id: number; name: string; description: string };
 
 export default function ReplyRulesPage() {
-  const { storeId } = useStoreContext();
+  const { storeId, billing } = useStoreContext();
   const [settings, setSettings] = useState<ReplySettings | null>(null);
   const [styles, setStyles] = useState<ReplyStyle[]>([]);
   const [saving, setSaving] = useState(false);
@@ -43,6 +43,24 @@ export default function ReplyRulesPage() {
   };
 
   if (!settings) return <p className="text-sm text-muted">불러오는 중...</p>;
+
+  if (billing && !billing.is_pro) {
+    return (
+      <div className="mx-auto max-w-md space-y-4 py-24 text-center">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-accent-soft text-accent">
+          🔒
+        </div>
+        <p className="text-lg font-semibold">Pro 전용 기능입니다</p>
+        <p className="text-sm text-muted">자동 답글은 Pro 플랜에서 이용할 수 있어요.</p>
+        <Link
+          href="/account/billing"
+          className="inline-block rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white"
+        >
+          Pro 시작하기
+        </Link>
+      </div>
+    );
+  }
 
   const currentStyle = styles.find((s) => s.id === settings.style_id);
 
