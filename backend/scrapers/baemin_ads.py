@@ -245,13 +245,21 @@ def submit_cpc_bid(page, shop_no: str, amount: int) -> None:
     반영한다. 배민 계정에 진짜 쓰기가 발생하는 함수 — POST /ads/rank-by-distance/apply-bid만
     호출한다(사용자가 실제 반영 확인 다이얼로그를 거친 뒤에만 도달하는 경로).
 
-    실 계정 라이브 캡처(2026-08-18, 치밥대장 shop_no=14804318)로 확인한 실제 흐름:
+    실 계정 라이브 캡처(2026-08-18, 치밥대장 shop_no=14804318)로 확인한 실제 흐름 —
+    2번 단계는 2026-09-23 실사용 중 타임아웃으로 실패해 사용자가 직접 배민 화면을
+    재확인, 아래 내용으로 정정했다(원래는 행을 펼치면 "클릭당 희망 광고금액" 라벨이
+    바로 보인다고 잘못 가정해, 그 라벨과의 수직 거리로 "수정" 버튼을 골랐다 — 실제로는
+    그 라벨이 행을 펼친 시점엔 아직 없고 모달을 연 뒤에만 나타난다):
     1. GET /v2/ad-center/ad-campaigns/operating-ad-campaign/by-shop-number?shopNumber={shop_no}
        에서 adKind.adKindKey == "WOORI_SHOP_CLICK"인 항목의 id가 우리가게클릭 캠페인 ID다
        (GET /v4/cpc/bookings/by-shop-number 응답에는 이 ID가 없어 별도로 조회해야 한다).
-    2. "우리가게클릭" 행 펼치기 -> "광고·서비스" 섹션의 "수정" 클릭 -> 모달에서
-       "클릭당 희망 광고금액" 입력 후 "적용" 클릭. "수동 설정 모드"는 이미 기본
-       선택돼 있어 건드리지 않는다("스마트 모드"로 전환하지 않는다).
+    2. "우리가게클릭" 행 펼치기 -> 그 행(<tr>) 안의 "수정" 버튼 클릭 -> 모달이 열리면
+       그 안에 "클릭당 희망 광고금액" 라벨과 입력창이 있다. 모달 상단엔 "희망가 조정
+       방식"으로 "스마트 모드"/"수동 설정 모드" 선택지가 있다 — 이 프로젝트는 항상
+       수동 설정 모드를 전제로 하므로 기본값에 기대지 말고 매번 명시적으로
+       `[id$="-manual"]`(React useId() 접두부는 세션마다 달라져 접미부만 사용)을
+       클릭해 수동 설정 모드로 고정한다(사용자가 devtools로 확인해준 실제 id,
+       2026-09-23).
     3. 입력액이 현재값보다 낮으면 "클릭당 광고금액을 낮추면 가게 노출에 영향을 줄 수
        있어요. 적용하시겠어요?" 확인 팝업이 뜬다(그 팝업의 "적용"을 다시 눌러야 함) —
        금액을 낮출 때만 나타나며, 예측 불가하므로 있으면 처리하고 없으면 건너뛴다.
@@ -262,6 +270,13 @@ def submit_cpc_bid(page, shop_no: str, amount: int) -> None:
     5. 실제 쓰기는 PUT /v4/cpc/bookings/{campaignId}/bid-budget,
        바디 {"adCampaignId": campaignId, "newBid": amount, "newBudget": <현재 월예산>,
        "maxBid": null, "isAutoBidding": false}, 응답 {"isSuccess": bool, "errors": [...]}.
+       이 바디는 우리가 만드는 게 아니라 모달이 organic하게 보내는 것이므로, 2번에서
+       수동 설정 모드를 명시적으로 클릭해두지 않으면 isAutoBidding이 true로 나갈 수
+       있다 — 그래서 2번의 토글 클릭이 이 함수 전체의 안전성을 좌우한다.
+
+    실 계정 라이브 테스트(2026-09-23, 치밥대장)로 위 정정된 흐름을 재검증했다 —
+    195원 → 196원으로 실제 반영해 isSuccess: true 확인, 곧바로 196원 → 195원으로
+    원복하며 isAutoBidding이 계속 false로 유지되는 것까지 확인했다.
 
     페이지 컨텍스트 밖에서의 직접 API 호출(Playwright APIRequestContext, page.evaluate 내
     fetch)은 둘 다 403/CORS로 실패함을 라이브로 확인했다 — 반드시 실제 UI 클릭을
@@ -309,18 +324,38 @@ def submit_cpc_bid(page, shop_no: str, amount: int) -> None:
         raise BaeminAdsScrapeError(f"우리가게클릭 행(캠페인ID={campaign_id})을 찾지 못했습니다: {e}") from e
     if box is None:
         raise BaeminAdsScrapeError(f"우리가게클릭 행(캠페인ID={campaign_id}) 위치를 확인하지 못했습니다")
-    page.mouse.click(box["x"] - 55, box["y"] + box["height"] / 2)
-    page.wait_for_timeout(1_500)
 
+    # 2026-09-23 정정: "캠페인ID 텍스트 왼쪽 55px" 좌표를 클릭해 행을 펼치던
+    # 방식이 실제로는 펼치기 아이콘 위치와 약 40px 어긋나 있어(레이아웃 변경
+    # 추정) 행이 전혀 안 펼쳐지고 있었다(사용자 실측 확인, 스크린샷 대조로
+    # 재확인). 좌표 대신 접근성 라벨("컨텐츠 펼치기")이 붙은 아이콘을
+    # row_id_el의 조상 <tr> 범위 안에서 직접 찾아 클릭한다 — 레이아웃이
+    # 다시 바뀌어도 좌표보다 안정적이고, 우리 캠페인 행의 아이콘만 정확히
+    # 짚는다.
     try:
-        bid_label = page.get_by_text("클릭당 희망 광고금액").first
-        bid_box = bid_label.bounding_box(timeout=5_000)
+        row = row_id_el.locator("xpath=ancestor::tr[1]")
+        row.locator('svg[aria-label="컨텐츠 펼치기"]').first.click(timeout=5_000)
+        page.wait_for_timeout(1_500)
+    except Exception as e:
+        raise BaeminAdsScrapeError(f"우리가게클릭 행을 펼치는 데 실패했습니다: {e}") from e
+
+    # 행을 펼치면 "광고·서비스"(CPC 희망가 — 우리가 원하는 것)와 "광고 노출
+    # 반경" 두 섹션이 각자 자기 "수정" 버튼을 갖고 나타난다. 실측(2026-09-23)
+    # 결과 이 확장 콘텐츠는 <tr> 조상 범위 밖(별도 패널)에 렌더링돼 DOM
+    # 범위로는 두 "수정"을 구분할 수 없었다 — 대신 펼친 직후 "행 위치"를
+    # 기준으로 그보다 아래(y가 더 큼)에 있는 "수정" 중 가장 가까운 걸
+    # 고른다. "광고·서비스" 섹션이 항상 "광고 노출 반경"보다 행에 더
+    # 가깝다(실측: 거리 60px vs 391px). "클릭당 희망 광고금액" 라벨로
+    # 기준점을 잡던 원래 방식은 그 라벨이 이 시점엔 아직 없어서(모달 안에만
+    # 있음) 쓸 수 없었다.
+    try:
+        row_box_after = row_id_el.bounding_box(timeout=5_000)
         edit_links = page.get_by_text("수정", exact=True).all()
         candidates = sorted(
             (
-                (bid_box["y"] - b["y"], el)
+                (b["y"] - row_box_after["y"], el)
                 for el in edit_links
-                if (b := el.bounding_box()) and b["y"] < bid_box["y"]
+                if (b := el.bounding_box()) and b["y"] > row_box_after["y"]
             ),
             key=lambda t: t[0],
         )
@@ -332,6 +367,23 @@ def submit_cpc_bid(page, shop_no: str, amount: int) -> None:
         raise
     except Exception as e:
         raise BaeminAdsScrapeError(f"광고 금액 수정 모달을 여는 데 실패했습니다: {e}") from e
+
+    # 희망가 조정 방식(스마트 모드/수동 설정 모드) 강제 고정. "보통 수동이 기본
+    # 선택돼 있다"는 관찰에 기대지 않고 매번 명시적으로 클릭한다 — 실제 배민에
+    # 나가는 쓰기 요청(5번 단계, isAutoBidding)은 우리가 만드는 게 아니라 이
+    # 모달의 그 순간 UI 상태를 그대로 담아 organic하게 나가므로, 여기서
+    # 확정해두지 않으면 화면이 우연히 스마트 모드로 열렸을 때 의도와 달리
+    # 자동입찰이 켜질 수 있다(이 프로젝트가 절대 하면 안 되는 것).
+    #
+    # 사용자가 devtools로 확인해준 실제 id는 ":rvj:-manual"/":rvj:-smart"
+    # 형태다(2026-09-23) — 앞의 ":rvj:"는 React useId()가 렌더마다 새로 매기는
+    # 값이라 세션/계정마다 달라질 수 있어 그대로 쓰면 다음 실행에 깨질 수
+    # 있다. 그래서 변하지 않는 접미부("-manual")만으로 찾는다.
+    try:
+        page.locator('[id$="-manual"]').first.click(timeout=5_000)
+        page.wait_for_timeout(500)
+    except Exception as e:
+        raise BaeminAdsScrapeError(f"수동 설정 모드 선택에 실패했습니다: {e}") from e
 
     try:
         modal_bid_label = page.get_by_text("클릭당 희망 광고금액").last
