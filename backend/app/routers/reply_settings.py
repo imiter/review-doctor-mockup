@@ -1,7 +1,5 @@
 """가게별 답글 설정. '답글 규칙 설정'(자동 답글 조건)과 '답글 스타일 설정'(말투·홍보문구)
 화면이 공유하는 하나의 reply_settings 레코드를 읽고 쓴다.
-
-자동 답글은 Mock이다 — auto_reply_enabled를 켜도 실제로 답글이 자동 등록되지 않는다.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
-from app.models import ReplySetting, User
+from app.models import ReplySetting, Subscription, User
+from app.plan import effective_plan
 
 router = APIRouter(tags=["reply-settings"])
 
@@ -68,6 +67,14 @@ def update_reply_settings(
 
     if body.auto_reply_min_rating is not None and not (1 <= body.auto_reply_min_rating <= 5):
         raise HTTPException(422, "auto_reply_min_rating은 1~5 사이여야 합니다")
+
+    if body.auto_reply_enabled:
+        sub = db.scalar(select(Subscription).where(Subscription.user_id == user.id))
+        if effective_plan(sub) != "pro":
+            raise HTTPException(
+                403,
+                detail={"message": "자동 답글은 Pro 플랜 전용 기능입니다.", "error_code": "pro_required"},
+            )
 
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(rs, field, value)
