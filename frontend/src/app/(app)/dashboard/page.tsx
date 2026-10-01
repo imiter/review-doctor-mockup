@@ -357,9 +357,32 @@ export default function DashboardPage() {
         </ClickableCard>
         <ClickableCard title="입금" onClick={() => setOpenModal("deposit_daily")}>
           <p className="text-2xl font-bold text-success">{deposits ? won(deposits.total_deposit ?? 0) : "…"}</p>
-          <p className="mt-1 text-xs text-muted">정산 지연 반영 (D+3 가정)</p>
+          {/* 배민 정산 배치는 며칠치 매출을 한 번에 묶어 입금일 하루에 몰아서
+              반영한다(giveAmount가 depositDueDate 하루에 전액 귀속) — 그래서
+              짧은 기간(오늘/1주)에서는 그 기간 자체의 매출보다 입금이 더 크게
+              보이는 날이 실제로 생긴다(이전 매출일의 정산분이 이 기간에
+              몰려서 들어온 것). 기간을 넓힐수록(1개월/이번달) 이 쏠림이
+              평균화된다. 예전 Mock 시절 "D+3 가정" 문구는 이 실제 배치 방식과
+              안 맞아 삭제했다(2026-09-30). */}
+          <p className="mt-1 text-xs text-muted">정산 배치 입금일 기준(매출일과 다를 수 있음)</p>
         </ClickableCard>
       </div>
+
+      {sales && deposits && (deposits.total_deposit ?? 0) > (sales.total_sales ?? 0) && (
+        // 선택한 기간에서 "입금이 매출보다 큰" 경우에만 보여준다 — 매번 떠
+        // 있으면 실제로 이상이 있을 때도 "또 그 안내구나" 하고 지나치기
+        // 쉽다. 수수료/배달비/할인쿠폰을 떼고도 이게 정상인 이유(정산
+        // 배치가 과거 매출분을 한꺼번에 몰아서 입금하기 때문)를 그 순간에
+        // 바로 보여줘서, "확인해보니 버그였나" 하고 따로 문의할 필요 없이
+        // 그 자리에서 판단할 수 있게 한다(2026-10-01, 실사용 중 문의로
+        // 추가). 기간을 넓힐수록(1개월/이번달) 이 역전은 자연히 사라진다.
+        <p className="rounded-lg bg-surface-2 px-3 py-2 text-xs text-muted">
+          이 기간은 입금이 매출보다 많아요 — 버그가 아니라, 배민이 이전
+          매출분의 정산 배치를 이 기간에 몰아서 입금했기 때문이에요. 기간을
+          "1개월"이나 "이번달"로 넓혀보시면 정상적으로 입금이 매출보다
+          작게 나오는 걸 확인하실 수 있어요.
+        </p>
+      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card title="답글 대기 리뷰">
