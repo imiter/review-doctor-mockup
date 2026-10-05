@@ -17,9 +17,9 @@ _SYSTEM_PROMPT = """너는 배달 음식점 리뷰를 분석하는 분류기다.
 
 카테고리(정확히 하나만 선택):
 - food_quality: 맛, 온도, 양에 대한 불만
-- delivery: 배달 지연, 파손에 대한 불만
+- delivery: 배달 지연, 파손, 배달원(라이더) 응대 등 배달 과정에서 발생한 불만 (가게가 통제 가능한 응대 문제는 service로)
 - hygiene: 위생, 이물질, 곰팡이 등 안전 관련 불만
-- service: 응대, 태도에 대한 불만
+- service: 가게 직원의 응대, 태도에 대한 불만 (배달원 응대는 delivery로)
 - price: 가격에 대한 불만
 - missing_or_wrong_item: 누락, 오배송
 - no_issue: 위 어디에도 해당하는 불만이 없음 (칭찬만 있거나 중립적)

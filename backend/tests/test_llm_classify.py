@@ -71,3 +71,9 @@ def test_classify_review_strips_bare_code_fence_without_language_tag(monkeypatch
     )
     result = classify.classify_review("응대가 별로예요", 2)
     assert result.category == "service"
+
+
+def test_delivery_category_description_includes_rider():
+    # 배달원(라이더) 응대 불만이 delivery 카테고리에 포함되도록
+    # 프롬프트에 명시되어 있는지 확인한다.
+    assert "라이더" in classify._SYSTEM_PROMPT
