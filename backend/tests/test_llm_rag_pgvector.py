@@ -75,11 +75,12 @@ def pg_store(pg_db):
     return store
 
 
-def _make_example(pg_db, store_id, *, category="food_quality", review_text, embedding, created_at, is_manual=True, is_synthetic=False):
+def _make_example(pg_db, store_id, *, category="food_quality", review_text, embedding, created_at, is_manual=True, is_synthetic=False, source="backfill", source_review_id=None):
     ex = GoldenExample(
         store_id=store_id, category=category,
         review_text=review_text, reply_text="답글",
-        is_manual=is_manual, is_synthetic=is_synthetic, source="backfill",
+        is_manual=is_manual, is_synthetic=is_synthetic, source=source,
+        source_review_id=source_review_id,
         embedding=embedding, created_at=created_at,
     )
     pg_db.add(ex)
@@ -278,3 +279,97 @@ def test_promote_direct_reply_sets_needs_confirmation_false_when_baseline_insuff
     assert example.needs_confirmation is False
     persisted = pg_db.get(GoldenExample, example.id)
     assert persisted.needs_confirmation is False
+
+
+# ---------------------------------------------------------------------------
+# source 기반 3단계 우선순위(2026-10-06)와 코사인 거리 순위가 함께 걸려
+# 있으므로, "단계가 유사도를 이긴다"는 핵심 보장은 실제 pgvector 순위 계산
+# 위에서만 증명된다 — SQLite 스위트(tests/test_llm_rag.py)는 임베딩이 없어
+# 최신순 폴백 경로로만 단계를 검증한다.
+# ---------------------------------------------------------------------------
+def _platform(pg_db):
+    platform = Platform(code="baemin", name="배달의민족", brand_color="#2AC1BC", default_commission_rate="0.068")
+    pg_db.add(platform)
+    pg_db.flush()
+    return platform
+
+
+def _review(pg_db, store_id, platform_id, *, category="no_issue", sentiment_conflict=False, created_at):
+    review = Review(
+        store_id=store_id, platform_id=platform_id, menu_summary="후라이드치킨",
+        rating=5, content="리뷰 본문", customer_nickname="손님",
+        category=category, sentiment_conflict=sentiment_conflict, created_at=created_at,
+    )
+    pg_db.add(review)
+    pg_db.flush()
+    return review
+
+
+def test_tier_priority_beats_cosine_distance(pg_db, pg_store, monkeypatch):
+    """쿼리와 완전히 직교하는(가장 먼) 1단계 예시가, 쿼리와 정확히 일치하는
+    2단계 예시보다 먼저 나와야 한다 — 유사도는 단계 안에서만 순위를 매긴다."""
+    now = datetime.now(timezone.utc)
+    platform = _platform(pg_db)
+    for _ in range(5):  # 신호 (a)(그 리뷰 시점 누적 ≤3) 끄기
+        _review(pg_db, pg_store.id, platform.id, created_at=now - timedelta(days=10))
+    signal_review = _review(pg_db, pg_store.id, platform.id, category="delivery", created_at=now)
+
+    far_but_tier1 = _make_example(
+        pg_db, pg_store.id, review_text="1단계", embedding=[0.0, 1.0] + [0.0] * 1022,
+        created_at=now - timedelta(days=30), source="organic", source_review_id=signal_review.id,
+    )
+    exact_but_tier2 = _make_example(
+        pg_db, pg_store.id, review_text="2단계", embedding=[1.0, 0.0] + [0.0] * 1022,
+        created_at=now, source="organic",
+    )
+
+    import app.llm.rag as rag_mod
+    monkeypatch.setattr(rag_mod, "embed_query", lambda text: [1.0, 0.0] + [0.0] * 1022)
+
+    result = fetch_golden_examples(pg_db, pg_store.id, "food_quality", "쿼리", limit=2)
+
+    assert [r.id for r in result] == [far_but_tier1.id, exact_but_tier2.id]
+
+
+def test_onboarding_tier_is_last_even_when_closest(pg_db, pg_store, monkeypatch):
+    now = datetime.now(timezone.utc)
+    exact_but_onboarding = _make_example(
+        pg_db, pg_store.id, review_text="온보딩", embedding=[1.0, 0.0] + [0.0] * 1022,
+        created_at=now, source="onboarding",
+    )
+    far_but_organic = _make_example(
+        pg_db, pg_store.id, review_text="organic", embedding=[0.0, 1.0] + [0.0] * 1022,
+        created_at=now - timedelta(days=30), source="organic",
+    )
+
+    import app.llm.rag as rag_mod
+    monkeypatch.setattr(rag_mod, "embed_query", lambda text: [1.0, 0.0] + [0.0] * 1022)
+
+    result = fetch_golden_examples(pg_db, pg_store.id, "food_quality", "쿼리", limit=2)
+
+    assert [r.id for r in result] == [far_but_organic.id, exact_but_onboarding.id]
+
+
+def test_ranks_by_cosine_distance_within_tier1(pg_db, pg_store, monkeypatch):
+    """단계 안에서는 기존과 똑같이 유사도 순위다 — 1단계로 범위가 좁혀져도
+    최신순으로 되돌아가지 않는다."""
+    now = datetime.now(timezone.utc)
+    platform = _platform(pg_db)
+    signal_a = _review(pg_db, pg_store.id, platform.id, category="delivery", created_at=now)
+    signal_b = _review(pg_db, pg_store.id, platform.id, category="delivery", created_at=now)
+
+    older_but_closer = _make_example(
+        pg_db, pg_store.id, review_text="양이 너무 적어요", embedding=[1.0, 0.0] + [0.0] * 1022,
+        created_at=now - timedelta(days=30), source="organic", source_review_id=signal_a.id,
+    )
+    newer_but_farther = _make_example(
+        pg_db, pg_store.id, review_text="배달이 늦었어요", embedding=[0.0, 1.0] + [0.0] * 1022,
+        created_at=now, source="organic", source_review_id=signal_b.id,
+    )
+
+    import app.llm.rag as rag_mod
+    monkeypatch.setattr(rag_mod, "embed_query", lambda text: [1.0, 0.0] + [0.0] * 1022)
+
+    result = fetch_golden_examples(pg_db, pg_store.id, "food_quality", "쿼리", limit=2)
+
+    assert [r.id for r in result] == [older_but_closer.id, newer_but_farther.id]

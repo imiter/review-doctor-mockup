@@ -334,17 +334,23 @@ CREATE TABLE procedural_rules (
 
 -- ----------------------------------------------------------------------------
 -- 16-1. golden_examples — RAG few-shot 소스. 사장님이 직접 쓰거나 승인한
---       진짜 답글(is_manual=true)과, 예시가 부족할 때만 보충하는 순수
---       AI 생성 모범답안(is_synthetic=true)을 함께 담는다. 검색은 이
---       테이블 하나만 필터링하면 끝나야 한다(조인 없음). embedding은
---       review_text를 Voyage AI(voyage-4, 1024차원)로 벡터화한 값
---       (2026-08-26 추가) — category 필터 안에서 새 리뷰와 의미적으로
---       가까운 예시를 pgvector의 <-> 연산자로 직접 순위 매기는 데 쓴다
---       (app/llm/rag.py). nullable이라 백필 전/임베딩 실패 행은 최신순으로
---       폴백한다. source='organic_direct'(2026-10-06 추가)는 앱을 거치지
---       않고 배민에 사장님이 직접 단 답글(review_sync.py가 extract_owner_reply로
---       감지)이 승격된 경로(경로 C) — 진짜 사장님 말투인지 보장이 없어
---       needs_confirmation으로 이상치 여부를 같이 표시한다.
+--       진짜 답글을 담는다. embedding은 review_text를 Voyage AI(voyage-4,
+--       1024차원)로 벡터화한 값(2026-08-26 추가) — category 필터 안에서
+--       새 리뷰와 의미적으로 가까운 예시를 pgvector의 <-> 연산자로 직접
+--       순위 매기는 데 쓴다(app/llm/rag.py). nullable이라 백필 전/임베딩
+--       실패 행은 최신순으로 폴백한다. source='organic_direct'(2026-10-06
+--       추가)는 앱을 거치지 않고 배민에 사장님이 직접 단 답글
+--       (review_sync.py가 extract_owner_reply로 감지)이 승격된 경로(경로 C)
+--       — 진짜 사장님 말투인지 보장이 없어 needs_confirmation으로 이상치
+--       여부를 같이 표시한다. source='synthetic'(순수 AI 생성 모범답안으로
+--       예시를 증강하는 메커니즘)은 2026-10-06에 CHECK에서 빼고 스크립트도
+--       삭제했다 — 애초에 "명시적으로 채택하지 않음"으로 기록된 접근이다.
+--       is_synthetic 컬럼은 되돌릴 여지로 남겨뒀지만 이제 항상 false다.
+--       검색 우선순위는 source 3단계(고신뢰 사람 답글 → 일반 사람 답글 →
+--       onboarding)이고, 고신뢰 판정에 reviews를 상관 서브쿼리로 한 번
+--       참조한다 — 원래 "조인 없이 이 테이블만 필터링"이 원칙이었으나
+--       "그 리뷰 시점의 누적 리뷰 수"는 reviews를 보지 않으면 알 수 없어
+--       이 신호에 한해 참조를 허용했다(app/llm/rag.py).
 -- ----------------------------------------------------------------------------
 CREATE TABLE golden_examples (
     id               BIGSERIAL PRIMARY KEY,
@@ -355,7 +361,7 @@ CREATE TABLE golden_examples (
     is_manual        BOOLEAN      NOT NULL,
     is_synthetic     BOOLEAN      NOT NULL,
     source           VARCHAR(16)  NOT NULL
-                     CHECK (source IN ('backfill', 'organic', 'organic_direct', 'onboarding', 'synthetic')),
+                     CHECK (source IN ('backfill', 'organic', 'organic_direct', 'onboarding')),
     source_review_id BIGINT       REFERENCES reviews(id) ON DELETE SET NULL,
     source_reply_id  BIGINT       REFERENCES review_replies(id) ON DELETE SET NULL,
     embedding        vector(1024),
@@ -363,8 +369,10 @@ CREATE TABLE golden_examples (
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
+-- 조회(fetch_golden_examples)가 실제로 거르는 컬럼이 is_manual/is_synthetic에서
+-- source로 바뀌었다(2026-10-06) — 인덱스도 같이 교체한다.
 CREATE INDEX idx_golden_examples_lookup
-    ON golden_examples(store_id, category, is_manual, is_synthetic, created_at DESC);
+    ON golden_examples(store_id, category, source, created_at DESC);
 
 -- ----------------------------------------------------------------------------
 -- 16-2. store_style_profile — 매장별 답글 스타일 규칙 캐싱. golden_examples

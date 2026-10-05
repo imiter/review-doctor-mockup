@@ -20,16 +20,21 @@ def test_find_uncovered_categories_excludes_covered_and_no_issue(db_session, see
 
 
 def test_find_uncovered_categories_ignores_synthetic_examples(db_session, seeded_user):
+    """source='synthetic'(순수 AI 생성 모범답안 증강)은 2026-10-06에 메커니즘
+    자체가 제거돼 이제 그 값으로 들어오는 행이 없다 — 그래도
+    find_uncovered_categories의 is_manual/is_synthetic 가드는 남겨둔 상태라
+    (되돌릴 여지로 컬럼을 DROP하지 않았다) 그 가드가 계속 동작하는지만
+    확인한다. source는 CHECK에 남아있는 값으로 바꿨다."""
     sid = seeded_user["store"].id
     db_session.add(GoldenExample(
         store_id=sid, category="hygiene", review_text="범용 예시", reply_text="범용 답글",
-        is_manual=False, is_synthetic=True, source="synthetic", created_at=datetime.now(timezone.utc),
+        is_manual=False, is_synthetic=True, source="onboarding", created_at=datetime.now(timezone.utc),
     ))
     db_session.commit()
 
     result = onboarding.find_uncovered_categories(db_session, sid)
 
-    assert "hygiene" in result  # synthetic 시드만으로는 커버된 것으로 치지 않는다
+    assert "hygiene" in result  # AI 생성 예시만으로는 커버된 것으로 치지 않는다
 
 
 def test_find_uncovered_categories_all_six_for_fresh_store(db_session, seeded_user):

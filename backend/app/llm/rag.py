@@ -3,8 +3,18 @@
 최신순 LIMIT만 썼다). 카테고리당 예시가 몇 개 안 되면 매번 같은 2~3개가
 반복 주입돼 답글이 정형화되는 문제가 실사용으로 확인됐다 — 카테고리는 정밀도
 유지를 위해 그대로 두고, 그 안의 순위만 리뷰 내용 기반 유사도로 바꿨다.
-진짜 예시(is_manual=true, is_synthetic=false)를 우선하고, 부족한 만큼만
-순수 AI 생성 모범답안(is_synthetic=true)으로 보충하는 원칙은 그대로다.
+우선순위는 source 컬럼 기반 3단계다(2026-10-06 재작성). 그 전에는
+is_manual/is_synthetic 플래그로만 묶었는데, 실제로 그 플래그는 source가
+organic이든 onboarding이든 전부 is_manual=true/is_synthetic=false로 똑같이
+들어가서 "사장님이 진짜 리뷰에 쓴 답글"과 "온보딩 가상 리뷰에 쓴 답글"을
+구분할 방법이 아예 없었다 — 코드가 둘을 가르는 척하면서 실은 못 가르고
+있었다. 그래서 묶는 기준을 source로 바꾸고, 그 안에서 "이 답글을 믿을 만
+한가"를 고신뢰 신호로 한 번 더 갈랐다. 세 단계가 각각 무엇인지는
+fetch_golden_examples의 docstring, 신호 3개는 _confidence_signal_exists
+참고.
+순수 AI 생성 모범답안(source='synthetic')으로 예시를 증강하는 메커니즘은
+같은 날 완전히 제거했다 — 애초에 "명시적으로 채택하지 않음"으로 기록된
+접근이라 새 3단계 설계에 들어갈 자리가 없다.
 
 golden_examples.embedding은 pgvector `vector(1024)` 컬럼이고, 순위는
 `ORDER BY embedding <-> :query`로 Postgres가 직접 계산한다(SQLAlchemy에서는
@@ -22,8 +32,8 @@ pgvector는 SQLite에는 없는 Postgres 확장이라, 이 파일의 실제 순�
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session, aliased
 
 from app.db import SessionLocal
 from app.llm.embedding import embed_document, embed_query
@@ -32,16 +42,66 @@ from app.models import GoldenExample, Review
 _CONSISTENCY_MIN_BASELINE = 3
 _CONSISTENCY_DISTANCE_THRESHOLD = 0.5
 
+# 사람이 직접 쓴 답글로 간주하는 소스 — 사장님이 앱에서 쓰거나 고친 답글
+# (organic), 배민에 직접 단 답글(organic_direct), 연동 전 기존 답글 백필
+# (backfill). 셋을 소스 종류로 더 나누지 않고 아래 신호로만 1·2단계를
+# 가른다(어느 쪽이든 "진짜 리뷰에 대한 진짜 답글"이라는 점은 같다).
+_HUMAN_SOURCES = ("organic", "organic_direct", "backfill")
+# 그 리뷰가 들어온 시점에 이 매장 누적 리뷰가 이 건수 이하면 "초창기 리뷰"로
+# 보고 고신뢰 신호로 센다 — 리뷰가 몇 개 없을 때 사장님이 직접 공들여 쓴
+# 답글일 확률이 높다.
+_EARLY_REVIEW_COUNT = 3
 
-def _query_ranked(db: Session, store_id: int, category: str, query_embedding: list[float] | None, limit: int, *, is_manual: bool | None = None, is_synthetic: bool | None = None) -> list[GoldenExample]:
+
+def _confidence_signal_exists(store_id: int):
+    """고신뢰 신호 — GoldenExample에 연결된 리뷰(source_review_id)가 셋 중
+    하나라도 만족하면 참이다: (a) 그 리뷰가 들어온 시점의 누적 리뷰가
+    _EARLY_REVIEW_COUNT건 이하, (b) 불만 카테고리(no_issue 아님), (c)
+    별점-내용 불일치(sentiment_conflict). 연결된 리뷰가 아예 없는
+    (source_review_id IS NULL) 예시는 EXISTS가 자연히 거짓이 되어 "신호
+    없음"으로 떨어진다 — 연결만으로 1단계로 올라가면 신호 판정이
+    무의미해지므로 의도된 동작이다.
+
+    (a)는 "지금 리뷰 수"나 "통산 리뷰 수"가 아니라 그 리뷰 시점 기준이라,
+    reviews를 한 번 더 세는 상관 서브쿼리가 필요하다 — 행마다 파이썬에서
+    세면 N+1이 되므로 SQL 한 문장 안에 넣는다."""
+    linked = aliased(Review)
+    reviews_at_that_time = (
+        select(func.count())
+        .select_from(Review)
+        .where(
+            Review.store_id == store_id,
+            Review.created_at <= linked.created_at,
+        )
+        .correlate(linked)
+        .scalar_subquery()
+    )
+    return (
+        select(linked.id)
+        .where(
+            linked.id == GoldenExample.source_review_id,
+            or_(
+                reviews_at_that_time <= _EARLY_REVIEW_COUNT,
+                linked.category != "no_issue",
+                linked.sentiment_conflict.is_(True),
+            ),
+        )
+        .correlate(GoldenExample)
+        .exists()
+    )
+
+
+def _query_ranked(db: Session, store_id: int, category: str, query_embedding: list[float] | None, limit: int, *, sources: tuple[str, ...], require_signal: bool | None = None) -> list[GoldenExample]:
+    """한 단계(sources + 신호 조건)에 해당하는 예시를 유사도 순으로 limit개
+    까지 가져온다. require_signal=None이면 신호를 따지지 않는다(3단계)."""
     q = select(GoldenExample).where(
         GoldenExample.store_id == store_id,
         GoldenExample.category == category,
+        GoldenExample.source.in_(sources),
     )
-    if is_manual is not None:
-        q = q.where(GoldenExample.is_manual.is_(is_manual))
-    if is_synthetic is not None:
-        q = q.where(GoldenExample.is_synthetic.is_(is_synthetic))
+    if require_signal is not None:
+        signal = _confidence_signal_exists(store_id)
+        q = q.where(signal if require_signal else ~signal)
 
     if query_embedding is not None:
         # embedding이 있는 행을 먼저(유사도 오름차순), 없는 행은 그 뒤에
@@ -58,19 +118,38 @@ def _query_ranked(db: Session, store_id: int, category: str, query_embedding: li
 
 
 def fetch_golden_examples(db: Session, store_id: int, category: str, query_text: str, limit: int = 3) -> list[GoldenExample]:
-    """골든 예시 조회. 진짜 예시를 우선하고, 부족한 만큼만 synthetic으로
-    보충한다. 각 그룹 안에서는 query_text와 의미적으로 가까운 순서다."""
+    """골든 예시 조회, source 기반 3단계 우선순위:
+
+    1단계 — 사람이 직접 쓴 답글(_HUMAN_SOURCES) 중 고신뢰 신호가 있는 것
+    2단계 — 사람이 직접 쓴 답글 중 신호가 없는 것
+    3단계 — onboarding(가상 리뷰에 쓴 답글). 진짜 리뷰에 대한 답글이 모자랄
+            때만 쓰는 순수 폴백이라 맨 뒤다.
+
+    위 단계부터 차례로 limit을 채우고, 각 단계 안에서는 query_text와
+    의미적으로 가까운 순서다(embedding 없으면 최신순)."""
     try:
         query_embedding = embed_query(query_text)
     except Exception:
         query_embedding = None
 
-    real = _query_ranked(db, store_id, category, query_embedding, limit, is_manual=True, is_synthetic=False)
-    if len(real) >= limit:
-        return real
+    picked = _query_ranked(
+        db, store_id, category, query_embedding, limit,
+        sources=_HUMAN_SOURCES, require_signal=True,
+    )
+    if len(picked) >= limit:
+        return picked
 
-    synthetic = _query_ranked(db, store_id, category, query_embedding, limit - len(real), is_synthetic=True)
-    return real + synthetic
+    picked += _query_ranked(
+        db, store_id, category, query_embedding, limit - len(picked),
+        sources=_HUMAN_SOURCES, require_signal=False,
+    )
+    if len(picked) >= limit:
+        return picked
+
+    return picked + _query_ranked(
+        db, store_id, category, query_embedding, limit - len(picked),
+        sources=("onboarding",),
+    )
 
 
 def compute_golden_example_embedding(review_text: str) -> list[float] | None:
