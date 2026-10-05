@@ -35,6 +35,7 @@ from app.models import (
 )
 from app.llm.classify import ClassificationError, classify_review
 from app.llm.generate import generate_ai_reply
+from app.llm.rag import promote_direct_reply_to_golden_example
 from app.plan import effective_plan
 from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics, fetch_cpc_booking, map_click_metrics_by_date
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
@@ -508,10 +509,19 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 owner_reply = extract_owner_reply(raw)
                 if owner_reply is not None:
                     reply_content, replied_at = owner_reply
-                    db.add(ReviewReply(
+                    reply_row = ReviewReply(
                         review_id=review.id, reply_type="final", style_id=None,
                         content=reply_content, created_at=replied_at,
-                    ))
+                    )
+                    db.add(reply_row)
+                    # golden_example이 source_reply_id FK로 참조하려면 실제
+                    # id가 필요하다 — review.id와 같은 이유로 명시적 flush.
+                    db.flush()
+                    # 배민에 앱을 거치지 않고 직접 달린 답글(경로 C) — 진짜
+                    # 사장님 말투인지 보장이 없어 promote_direct_reply_to_golden_example이
+                    # 기존 신뢰 예시와의 일관성을 확인해 필요하면 needs_confirmation을
+                    # 세운다(사람이 검토하는 UI는 이 작업 범위 밖).
+                    promote_direct_reply_to_golden_example(db, review, reply_row.id, reply_content)
                 elif (
                     auto_reply_style is not None
                     and review.rating >= _AUTO_REPLY_MIN_RATING_FLOOR

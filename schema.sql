@@ -341,7 +341,10 @@ CREATE TABLE procedural_rules (
 --       (2026-08-26 추가) — category 필터 안에서 새 리뷰와 의미적으로
 --       가까운 예시를 pgvector의 <-> 연산자로 직접 순위 매기는 데 쓴다
 --       (app/llm/rag.py). nullable이라 백필 전/임베딩 실패 행은 최신순으로
---       폴백한다.
+--       폴백한다. source='organic_direct'(2026-10-06 추가)는 앱을 거치지
+--       않고 배민에 사장님이 직접 단 답글(review_sync.py가 extract_owner_reply로
+--       감지)이 승격된 경로(경로 C) — 진짜 사장님 말투인지 보장이 없어
+--       needs_confirmation으로 이상치 여부를 같이 표시한다.
 -- ----------------------------------------------------------------------------
 CREATE TABLE golden_examples (
     id               BIGSERIAL PRIMARY KEY,
@@ -352,10 +355,11 @@ CREATE TABLE golden_examples (
     is_manual        BOOLEAN      NOT NULL,
     is_synthetic     BOOLEAN      NOT NULL,
     source           VARCHAR(16)  NOT NULL
-                     CHECK (source IN ('backfill', 'organic', 'onboarding', 'synthetic')),
+                     CHECK (source IN ('backfill', 'organic', 'organic_direct', 'onboarding', 'synthetic')),
     source_review_id BIGINT       REFERENCES reviews(id) ON DELETE SET NULL,
     source_reply_id  BIGINT       REFERENCES review_replies(id) ON DELETE SET NULL,
     embedding        vector(1024),
+    needs_confirmation BOOLEAN    NOT NULL DEFAULT false,
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 

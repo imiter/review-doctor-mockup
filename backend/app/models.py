@@ -286,6 +286,7 @@ class GoldenExample(Base):
     source: Mapped[str] = mapped_column(String(16))
     source_review_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("reviews.id"))
     source_reply_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("review_replies.id"))
+    needs_confirmation: Mapped[bool] = mapped_column(default=False)
     # pgvector 실 타입(Postgres) — ORDER BY embedding <-> :query로 DB가 직접
     # 거리 계산을 한다(app/llm/rag.py). SQLite는 vector 타입 자체가 없어
     # 유닛 테스트(in-memory SQLite)의 Base.metadata.create_all이 깨지지

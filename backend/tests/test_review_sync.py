@@ -146,6 +146,38 @@ def test_sync_captures_owner_reply_already_on_baemin_as_final_reply(db_session, 
     assert reply.created_at == datetime.fromisoformat("2026-08-04T18:00:00.123456")
 
 
+def test_sync_promotes_existing_owner_reply_to_golden_example(db_session, sync_setup, monkeypatch):
+    # 배민에 이미 사장님이 직접 단 답글(앱을 거치지 않은 경로 C)도
+    # golden_examples로 승격돼야 한다 — 앱으로 직접 쓰거나 승인한 답글
+    # (organic)과 마찬가지로 이 가게의 진짜 답글 사례다.
+    import app.review_sync as review_sync_mod
+    from app.models import GoldenExample
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_all_reviews",
+        lambda page, shop_no, **kwargs: [_RAW_ALREADY_REPLIED],
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=1004).one()
+    reply = db_session.query(ReviewReply).filter_by(review_id=review.id).one()
+
+    examples = db_session.query(GoldenExample).filter_by(source="organic_direct").all()
+    assert len(examples) == 1
+    example = examples[0]
+    assert example.store_id == job.store_id
+    assert example.review_text == review.content
+    assert example.reply_text == "감사합니다! 또 방문해주세요."
+    assert example.source_review_id == review.id
+    assert example.source_reply_id == reply.id
+    assert example.is_manual is True
+    assert example.is_synthetic is False
+
+
 def test_sync_records_login_failure(db_session, sync_setup, monkeypatch):
     import app.review_sync as review_sync_mod
 

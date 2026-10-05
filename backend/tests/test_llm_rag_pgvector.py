@@ -141,3 +141,46 @@ def test_falls_back_to_recency_when_embed_query_fails(pg_db, pg_store, monkeypat
     result = fetch_golden_examples(pg_db, pg_store.id, "food_quality", "쿼리", limit=2)
 
     assert [r.id for r in result] == [newer.id, older.id]
+
+
+def test_check_voice_consistency_none_when_baseline_insufficient(pg_db, pg_store):
+    from app.llm.rag import check_voice_consistency
+
+    result = check_voice_consistency(pg_db, pg_store.id, "delivery", [0.1] * 1024)
+
+    assert result is None
+
+
+def test_check_voice_consistency_true_when_close_to_baseline(pg_db, pg_store):
+    from app.llm.rag import check_voice_consistency
+
+    base_vec = [0.5] * 1024
+    for i in range(3):
+        _make_example(
+            pg_db, pg_store.id, category="delivery",
+            review_text=f"리뷰{i}", embedding=base_vec,
+            created_at=datetime.now(timezone.utc),
+        )
+    pg_db.commit()
+
+    result = check_voice_consistency(pg_db, pg_store.id, "delivery", base_vec)
+
+    assert result is True
+
+
+def test_check_voice_consistency_false_when_outlier(pg_db, pg_store):
+    from app.llm.rag import check_voice_consistency
+
+    base_vec = [1.0] + [0.0] * 1023
+    for i in range(3):
+        _make_example(
+            pg_db, pg_store.id, category="delivery",
+            review_text=f"리뷰{i}", embedding=base_vec,
+            created_at=datetime.now(timezone.utc),
+        )
+    pg_db.commit()
+    outlier_vec = [0.0] * 1023 + [1.0]  # base_vec과 직교(코사인 거리 최대)
+
+    result = check_voice_consistency(pg_db, pg_store.id, "delivery", outlier_vec)
+
+    assert result is False

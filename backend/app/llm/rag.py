@@ -29,6 +29,9 @@ from app.db import SessionLocal
 from app.llm.embedding import embed_document, embed_query
 from app.models import GoldenExample, Review
 
+_CONSISTENCY_MIN_BASELINE = 3
+_CONSISTENCY_DISTANCE_THRESHOLD = 0.5
+
 
 def _query_ranked(db: Session, store_id: int, category: str, query_embedding: list[float] | None, limit: int, *, is_manual: bool | None = None, is_synthetic: bool | None = None) -> list[GoldenExample]:
     q = select(GoldenExample).where(
@@ -106,3 +109,58 @@ def count_recent_same_category(db: Session, store_id: int, category: str, days: 
             Review.created_at >= datetime.now(timezone.utc) - timedelta(days=days),
         )
     )
+
+
+def check_voice_consistency(db: Session, store_id: int, category: str, candidate_embedding: list[float]) -> bool | None:
+    """경로 C(배민 직접 답글) 후보가 이미 신뢰할 수 있는 예시(organic/
+    backfill) 클러스터와 말투가 일관되는지 본다 — "AI가 썼는지"가 아니라
+    "이 가게 말투에 맞는지"를 묻는 질문으로 바꾼 것. 비교할 기준(organic/
+    backfill, embedding 있는 것)이 _CONSISTENCY_MIN_BASELINE개 미만이면
+    판단 불가로 None을 반환한다(신생 매장은 이 체크를 건너뛴다)."""
+    baseline_q = select(GoldenExample.id).where(
+        GoldenExample.store_id == store_id,
+        GoldenExample.category == category,
+        GoldenExample.source.in_(("organic", "backfill")),
+        GoldenExample.embedding.is_not(None),
+    )
+    baseline_count = len(db.scalars(baseline_q).all())
+    if baseline_count < _CONSISTENCY_MIN_BASELINE:
+        return None
+
+    nearest = db.scalars(
+        select(GoldenExample.embedding.cosine_distance(candidate_embedding))
+        .where(
+            GoldenExample.store_id == store_id,
+            GoldenExample.category == category,
+            GoldenExample.source.in_(("organic", "backfill")),
+            GoldenExample.embedding.is_not(None),
+        )
+        .order_by(GoldenExample.embedding.cosine_distance(candidate_embedding))
+        .limit(3)
+    ).all()
+    avg_distance = sum(nearest) / len(nearest)
+    return avg_distance <= _CONSISTENCY_DISTANCE_THRESHOLD
+
+
+def promote_direct_reply_to_golden_example(db: Session, review: Review, reply_id: int, reply_text: str) -> GoldenExample:
+    """review_sync.py가 extract_owner_reply로 감지한, 배민에 이미 달려있던
+    사장님 답글을 golden_example로 승격한다(경로 C). 앱을 거치지 않은
+    답글이라 진짜 사장님 말투인지 보장이 없다 — 이상치로 판정돼도 저장
+    자체는 막지 않는다. needs_confirmation만 세워서 나중에 사장님 확인
+    UI(이 작업 범위 밖)가 쓸 수 있게 한다."""
+    embedding = compute_golden_example_embedding(review.content)
+    needs_confirmation = False
+    if embedding is not None:
+        consistent = check_voice_consistency(db, review.store_id, review.category, embedding)
+        needs_confirmation = consistent is False
+
+    example = GoldenExample(
+        store_id=review.store_id, category=review.category,
+        review_text=review.content, reply_text=reply_text,
+        is_manual=True, is_synthetic=False, source="organic_direct",
+        source_review_id=review.id, source_reply_id=reply_id,
+        embedding=embedding, needs_confirmation=needs_confirmation,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(example)
+    return example
