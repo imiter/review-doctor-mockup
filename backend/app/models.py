@@ -246,6 +246,17 @@ class ReviewReply(Base):
     review: Mapped[Review] = relationship(back_populates="replies")
 
 
+class ProceduralRule(Base):
+    __tablename__ = "procedural_rules"
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    rule_key: Mapped[str] = mapped_column(String(40), unique=True)
+    instruction_text: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(default=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime]
+
+
 class GoldenExample(Base):
     __tablename__ = "golden_examples"
 

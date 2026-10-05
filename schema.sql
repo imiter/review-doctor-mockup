@@ -319,6 +319,20 @@ CREATE TABLE alerts (
 CREATE INDEX idx_alerts_store_unread ON alerts(store_id, is_read);
 
 -- ----------------------------------------------------------------------------
+-- 16-0. procedural_rules — LLM 답글 생성에 적용되는 절차 지시문.
+--       기존에 backend/app/llm/generate.py에 하드코딩돼 있던 지시문들을
+--       DB로 옮겨 런타임에 갱신 가능하게 만든다.
+-- ----------------------------------------------------------------------------
+CREATE TABLE procedural_rules (
+    id               BIGSERIAL PRIMARY KEY,
+    rule_key         VARCHAR(40)  NOT NULL UNIQUE,
+    instruction_text TEXT         NOT NULL,
+    active           BOOLEAN      NOT NULL DEFAULT true,
+    description      TEXT,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- ----------------------------------------------------------------------------
 -- 16-1. golden_examples — RAG few-shot 소스. 사장님이 직접 쓰거나 승인한
 --       진짜 답글(is_manual=true)과, 예시가 부족할 때만 보충하는 순수
 --       AI 생성 모범답안(is_synthetic=true)을 함께 담는다. 검색은 이
