@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.llm.rag import fetch_golden_examples
-from app.models import GoldenExample, Store, User
+from app.models import GoldenExample, Platform, Review, Store, User
 
 _ADMIN_URL = "postgresql+psycopg://postgres:postgres@localhost:15432/postgres"
 _TEST_DB_URL = "postgresql+psycopg://postgres:postgres@localhost:15432/delivery_insight_test"
@@ -184,3 +184,97 @@ def test_check_voice_consistency_false_when_outlier(pg_db, pg_store):
     result = check_voice_consistency(pg_db, pg_store.id, "delivery", outlier_vec)
 
     assert result is False
+
+
+def _make_review(pg_db, store_id, *, category, content):
+    platform = Platform(code="baemin", name="배달의민족", brand_color="#2AC1BC", default_commission_rate="0.068")
+    pg_db.add(platform)
+    pg_db.flush()
+    review = Review(
+        store_id=store_id, platform_id=platform.id, menu_summary="후라이드치킨",
+        rating=5, content=content, customer_nickname="단골손님",
+        category=category, created_at=datetime.now(timezone.utc),
+    )
+    pg_db.add(review)
+    pg_db.flush()
+    return review
+
+
+# 위 3개 테스트는 check_voice_consistency 자체의 반환값만 본다 — 아래 3개는
+# 리뷰 코드 수정 시 받은 지적(promote_direct_reply_to_golden_example가 그
+# 결과를 바탕으로 실제 GoldenExample.needs_confirmation에 쓰는 한 줄,
+# `needs_confirmation = consistent is False`, 이 한 줄에 대해서는 아무
+# 테스트도 없었다)을 메운다. `not consistent`나 `consistent != True`로
+# "단순화"되면 baseline 부족(None, 판단 불가)이 조용히 True(확인 필요)로
+# 뒤집히는데, 위 3개 테스트는 이 함수를 호출하지 않아 그 회귀를 못 잡는다.
+def test_promote_direct_reply_sets_needs_confirmation_true_when_outlier(pg_db, pg_store, monkeypatch):
+    from app.llm.rag import promote_direct_reply_to_golden_example
+
+    base_vec = [1.0] + [0.0] * 1023
+    for i in range(3):
+        _make_example(
+            pg_db, pg_store.id, category="delivery",
+            review_text=f"기준{i}", embedding=base_vec,
+            created_at=datetime.now(timezone.utc),
+        )
+    pg_db.commit()
+
+    outlier_vec = [0.0] * 1023 + [1.0]  # 기준 벡터와 직교(코사인 거리 최대)
+    review = _make_review(pg_db, pg_store.id, category="delivery", content="배달이 너무 늦었어요")
+
+    import app.llm.rag as rag_mod
+    monkeypatch.setattr(rag_mod, "compute_golden_example_embedding", lambda text: outlier_vec)
+
+    example = promote_direct_reply_to_golden_example(pg_db, review, reply_id=None, reply_text="답글입니다")
+    pg_db.commit()
+
+    assert example.needs_confirmation is True
+    persisted = pg_db.get(GoldenExample, example.id)
+    assert persisted.needs_confirmation is True
+
+
+def test_promote_direct_reply_sets_needs_confirmation_false_when_consistent(pg_db, pg_store, monkeypatch):
+    from app.llm.rag import promote_direct_reply_to_golden_example
+
+    base_vec = [0.5] * 1024
+    for i in range(3):
+        _make_example(
+            pg_db, pg_store.id, category="delivery",
+            review_text=f"기준{i}", embedding=base_vec,
+            created_at=datetime.now(timezone.utc),
+        )
+    pg_db.commit()
+
+    review = _make_review(pg_db, pg_store.id, category="delivery", content="배달이 빨랐어요")
+
+    import app.llm.rag as rag_mod
+    monkeypatch.setattr(rag_mod, "compute_golden_example_embedding", lambda text: base_vec)
+
+    example = promote_direct_reply_to_golden_example(pg_db, review, reply_id=None, reply_text="답글입니다")
+    pg_db.commit()
+
+    assert example.needs_confirmation is False
+    persisted = pg_db.get(GoldenExample, example.id)
+    assert persisted.needs_confirmation is False
+
+
+def test_promote_direct_reply_sets_needs_confirmation_false_when_baseline_insufficient(pg_db, pg_store, monkeypatch):
+    """베이스라인(organic/backfill, embedding 있는 것)이 3개 미만이면
+    check_voice_consistency는 None(판단 불가)을 반환한다 — 이때
+    needs_confirmation은 True가 아니라 False여야 한다. `not consistent`나
+    `consistent != True`로 구현했다면 None도 True로 취급돼 이 테스트가
+    깨진다(이 회귀가 바로 리뷰에서 지적한 지점)."""
+    from app.llm.rag import promote_direct_reply_to_golden_example
+
+    # 베이스라인 0개 — 아무 골든 예시도 미리 심지 않는다.
+    review = _make_review(pg_db, pg_store.id, category="delivery", content="배달이 보통이었어요")
+
+    import app.llm.rag as rag_mod
+    monkeypatch.setattr(rag_mod, "compute_golden_example_embedding", lambda text: [0.1] * 1024)
+
+    example = promote_direct_reply_to_golden_example(pg_db, review, reply_id=None, reply_text="답글입니다")
+    pg_db.commit()
+
+    assert example.needs_confirmation is False
+    persisted = pg_db.get(GoldenExample, example.id)
+    assert persisted.needs_confirmation is False
