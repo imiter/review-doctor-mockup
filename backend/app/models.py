@@ -111,6 +111,22 @@ class BrandMenuInfo(Base):
     connection: Mapped["StorePlatformConnection"] = relationship()
 
 
+class BrandCeoNotice(Base):
+    __tablename__ = "brand_ceo_notices"
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    connection_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("store_platform_connections.id"))
+    shop_no: Mapped[str] = mapped_column(String(20))
+    external_notice_id: Mapped[int] = mapped_column(BigInteger)
+    contents: Mapped[str] = mapped_column(Text)
+    display_status: Mapped[str] = mapped_column(String(16))
+    block_type: Mapped[str] = mapped_column(String(16))
+    notice_created_at: Mapped[datetime]
+    synced_at: Mapped[datetime]
+
+    connection: Mapped["StorePlatformConnection"] = relationship()
+
+
 class Subscription(Base):
     __tablename__ = "subscriptions"
 

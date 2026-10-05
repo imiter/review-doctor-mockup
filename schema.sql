@@ -22,7 +22,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS vector;
 
 DROP TABLE IF EXISTS
-    payments, brand_ad_click_metrics, baemin_shop_brands, review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
+    payments, brand_ad_click_metrics, brand_ceo_notices, baemin_shop_brands, review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
     ad_performance_metrics, ad_campaigns, repurchase_metrics, daily_settlements, review_replies,
     reviews, orders, reply_settings, reply_styles, subscriptions, store_platform_connections,
     platforms, stores, users
@@ -520,5 +520,25 @@ CREATE TABLE brand_menu_info (
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
     UNIQUE (connection_id, shop_no)
 );
+
+-- ----------------------------------------------------------------------------
+-- 25. brand_ceo_notices — 브랜드(shop_no)별 배민 사장님공지. 히스토리를 안 남기고
+--     매 동기화마다 전체 교체하는 테이블이라 UNIQUE 제약을 굳이 걸지 않는다 —
+--     동기화 로직이 항상 그 (connection_id, shop_no) 행을 먼저 지우고 다시 넣으므로
+--     중복이 구조적으로 생기지 않는다.
+-- ----------------------------------------------------------------------------
+CREATE TABLE brand_ceo_notices (
+    id                 BIGSERIAL PRIMARY KEY,
+    connection_id      BIGINT       NOT NULL REFERENCES store_platform_connections(id) ON DELETE CASCADE,
+    shop_no            VARCHAR(20)  NOT NULL,
+    external_notice_id BIGINT       NOT NULL,
+    contents           TEXT         NOT NULL,
+    display_status     VARCHAR(16)  NOT NULL,
+    block_type         VARCHAR(16)  NOT NULL,
+    notice_created_at  TIMESTAMPTZ  NOT NULL,
+    synced_at          TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_brand_ceo_notices_lookup ON brand_ceo_notices(connection_id, shop_no);
 
 COMMIT;
