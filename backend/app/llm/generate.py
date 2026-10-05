@@ -19,11 +19,18 @@ no_issue로 묶이기 때문에, 템플릿 경로는 이런 리뷰의 구체적 
 수준)만 조절하는 얇은 레이어다 — 원인 설명·사과의 실질적 근거는 항상
 store_style_profile(사장님 말투 그라운딩)과 골든 예시에서만 온다. no_issue가
 아닌 모든 불만 리뷰(위생/안전 민감 사안, 별점-내용 불일치 포함)는 페르소나
-선택과 무관하게 _COMPLAINT_TONE_OVERRIDE로 강제 전환한다(설계 문서
+선택과 무관하게 rules["complaint_tone_override"]로 강제 전환한다(설계 문서
 2026-08-24-persona-rag-integration-design.md 참고, 2026-08-31 실사용 중
 food_quality 등 일반 불만 리뷰에도 이모지가 섞여 나오는 문제가 확인돼
 is_sensitive/sentiment_conflict 두 조건에서 "no_issue가 아닌 모든 불만"으로
-범위를 넓혔다)."""
+범위를 넓혔다).
+
+이 지시문들(불만 톤 강제, few-shot 과적합 방지, 메뉴 그라운딩 안내,
+no_issue 프레이밍, delivery 책임 경계)은 원래 이 파일에 하드코딩된
+문자열이었으나, 2026-10-06부터 procedural_rules 테이블(rule_key)에서
+조회한다(docs/superpowers/specs/2026-10-03-ai-agent-llmops-reply-design.md
+1.1절) — 조건 판단(언제 적용할지)은 여전히 이 파일의 Python 코드가
+담당하고, DB는 instruction_text(무엇을 말할지)만 보관한다."""
 
 import re
 
@@ -32,14 +39,42 @@ from sqlalchemy.orm import Session
 
 from app.llm import client
 from app.llm.rag import count_recent_same_category, fetch_golden_examples
-from app.models import BaeminShopBrand, BrandMenuInfo, ReplyStyle, Review, Store, StorePlatformConnection, StoreStyleProfile
+from app.models import BaeminShopBrand, BrandMenuInfo, ProceduralRule, ReplyStyle, Review, Store, StorePlatformConnection, StoreStyleProfile
 
 _FALLBACK_STYLE_RULES = "아직 학습된 스타일이 없습니다. 정중하고 진솔한 사과문 원칙을 따르세요."
 
-_COMPLAINT_TONE_OVERRIDE = (
-    "불만이 담긴 리뷰입니다(위생/안전 문제이거나 별점과 내용이 어긋나는 경우 포함). "
-    "페르소나 톤과 무관하게 이모지 없이 차분하고 진중하게 작성하세요."
-)
+# 아래 5개 지시문은 procedural_rules 테이블(rule_key)로 옮겨졌다(2026-10-06,
+# docs/superpowers/specs/2026-10-03-ai-agent-llmops-reply-design.md 1.1절) —
+# 조건 판단(언제 어떤 규칙을 적용할지)은 여전히 이 파일의 Python 코드가
+# 담당하고, DB는 instruction_text(무엇을 말할지)만 보관한다. 이 딕셔너리는
+# seed_procedural_rules.py를 아직 안 돌린 로컬/테스트 환경에서 답글 생성이
+# 완전히 깨지지 않게 하는 최소 안전장치로만 쓰인다 — fetch_active_rules가
+# DB 조회 결과로 덮어쓴다.
+_FALLBACK_RULES = {
+    "complaint_tone_override": (
+        "불만이 담긴 리뷰입니다. 페르소나 톤과 무관하게 이모지 없이 차분하고 진중하게 작성하세요."
+    ),
+    "few_shot_anti_overfit": (
+        "예시는 말투만 참고하고 문장을 그대로 복사하지 마라."
+    ),
+    "menu_grounding": "리뷰가 특정 메뉴/재료를 언급하면 실제 메뉴 정보를 근거로 삼아라.",
+    "no_issue_framing": "특이 불만 없음. 감사 인사 위주로 답하세요.",
+    "delivery_boundary": "배달 과정 불만에는 공감하되 가게 책임으로 단정하지 마세요.",
+}
+
+
+def fetch_active_rules(db: Session) -> dict[str, str]:
+    """procedural_rules에서 active=True인 규칙만 rule_key→instruction_text로
+    가져온다. DB에 아직 시드가 안 된 rule_key는 _FALLBACK_RULES로
+    보강한다 — seed_procedural_rules.py를 안 돌린 로컬/테스트 환경에서도
+    답글 생성 자체가 완전히 깨지지 않게 하기 위한 최소 안전장치다."""
+    rows = db.execute(
+        select(ProceduralRule.rule_key, ProceduralRule.instruction_text).where(ProceduralRule.active.is_(True))
+    ).all()
+    rules = dict(_FALLBACK_RULES)
+    rules.update({key: text for key, text in rows})
+    return rules
+
 
 # 이모지 유니코드 대역 — 실사용 중 불만 리뷰(is_sensitive/sentiment_conflict)에
 # "이모지 없이"라고 지시해도 이모지가 섞여 나오는 문제가 확인됐다(2026-08-26).
@@ -176,7 +211,11 @@ def _find_menu_context(db: Session, store: Store, review: Review) -> str | None:
     return "\n\n".join(lines) if lines else None
 
 
-def _build_system_prompt(display_name: str, style_rules: str, examples, tone_instruction: str, menu_context: str | None = None, *, strip_example_emoji: bool = False) -> str:
+def _build_system_prompt(
+    display_name: str, style_rules: str, examples, tone_instruction: str,
+    rules: dict[str, str], menu_context: str | None = None, *,
+    strip_example_emoji: bool = False,
+) -> str:
     def _example_reply(ex) -> str:
         return _strip_emoji(ex.reply_text) if strip_example_emoji else ex.reply_text
 
@@ -188,11 +227,7 @@ def _build_system_prompt(display_name: str, style_rules: str, examples, tone_ins
     menu_section = f"""
 
 [가게/메뉴 실제 정보 — 사실 근거용]
-아래는 배민에 등록된 이 가게의 실제 소개글과 메뉴 구성이다. 리뷰가 특정
-메뉴나 재료를 언급하면 반드시 이 정보를 근거로 삼아라 — 실제 메뉴
-구성과 다른 원인(예: "신메뉴라서", "양을 줄였다")을 추측해서 쓰지 마라.
-여기 없는 내용(오늘 그 배치의 조리 상태 등)은 사장님만 아는 사실이니
-지어내지 말고 일반적인 사과로 넘어가라.
+{rules["menu_grounding"]}
 
 {menu_context}""" if menu_context else ""
 
@@ -206,23 +241,21 @@ def _build_system_prompt(display_name: str, style_rules: str, examples, tone_ins
 {menu_section}
 [참고 예시 — 스타일 참고 전용]
 아래는 이 가게 사장님이 실제로 쓴(또는 승인한) 답글 예시다.
-**절대 지켜야 할 규칙**: 이 예시들은 말투·태도·구조(원인 설명 → 사과 →
-재방문 유도)만 참고하라. 문장 내용을 그대로 복사하지 말고, 구체적 원인은
-반드시 "이번 리뷰의 실제 상황"에만 근거해 새로 작성하라.
+**절대 지켜야 할 규칙**: {rules["few_shot_anti_overfit"]}
 
 {example_block}
 
 위 지시를 지켜 답글만 출력하고 다른 설명은 붙이지 마라."""
 
 
-def _build_user_message(review: Review, category_label: str, repeat_count: int) -> str:
+def _build_user_message(review: Review, category_label: str, repeat_count: int, rules: dict[str, str]) -> str:
     lines = [f"별점: {review.rating}"]
     if review.category == "no_issue":
         # "불만 유형: no_issue"라고 그대로 넣으면 모델이 없는 불만을 억지로
         # 찾아 사과하게 될 수 있다 — 칭찬/무난 리뷰는 불만 프레이밍 자체를
         # 빼고, 리뷰에 실제로 담긴 요청·취향(예: "더 매웠으면")이 있으면
         # 그것만 자연스럽게 반영하도록 안내한다.
-        lines.append("특이 불만 없음(칭찬 또는 중립적인 리뷰). 리뷰에 구체적인 취향/요청이 담겨있으면 자연스럽게 반영하고, 없으면 감사 인사 위주로 답하세요.")
+        lines.append(rules["no_issue_framing"])
     else:
         lines.append(f"불만 유형: {category_label}")
     lines.append(f'내용: "{review.content}"')
@@ -239,20 +272,23 @@ def _build_user_message(review: Review, category_label: str, repeat_count: int) 
 def generate_ai_reply(db: Session, review: Review, store: Store, style: ReplyStyle) -> str:
     profile = db.scalar(select(StoreStyleProfile).where(StoreStyleProfile.store_id == store.id))
     style_rules = profile.rules if profile is not None else _FALLBACK_STYLE_RULES
+    rules = fetch_active_rules(db)
 
     examples = fetch_golden_examples(db, store.id, review.category, review.content, limit=3)
     repeat_count = count_recent_same_category(db, store.id, review.category, days=30)
     category_label = CATEGORY_LABELS.get(review.category, review.category)
 
     tone_overridden = review.category != "no_issue" or review.is_sensitive or review.sentiment_conflict
-    tone_instruction = _COMPLAINT_TONE_OVERRIDE if tone_overridden else style.tone_instruction
+    tone_instruction = rules["complaint_tone_override"] if tone_overridden else style.tone_instruction
+    if review.category == "delivery":
+        tone_instruction = f"{tone_instruction}\n\n{rules['delivery_boundary']}"
 
     display_name = _resolve_display_name(db, store, review)
     menu_context = _find_menu_context(db, store, review)
     system_prompt = _build_system_prompt(
-        display_name, style_rules, examples, tone_instruction, menu_context,
+        display_name, style_rules, examples, tone_instruction, rules, menu_context,
         strip_example_emoji=tone_overridden,
     )
-    user_message = _build_user_message(review, category_label, repeat_count)
+    user_message = _build_user_message(review, category_label, repeat_count, rules)
     content = client.call_sonnet(system_prompt, user_message, max_tokens=800)
     return _strip_emoji(content) if tone_overridden else content

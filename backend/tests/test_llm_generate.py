@@ -3,7 +3,14 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from app.llm import generate
-from app.models import BaeminShopBrand, GoldenExample, Review, StorePlatformConnection, StoreStyleProfile
+from app.models import BaeminShopBrand, GoldenExample, ProceduralRule, Review, StorePlatformConnection, StoreStyleProfile
+
+
+def _seed_rule(db_session, key, text):
+    db_session.add(ProceduralRule(
+        rule_key=key, instruction_text=text, active=True,
+        created_at=datetime.now(timezone.utc),
+    ))
 
 
 def test_generate_ai_reply_includes_style_profile_and_examples(db_session, seeded_user, platforms, reply_styles, monkeypatch):
@@ -39,7 +46,7 @@ def test_generate_ai_reply_includes_style_profile_and_examples(db_session, seede
     assert result == "죄송합니다, 확인하겠습니다."
     assert "구체적 원인을 설명한다" in captured["system"]
     assert "옛날 리뷰" in captured["system"]
-    assert "내용을 그대로 복사하지" in captured["system"]  # 안전장치 지시가 포함됐는지
+    assert "그대로 복사하지" in captured["system"]  # 안전장치 지시(few_shot_anti_overfit)가 포함됐는지
     assert "재방문" in captured["user"] or "3회" in captured["user"]  # 재방문 고객 정보 반영
     assert "이물질이 나왔어요" in captured["user"]
 
@@ -167,7 +174,7 @@ def test_generate_ai_reply_overrides_tone_for_non_sensitive_complaint(db_session
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
-    assert generate._COMPLAINT_TONE_OVERRIDE in captured["system"]
+    assert generate._FALLBACK_RULES["complaint_tone_override"] in captured["system"]
     assert reply_styles.tone_instruction not in captured["system"]
 
 
@@ -192,7 +199,7 @@ def test_generate_ai_reply_overrides_tone_when_sensitive(db_session, seeded_user
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
-    assert generate._COMPLAINT_TONE_OVERRIDE in captured["system"]
+    assert generate._FALLBACK_RULES["complaint_tone_override"] in captured["system"]
     assert reply_styles.tone_instruction not in captured["system"]  # 페르소나 톤이 완전히 대체됐는지
 
 
@@ -217,7 +224,7 @@ def test_generate_ai_reply_overrides_tone_when_sentiment_conflict(db_session, se
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
-    assert generate._COMPLAINT_TONE_OVERRIDE in captured["system"]
+    assert generate._FALLBACK_RULES["complaint_tone_override"] in captured["system"]
     assert reply_styles.tone_instruction not in captured["system"]
 
 
@@ -458,3 +465,60 @@ def test_generate_ai_reply_omits_menu_section_when_no_brand_menu_info(db_session
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
     assert "가게/메뉴 실제 정보" not in captured["system"]
+
+
+def test_generate_ai_reply_uses_procedural_rule_text_for_complaint_tone(
+    db_session, seeded_user, platforms, reply_styles, monkeypatch,
+):
+    _seed_rule(db_session, "complaint_tone_override", "테스트용 불만 톤 규칙 문구입니다.")
+    _seed_rule(db_session, "few_shot_anti_overfit", "테스트용 복붙 금지 문구.")
+    _seed_rule(db_session, "menu_grounding", "테스트용 메뉴 그라운딩 문구.")
+    _seed_rule(db_session, "no_issue_framing", "테스트용 무난 프레이밍 문구.")
+    _seed_rule(db_session, "delivery_boundary", "테스트용 배달 경계 문구.")
+    store = seeded_user["store"]
+    review = Review(
+        store_id=store.id, platform_id=platforms["baemin"].id, menu_summary="치킨", rating=1,
+        content="배달이 너무 늦었어요", customer_nickname="손님",
+        category="delivery", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system_prompt, user_message, max_tokens):
+        captured["system_prompt"] = system_prompt
+        return "테스트 응답"
+
+    monkeypatch.setattr("app.llm.generate.client.call_sonnet", _fake_call_sonnet)
+
+    generate.generate_ai_reply(db_session, review, store, reply_styles)
+
+    assert "테스트용 불만 톤 규칙 문구입니다." in captured["system_prompt"]
+    assert "테스트용 복붙 금지 문구." in captured["system_prompt"]
+    assert "테스트용 배달 경계 문구." in captured["system_prompt"]
+
+
+def test_generate_ai_reply_skips_inactive_rule(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    db_session.add(ProceduralRule(
+        rule_key="complaint_tone_override", instruction_text="비활성 문구",
+        active=False, created_at=datetime.now(timezone.utc),
+    ))
+    store = seeded_user["store"]
+    review = Review(
+        store_id=store.id, platform_id=platforms["baemin"].id, menu_summary="치킨", rating=1,
+        content="맛이 없어요", customer_nickname="손님",
+        category="food_quality", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+    monkeypatch.setattr(
+        "app.llm.generate.client.call_sonnet",
+        lambda system_prompt, user_message, max_tokens: (captured.__setitem__("p", system_prompt), "응답")[1],
+    )
+
+    generate.generate_ai_reply(db_session, review, store, reply_styles)
+
+    assert "비활성 문구" not in captured["p"]
