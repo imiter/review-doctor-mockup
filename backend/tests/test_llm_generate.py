@@ -467,6 +467,89 @@ def test_generate_ai_reply_omits_menu_section_when_no_brand_menu_info(db_session
     assert "가게/메뉴 실제 정보" not in captured["system"]
 
 
+def test_generate_ai_reply_includes_active_ceo_notice(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """현재 활성(DISPLAY/NONE) 사장님공지는 메뉴 소개와 같은 "사실 근거용"
+    섹션에 함께 들어가야 한다 — 예: "오늘은 재료 소진으로 일찍 마감합니다"
+    같은 운영 공지를 AI가 모른 채 엉뚱한 안내를 하는 걸 막는다."""
+    from app.models import BrandCeoNotice, StorePlatformConnection
+
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    connection = db_session.scalar(
+        select(StorePlatformConnection).where(StorePlatformConnection.store_id == sid)
+    )
+    db_session.add(BrandCeoNotice(
+        connection_id=connection.id, shop_no="14804318", external_notice_id=1,
+        contents="100% 순살 닭다리살만 씁니다. 주문 전 확인해주세요.",
+        display_status="DISPLAY", block_type="NONE",
+        notice_created_at=datetime.now(timezone.utc),
+        synced_at=datetime.now(timezone.utc),
+    ))
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="치킨", rating=5, content="맛있어요",
+        customer_nickname="손님", platform_shop_no="14804318", category="no_issue",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["system"] = system
+        return "..."
+
+    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+
+    generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert "[사장님공지]" in captured["system"]
+    assert "100% 순살 닭다리살만 씁니다. 주문 전 확인해주세요." in captured["system"]
+
+
+def test_generate_ai_reply_excludes_blocked_or_hidden_ceo_notice(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """display_status가 DISPLAY가 아니거나 block_type이 NONE이 아닌(배민이
+    가리거나 차단한) 공지는 그라운딩에 섞으면 안 된다."""
+    from app.models import BrandCeoNotice, StorePlatformConnection
+
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    connection = db_session.scalar(
+        select(StorePlatformConnection).where(StorePlatformConnection.store_id == sid)
+    )
+    db_session.add(BrandCeoNotice(
+        connection_id=connection.id, shop_no="14804318", external_notice_id=1,
+        contents="가려진 공지 내용", display_status="HIDDEN", block_type="NONE",
+        notice_created_at=datetime.now(timezone.utc), synced_at=datetime.now(timezone.utc),
+    ))
+    db_session.add(BrandCeoNotice(
+        connection_id=connection.id, shop_no="14804318", external_notice_id=2,
+        contents="차단된 공지 내용", display_status="DISPLAY", block_type="BLOCKED",
+        notice_created_at=datetime.now(timezone.utc), synced_at=datetime.now(timezone.utc),
+    ))
+    review = Review(
+        store_id=sid, platform_id=pid, menu_summary="치킨", rating=5, content="맛있어요",
+        customer_nickname="손님", platform_shop_no="14804318", category="no_issue",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["system"] = system
+        return "..."
+
+    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+
+    generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
+
+    assert "가려진 공지 내용" not in captured["system"]
+    assert "차단된 공지 내용" not in captured["system"]
+    assert "가게/메뉴 실제 정보" not in captured["system"]  # 메뉴도 없고 활성 공지도 없으니 섹션 자체 생략
+
+
 def test_generate_ai_reply_uses_procedural_rule_text_for_complaint_tone(
     db_session, seeded_user, platforms, reply_styles, monkeypatch,
 ):

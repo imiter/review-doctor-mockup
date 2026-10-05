@@ -5,11 +5,12 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.credential_crypto import CredentialCryptoError, encrypt_credential
-from app.models import AdCampaign, Alert, BaeminShopBrand, BrandAdClickMetric, BrandMenuInfo, DailySettlement, Order, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
-from app.review_sync import sync_reviews_for_job, upsert_brand_ad_click_metric, upsert_daily_settlement, upsert_order, upsert_repurchase_metric
+from app.models import AdCampaign, Alert, BaeminShopBrand, BrandAdClickMetric, BrandCeoNotice, BrandMenuInfo, DailySettlement, Order, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
+from app.review_sync import notices_need_refresh, replace_brand_ceo_notices, sync_reviews_for_job, upsert_brand_ad_click_metric, upsert_daily_settlement, upsert_order, upsert_repurchase_metric
 from scrapers.baemin_ads import BaeminAdsScrapeError
 from scrapers.baemin_auth import BaeminLoginError
 from scrapers.baemin_menu import BaeminMenuScrapeError
+from scrapers.baemin_notices import BaeminNoticesScrapeError
 from scrapers.baemin_reviews import BaeminScrapeError
 from scrapers.baemin_stats import BaeminStatsScrapeError
 
@@ -80,6 +81,7 @@ def sync_setup(db_session, seeded_user, platforms, monkeypatch):
         review_sync_mod, "fetch_brand_menu_info",
         lambda page, shop_no: {"store_intro": "", "food_origin": "", "menu_intro": "", "menu_items": []},
     )
+    monkeypatch.setattr(review_sync_mod, "fetch_ceo_notices", lambda page, shop_no: [])
 
     return job, conn
 
@@ -2855,3 +2857,137 @@ def test_sync_menu_info_failure_does_not_fail_whole_job(db_session, sync_setup, 
     review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
     assert review is not None  # 리뷰 동기화는 정상 진행됨
     assert db_session.query(BrandMenuInfo).count() == 0
+
+
+def test_notices_need_refresh_true_when_missing(db_session, seeded_user, platforms):
+    conn_id = db_session.query(StorePlatformConnection).first().id
+    assert notices_need_refresh(db_session, conn_id, 14804318) is True
+
+
+def test_notices_need_refresh_false_within_30_days(db_session, seeded_user):
+    conn_id = db_session.query(StorePlatformConnection).first().id
+    db_session.add(BrandCeoNotice(
+        connection_id=conn_id, shop_no="14804318", external_notice_id=1,
+        contents="공지", display_status="DISPLAY", block_type="NONE",
+        notice_created_at=datetime.now(timezone.utc),
+        synced_at=datetime.now(timezone.utc) - timedelta(days=10),
+    ))
+    db_session.commit()
+
+    assert notices_need_refresh(db_session, conn_id, 14804318) is False
+
+
+def test_notices_need_refresh_true_when_stale(db_session, seeded_user):
+    """menu_info_needs_refresh와 동일하게, _NOTICES_MAX_AGE_DAYS보다 오래
+    동기화된 공지도 다시 가져와야 한다."""
+    conn_id = db_session.query(StorePlatformConnection).first().id
+    db_session.add(BrandCeoNotice(
+        connection_id=conn_id, shop_no="14804318", external_notice_id=1,
+        contents="공지", display_status="DISPLAY", block_type="NONE",
+        notice_created_at=datetime.now(timezone.utc),
+        synced_at=datetime.now(timezone.utc) - timedelta(days=31),
+    ))
+    db_session.commit()
+
+    assert notices_need_refresh(db_session, conn_id, 14804318) is True
+
+
+def test_replace_brand_ceo_notices_replaces_existing(db_session, seeded_user):
+    conn_id = db_session.query(StorePlatformConnection).first().id
+    db_session.add(BrandCeoNotice(
+        connection_id=conn_id, shop_no="14804318", external_notice_id=999,
+        contents="옛날 공지", display_status="DISPLAY", block_type="NONE",
+        notice_created_at=datetime.now(timezone.utc), synced_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    replace_brand_ceo_notices(db_session, conn_id, 14804318, [{
+        "external_notice_id": 1, "contents": "새 공지",
+        "display_status": "DISPLAY", "block_type": "NONE",
+        "notice_created_at": datetime.now(timezone.utc),
+    }])
+    db_session.commit()
+
+    rows = db_session.query(BrandCeoNotice).filter_by(connection_id=conn_id, shop_no="14804318").all()
+    assert len(rows) == 1
+    assert rows[0].contents == "새 공지"
+
+
+_NOTICE_DATA = [{
+    "external_notice_id": 1, "contents": "오늘은 재료 소진으로 1시간 일찍 마감합니다.",
+    "display_status": "DISPLAY", "block_type": "NONE",
+    "notice_created_at": datetime.now(timezone.utc),
+}]
+
+
+def test_sync_fetches_and_stores_notices_when_missing(db_session, sync_setup, monkeypatch):
+    """브랜드의 사장님공지가 아직 없으면(최초 동기화) 가져와 저장해야 한다
+    (menu_info와 동일한 패턴, _MENU_INFO_MAX_AGE_DAYS 블록 테스트와 짝)."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+    monkeypatch.setattr(review_sync_mod, "fetch_ceo_notices", lambda page, shop_no: _NOTICE_DATA)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    rows = db_session.query(BrandCeoNotice).filter_by(
+        connection_id=conn.id, shop_no=str(_FakeSession.shop_no),
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].contents == _NOTICE_DATA[0]["contents"]
+
+
+def test_sync_skips_notices_fetch_when_recently_synced(db_session, sync_setup, monkeypatch):
+    """공지도 메뉴처럼 거의 안 바뀌므로 최근에(_NOTICES_MAX_AGE_DAYS 이내)
+    이미 동기화됐으면 사이드바 재진입 비용을 치르면 안 된다."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    db_session.add(BrandCeoNotice(
+        connection_id=conn.id, shop_no=str(_FakeSession.shop_no), external_notice_id=1,
+        contents="기존 공지", display_status="DISPLAY", block_type="NONE",
+        notice_created_at=datetime.now(timezone.utc), synced_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+    monkeypatch.setattr(
+        review_sync_mod, "fetch_ceo_notices",
+        lambda page, shop_no: pytest.fail("should not be called"),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    rows = db_session.query(BrandCeoNotice).filter_by(connection_id=conn.id, shop_no=str(_FakeSession.shop_no)).all()
+    assert len(rows) == 1
+    assert rows[0].contents == "기존 공지"  # 그대로 유지 — 재조회 안 함
+
+
+def test_sync_notices_failure_does_not_fail_whole_job(db_session, sync_setup, monkeypatch):
+    """사장님공지 동기화 실패는 메뉴 정보 실패와 같은 부분 실패로 다뤄야
+    한다 — 리뷰 동기화 자체를 막으면 안 된다(기존 menu_errors 채널을
+    재사용한다)."""
+    import app.review_sync as review_sync_mod
+
+    job, conn = sync_setup
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
+
+    def _raise(page, shop_no):
+        raise BaeminNoticesScrapeError("사장님공지 메뉴 진입에 실패했습니다")
+
+    monkeypatch.setattr(review_sync_mod, "fetch_ceo_notices", _raise)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert job.status == "success"
+    assert "사장님공지" in job.error_message
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review is not None  # 리뷰 동기화는 정상 진행됨
+    assert db_session.query(BrandCeoNotice).count() == 0

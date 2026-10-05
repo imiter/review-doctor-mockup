@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session
 
 from app.llm import client
 from app.llm.rag import count_recent_same_category, fetch_golden_examples
-from app.models import BaeminShopBrand, BrandMenuInfo, ProceduralRule, ReplyStyle, Review, Store, StorePlatformConnection, StoreStyleProfile
+from app.models import BaeminShopBrand, BrandCeoNotice, BrandMenuInfo, ProceduralRule, ReplyStyle, Review, Store, StorePlatformConnection, StoreStyleProfile
 
 _FALLBACK_STYLE_RULES = "아직 학습된 스타일이 없습니다. 정중하고 진솔한 사과문 원칙을 따르세요."
 
@@ -160,16 +160,37 @@ def _normalize_menu_name(name: str) -> str:
     return name.strip().rstrip(":").strip()
 
 
+def _active_notices(db: Session, store: Store, review: Review) -> str | None:
+    """display_status=DISPLAY AND block_type=NONE인 공지만 전부 이어붙인다.
+    사장님이 배민 "사장님 한마디" 공지에 적어둔 현재 운영 공지(예: "오늘은
+    재료 소진으로 일찍 마감합니다", "배달 지연 안내")도 메뉴 소개와 같은
+    "사실 근거용" 그라운딩 정보라 함께 주입한다 — 여러 개면 개행 두 번으로
+    구분한다."""
+    if not review.platform_shop_no:
+        return None
+    rows = db.scalars(
+        select(BrandCeoNotice)
+        .join(StorePlatformConnection, BrandCeoNotice.connection_id == StorePlatformConnection.id)
+        .where(
+            StorePlatformConnection.store_id == store.id,
+            BrandCeoNotice.shop_no == review.platform_shop_no,
+            BrandCeoNotice.display_status == "DISPLAY",
+            BrandCeoNotice.block_type == "NONE",
+        )
+    ).all()
+    return "\n\n".join(r.contents for r in rows) or None
+
+
 def _find_menu_context(db: Session, store: Store, review: Review) -> str | None:
     """리뷰의 실제 메뉴 구성/가게 소개 정보를 배민에서 가져온 그라운딩
-    데이터(brand_menu_info)에서 찾는다. 원래 이 프로젝트엔 "메뉴" 데이터가
-    전혀 없어서, AI가 리뷰 텍스트만 보고 메뉴 구성을 추측하다 틀린 답글을
-    쓰는 문제가 실사용 중 확인됐다(2026-08-26 — "치킨마요는 밥만 많고
-    고기가 없다"는 불만에 실제로는 정량대로 들어간 걸 사장님이 직접
-    정정해야 했음). 연결 정보가 없거나(가게 미연결) 아직 메뉴 동기화 전
-    이면(review_sync.py가 첫 실행 때 채움) None을 반환하고, 호출부는 이
-    섹션을 그냥 생략한다 — 메뉴 그라운딩은 있으면 좋은 보강 정보지 필수
-    전제가 아니다."""
+    데이터(brand_menu_info)와, 현재 활성 사장님공지(brand_ceo_notices)에서
+    찾는다. 원래 이 프로젝트엔 "메뉴" 데이터가 전혀 없어서, AI가 리뷰
+    텍스트만 보고 메뉴 구성을 추측하다 틀린 답글을 쓰는 문제가 실사용 중
+    확인됐다(2026-08-26 — "치킨마요는 밥만 많고 고기가 없다"는 불만에
+    실제로는 정량대로 들어간 걸 사장님이 직접 정정해야 했음). 둘 다 없으면
+    (가게 미연결, 또는 아직 동기화 전이면 review_sync.py가 각각 채움) None을
+    반환하고, 호출부는 이 섹션을 그냥 생략한다 — 메뉴/공지 그라운딩은 있으면
+    좋은 보강 정보지 필수 전제가 아니다."""
     if not review.platform_shop_no:
         return None
 
@@ -181,20 +202,24 @@ def _find_menu_context(db: Session, store: Store, review: Review) -> str | None:
             BrandMenuInfo.shop_no == review.platform_shop_no,
         )
     )
-    if info is None:
+    notice_text = _active_notices(db, store, review)
+    if info is None and not notice_text:
         return None
 
     lines = []
-    if info.store_intro:
-        lines.append(f"[가게 소개]\n{info.store_intro}")
-    if info.food_origin:
-        lines.append(f"[원산지]\n{info.food_origin}")
-    if info.menu_intro:
-        lines.append(f"[메뉴 소개]\n{info.menu_intro}")
+    if info is not None:
+        if info.store_intro:
+            lines.append(f"[가게 소개]\n{info.store_intro}")
+        if info.food_origin:
+            lines.append(f"[원산지]\n{info.food_origin}")
+        if info.menu_intro:
+            lines.append(f"[메뉴 소개]\n{info.menu_intro}")
+    if notice_text:
+        lines.append(f"[사장님공지]\n{notice_text}")
 
     target = _normalize_menu_name(review.menu_summary or "")
     matched = None
-    if target:
+    if info is not None and target:
         for item in info.menu_items or []:
             item_name = _normalize_menu_name(item.get("name", ""))
             if item_name and (item_name in target or target in item_name):

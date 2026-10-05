@@ -19,6 +19,7 @@ from app.models import (
     Alert,
     BaeminShopBrand,
     BrandAdClickMetric,
+    BrandCeoNotice,
     BrandMenuInfo,
     DailySettlement,
     Order,
@@ -38,6 +39,7 @@ from app.plan import effective_plan
 from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics, fetch_cpc_booking, map_click_metrics_by_date
 from scrapers.baemin_auth import BaeminLoginError, login as baemin_login
 from scrapers.baemin_menu import BaeminMenuScrapeError, fetch_brand_menu_info
+from scrapers.baemin_notices import BaeminNoticesScrapeError, fetch_ceo_notices
 from scrapers.baemin_reply_submit import BaeminReplySubmitError, submit_reply
 from scrapers.baemin_reviews import BaeminScrapeError, extract_owner_reply, fetch_all_reviews, map_review
 from scrapers.baemin_stats import (
@@ -107,6 +109,46 @@ def upsert_brand_menu_info(db: Session, connection_id: int, shop_no: int, menu_d
         existing.menu_intro = menu_data["menu_intro"]
         existing.menu_items = menu_data["menu_items"]
         existing.updated_at = datetime.now(timezone.utc)
+
+
+_NOTICES_MAX_AGE_DAYS = 30
+
+
+def notices_need_refresh(db: Session, connection_id: int, shop_no: int) -> bool:
+    """사장님공지도 메뉴 정보와 같은 이유로 자주 안 바뀐다 — 사이드바 이동
+    비용을 매번 치르지 않는다(menu_info_needs_refresh와 동일 패턴)."""
+    row = db.scalar(
+        select(BrandCeoNotice.synced_at).where(
+            BrandCeoNotice.connection_id == connection_id,
+            BrandCeoNotice.shop_no == str(shop_no),
+        ).order_by(BrandCeoNotice.synced_at.desc())
+    )
+    if row is None:
+        return True
+    # menu_info_needs_refresh와 같은 이유 — Postgres(TIMESTAMPTZ)는 aware
+    # datetime을 돌려주지만 테스트에 쓰는 SQLite는 naive로 돌려준다.
+    if row.tzinfo is None:
+        row = row.replace(tzinfo=timezone.utc)
+    return row < datetime.now(timezone.utc) - timedelta(days=_NOTICES_MAX_AGE_DAYS)
+
+
+def replace_brand_ceo_notices(db: Session, connection_id: int, shop_no: int, notices: list[dict]) -> None:
+    """전체 교체(snapshot replace) — 히스토리를 안 남기고 지금 활성 공지만
+    유지한다. 이 테이블의 유일한 용도가 "RAG에 넣을 현재 활성 공지"라서,
+    upsert_brand_menu_info처럼 행 단위로 갱신할 이유가 없다 — 지난 동기화에서
+    있었지만 이번에 사라진 공지(배민에서 내려간 공지)는 그냥 지운다."""
+    db.query(BrandCeoNotice).filter(
+        BrandCeoNotice.connection_id == connection_id,
+        BrandCeoNotice.shop_no == str(shop_no),
+    ).delete()
+    now = datetime.now(timezone.utc)
+    for notice in notices:
+        db.add(BrandCeoNotice(
+            connection_id=connection_id, shop_no=str(shop_no),
+            external_notice_id=notice["external_notice_id"], contents=notice["contents"],
+            display_status=notice["display_status"], block_type=notice["block_type"],
+            notice_created_at=notice["notice_created_at"] or now, synced_at=now,
+        ))
 
 
 def upsert_shop_brand(db: Session, connection_id: int, shop_no: int, shop_name: str) -> None:
@@ -391,6 +433,13 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                     upsert_brand_menu_info(db, conn.id, shop_no, menu_data)
                 except BaeminMenuScrapeError as e:
                     menu_errors.append(f"{shop_name}: {e}")
+
+            if notices_need_refresh(db, conn.id, shop_no):
+                try:
+                    notices = fetch_ceo_notices(session.page, shop_no)
+                    replace_brand_ceo_notices(db, conn.id, shop_no, notices)
+                except BaeminNoticesScrapeError as e:
+                    menu_errors.append(f"{shop_name} 사장님공지: {e}")
 
             try:
                 raw_reviews = fetch_all_reviews(session.page, shop_no, existing_ids=existing_ids)
