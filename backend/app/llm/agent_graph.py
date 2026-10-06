@@ -46,6 +46,11 @@ _MAX_RETRIES = 2
 _COPY_PASTE_SIMILARITY_THRESHOLD = 0.8
 
 
+# 이 그래프는 체크포인터를 쓰지 않는다(의도적) — state가 그래프 실행 중
+# 메모리 참조로만 넘어가고 직렬화되지 않으므로 Session/ORM 객체를 그대로
+# 담아도 안전하다. Plan 3(LangSmith)/Plan 4에서 체크포인터나 영속화를
+# 추가한다면 Session은 피클 불가능이니 이 가정이 깨진다 — 그때 db/review/
+# store를 state 밖으로 빼내거나 직렬화 가능한 형태로 바꿔야 한다.
 class AgentState(TypedDict, total=False):
     # 입력(그래프 시작 시 채움)
     db: Session
@@ -155,22 +160,38 @@ def verify_draft_node(state: AgentState) -> dict:
     if state["tone_overridden"] and _EMOJI_PATTERN.search(draft):
         violations.append("emoji")
 
-    copy_paste_match = _find_copy_paste_match(draft, state.get("examples") or [])
+    copy_paste_match = _find_copy_paste_match(
+        draft, state.get("examples") or [], state["display_name"],
+    )
     if copy_paste_match is not None:
         violations.append("copy_paste")
 
     return {"violations": violations, "copy_paste_match": copy_paste_match}
 
 
-def _find_copy_paste_match(draft: str, examples: list[GoldenExample]) -> GoldenExample | None:
+def _find_copy_paste_match(
+    draft: str, examples: list[GoldenExample], display_name: str,
+) -> GoldenExample | None:
     """초안과 가장 많이 겹치는 예시를 돌려준다(임계값을 넘는 게 없으면
     None). "가장 많이"가 중요하다 — fix_draft의 재지시문이 "이 문장과
     비슷하다"며 예시 원문을 콕 집어 넣으므로, 여러 개가 걸렸을 때 엉뚱한
-    쪽을 지목하면 지시가 어긋난다."""
+    쪽을 지목하면 지시가 어긋난다.
+
+    비교 전에 display_name(가게/브랜드 이름)을 양쪽에서 지운다 — 이
+    가게의 모든 답글이 같은 인사말로 시작해(_resolve_display_name) 그
+    공통 접두부만으로도 비율이 임계값을 넘는 걸 실측 확인했다(최종 리뷰,
+    2026-10-06) — 예: "치밥대장입니다. 맛있게 드셨다니..." vs
+    "치밥대장입니다. 좋은 평가 감사합니다..."가 내용은 전혀 다른데도
+    0.87이 나왔다. 이 값은 정말 복붙된 본문 내용을 잡으려는 것이라,
+    모든 답글에 똑같이 들어가는 브랜드명은 신호가 아니라 잡음이다."""
+    normalized_draft = draft.replace(display_name, "") if display_name else draft
     best: GoldenExample | None = None
     best_ratio = _COPY_PASTE_SIMILARITY_THRESHOLD
     for example in examples:
-        ratio = difflib.SequenceMatcher(None, draft, example.reply_text).ratio()
+        normalized_example = (
+            example.reply_text.replace(display_name, "") if display_name else example.reply_text
+        )
+        ratio = difflib.SequenceMatcher(None, normalized_draft, normalized_example).ratio()
         if ratio >= best_ratio:
             best, best_ratio = example, ratio
     return best

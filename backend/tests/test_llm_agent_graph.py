@@ -1,3 +1,4 @@
+import difflib
 from datetime import datetime, timezone
 
 import pytest
@@ -158,7 +159,7 @@ def test_generate_draft_node_appends_extra_instruction_to_user_message(monkeypat
 
 
 def test_verify_draft_flags_emoji_violation_when_tone_overridden():
-    state = {"draft": "죄송합니다 😊", "tone_overridden": True, "examples": []}
+    state = {"draft": "죄송합니다 😊", "tone_overridden": True, "examples": [], "display_name": ""}
 
     result = verify_draft_node(state)
 
@@ -168,7 +169,7 @@ def test_verify_draft_flags_emoji_violation_when_tone_overridden():
 def test_verify_draft_ignores_emoji_when_tone_not_overridden():
     """no_issue(칭찬/무난) 리뷰는 페르소나 톤의 이모지를 그대로 쓴다 —
     이모지가 있다는 사실만으로 위반이 되면 안 된다."""
-    state = {"draft": "감사합니다 😊", "tone_overridden": False, "examples": []}
+    state = {"draft": "감사합니다 😊", "tone_overridden": False, "examples": [], "display_name": ""}
 
     result = verify_draft_node(state)
 
@@ -179,7 +180,7 @@ def test_verify_draft_flags_copy_paste_violation():
     example = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.")
     state = {
         "draft": "불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.",
-        "tone_overridden": False, "examples": [example],
+        "tone_overridden": False, "examples": [example], "display_name": "",
     }
 
     result = verify_draft_node(state)
@@ -194,7 +195,7 @@ def test_verify_draft_flags_near_verbatim_copy_not_only_exact():
     example = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.")
     state = {
         "draft": "불편을 드려 정말 죄송합니다. 다음에는 더 신경쓰겠습니다.",
-        "tone_overridden": False, "examples": [example],
+        "tone_overridden": False, "examples": [example], "display_name": "",
     }
 
     result = verify_draft_node(state)
@@ -208,7 +209,7 @@ def test_verify_draft_allows_paraphrase_of_example():
     example = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.")
     state = {
         "draft": "맛이 기대에 못 미쳐 속상하셨겠어요. 조리 과정을 다시 점검하겠습니다.",
-        "tone_overridden": False, "examples": [example],
+        "tone_overridden": False, "examples": [example], "display_name": "",
     }
 
     result = verify_draft_node(state)
@@ -224,7 +225,7 @@ def test_verify_draft_picks_the_most_similar_example_as_match():
     closer = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다!")
     state = {
         "draft": "불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다!",
-        "tone_overridden": False, "examples": [close, closer],
+        "tone_overridden": False, "examples": [close, closer], "display_name": "",
     }
 
     result = verify_draft_node(state)
@@ -232,8 +233,46 @@ def test_verify_draft_picks_the_most_similar_example_as_match():
     assert result["copy_paste_match"] is closer
 
 
+def test_verify_draft_ignores_shared_display_name_prefix():
+    """같은 브랜드명 인사말로 시작하는 두 답글이 본문은 완전히 달라도
+    display_name을 지운 뒤에는 임계값을 넘으면 안 된다(최종 리뷰 실측
+    0.82~0.94 과민 사례). display_name을 안 지운 원문 비교로는 여전히
+    0.8을 넘는다는 것도 함께 확인한다."""
+    display_name = "치밥대장"
+    example = _golden("안녕하세요 치밥대장입니다. 맛있게 드셔주셔서 감사합니다.")
+    state = {
+        "draft": "안녕하세요 치밥대장입니다. 좋은 평가 남겨주셔서 감사합니다.",
+        "tone_overridden": False, "examples": [example], "display_name": display_name,
+    }
+
+    # display_name을 안 지우면 공통 접두부만으로 임계값을 넘는다는 전제 확인.
+    raw_ratio = difflib.SequenceMatcher(None, state["draft"], example.reply_text).ratio()
+    assert raw_ratio >= 0.8
+
+    result = verify_draft_node(state)
+
+    assert result["violations"] == []
+    assert result["copy_paste_match"] is None
+
+
+def test_verify_draft_flags_copy_paste_violation_even_after_stripping_display_name():
+    """진짜 복붙 사례는 display_name을 지워도 여전히 걸려야 한다 —
+    display_name 제거가 진짜 위반까지 가려버리면 안 된다."""
+    display_name = "치밥대장"
+    example = _golden("치밥대장입니다, 불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.")
+    state = {
+        "draft": "치밥대장입니다, 불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.",
+        "tone_overridden": False, "examples": [example], "display_name": display_name,
+    }
+
+    result = verify_draft_node(state)
+
+    assert "copy_paste" in result["violations"]
+    assert result["copy_paste_match"] is example
+
+
 def test_verify_draft_no_violations_when_clean():
-    state = {"draft": "완전히 다른 새 문장입니다.", "tone_overridden": False, "examples": []}
+    state = {"draft": "완전히 다른 새 문장입니다.", "tone_overridden": False, "examples": [], "display_name": ""}
 
     result = verify_draft_node(state)
 
@@ -250,11 +289,11 @@ def test_verify_draft_makes_no_llm_call(monkeypatch):
     example = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.")
 
     # 위반이 있는 경우와 없는 경우 둘 다 — 어느 분기에서도 호출이 없어야 한다.
-    verify_draft_node({"draft": "죄송합니다 😊", "tone_overridden": True, "examples": [example]})
-    verify_draft_node({"draft": "완전히 다른 새 문장입니다.", "tone_overridden": False, "examples": [example]})
+    verify_draft_node({"draft": "죄송합니다 😊", "tone_overridden": True, "examples": [example], "display_name": ""})
+    verify_draft_node({"draft": "완전히 다른 새 문장입니다.", "tone_overridden": False, "examples": [example], "display_name": ""})
     verify_draft_node({
         "draft": "불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.",
-        "tone_overridden": True, "examples": [example],
+        "tone_overridden": True, "examples": [example], "display_name": "",
     })
 
 
@@ -520,3 +559,22 @@ def test_run_agent_does_not_hit_langgraph_recursion_limit(db_session, seeded_use
         pytest.fail(f"재시도 루프가 스스로 멈추지 않았다: {exc}")
 
     assert result.passed_verification is False
+
+
+def test_run_agent_propagates_node_exceptions_unwrapped(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """run_agent은 노드 내부 예외를 감싸지 않고 그대로 전파해야 한다 —
+    reviews.py의 수동 생성 경로(503 처리)와 review_sync.py의 except
+    Exception 둘 다 이 동작(원래 예외 타입이 그대로 올라옴)에 의존한다.
+    그래프는 모듈 import 시 한 번만 컴파일되어 retrieve_memory_node를 직접
+    참조하므로, 그 심볼 자체를 monkeypatch해도 이미 컴파일된 그래프에는
+    영향이 없다 — 대신 retrieve_memory_node 내부에서 호출 시점에 전역
+    이름으로 조회되는 fetch_golden_examples를 터뜨린다."""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("retrieve_memory 실패")
+
+    monkeypatch.setattr("app.llm.agent_graph.fetch_golden_examples", _boom)
+    store = seeded_user["store"]
+    review = _make_review(db_session, store, platforms)
+
+    with pytest.raises(RuntimeError, match="retrieve_memory 실패"):
+        run_agent(db_session, review, store, reply_styles)
