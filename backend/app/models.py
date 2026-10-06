@@ -257,6 +257,12 @@ class ReviewReply(Base):
     reply_type: Mapped[str] = mapped_column(String(10))
     style_id: Mapped[int | None] = mapped_column(ForeignKey("reply_styles.id"))
     content: Mapped[str] = mapped_column(Text)
+    # reply_type="ai_draft" 행에만 채워진다 — 이 초안을 만든 run_agent
+    # 호출의 LangSmith trace id(app/llm/agent_graph.py의 run_agent).
+    # 사장님이 나중에 이 초안을 고쳐서 save_final_reply로 저장하면,
+    # 그 쌍의 유사도를 이 trace에 feedback으로 기록한다(스펙 4.2절,
+    # app/llm/feedback.py). "final"/"secondary" 행에는 없다(NULL).
+    trace_id: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime]
 
     review: Mapped[Review] = relationship(back_populates="replies")
@@ -439,8 +445,33 @@ class OnboardingScenario(Base):
     category: Mapped[str] = mapped_column(String(24))
     virtual_review_text: Mapped[str] = mapped_column(Text)
     draft_text: Mapped[str] = mapped_column(Text)
+    # draft_text를 만든 run_agent 호출의 LangSmith trace id — ReviewReply.trace_id와
+    # 같은 용도(경로 B 측정, app/llm/feedback.py).
+    trace_id: Mapped[str | None] = mapped_column(String(36))
     status: Mapped[str] = mapped_column(String(10), default="pending")
     shown_on: Mapped[date | None]
     created_at: Mapped[datetime]
 
     store: Mapped[Store] = relationship()
+
+
+class DraftFeedbackScore(Base):
+    """AI 초안과 사장님 최종본의 코사인 유사도 1건(스펙 4.2절 "순환 측정
+    장치") — 경로 A(save_final_reply)/경로 B(answer_scenario) 둘 다 이
+    테이블에 쓴다. 집계(카테고리별 평균)는 대시보드가 조회 시점에 한다
+    (daily_settlements와 같은 정규화 원칙 — 요약을 별도로 캐싱하지
+    않는다)."""
+    __tablename__ = "draft_feedback_scores"
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("stores.id"))
+    category: Mapped[str] = mapped_column(String(24))
+    # -1~1 범위 그대로 허용(클램핑 없음) — 코사인 유사도가 음수로 나오면
+    # 그 자체가 측정 이상 신호라 0으로 뭉개지 않는다.
+    similarity_score: Mapped[Decimal] = mapped_column(Numeric(5, 4))
+    # 이 측정이 어느 LangSmith trace의 feedback인지 — DB에도 같은 값을
+    # 들고 있어야 "이 점수가 어느 생성 시도였는지" DB만 보고도 추적된다.
+    trace_id: Mapped[str] = mapped_column(String(36))
+    source_review_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("reviews.id"))
+    source_scenario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("onboarding_scenarios.id"))
+    created_at: Mapped[datetime]

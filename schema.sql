@@ -1,7 +1,7 @@
 -- ============================================================================
 -- Delivery Review & Store Insight MVP — PostgreSQL Schema
 -- ============================================================================
--- 28개 테이블. 모든 FK에 ON DELETE 정책 명시.
+-- 29개 테이블. 모든 FK에 ON DELETE 정책 명시.
 --
 -- 이 파일은 2026-10-06부터 **정본이 아니라 현재 스키마의 스냅샷**이다.
 -- 스키마를 바꿀 때 이 파일을 손으로 고치지 말고 Alembic 마이그레이션
@@ -26,13 +26,13 @@ BEGIN;
 -- golden_examples.embedding(벡터 검색, 2026-08-26)이 쓰는 pgvector 확장.
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- 28개 테이블 전부를 나열한다. CASCADE는 "이 테이블을 참조하는 제약"을 같이
+-- 29개 테이블 전부를 나열한다. CASCADE는 "이 테이블을 참조하는 제약"을 같이
 -- 지울 뿐 "참조하는 테이블"까지 지우지는 않아서, 빠진 테이블이 하나라도 있으면
 -- 이 파일을 기존 DB에 재적용할 때 `relation ... already exists`로 깨진다
 -- (golden_examples/store_style_profile/onboarding_scenarios/brand_menu_info가
 -- 실제로 그 상태였다 — 2026-10-06 실측 확인해 채웠다).
 DROP TABLE IF EXISTS
-    procedural_rules, brand_ceo_notices, brand_menu_info, onboarding_scenarios,
+    draft_feedback_scores, procedural_rules, brand_ceo_notices, brand_menu_info, onboarding_scenarios,
     payments, brand_ad_click_metrics, baemin_shop_brands, review_sync_jobs,
     signup_verifications, social_accounts, store_style_profile, golden_examples,
     alerts, ad_rank_snapshots, ad_performance_metrics, ad_campaigns,
@@ -206,6 +206,7 @@ CREATE TABLE review_replies (
     reply_type VARCHAR(10) NOT NULL CHECK (reply_type IN ('ai_draft', 'final', 'secondary')),
     style_id   INT         REFERENCES reply_styles(id) ON DELETE SET NULL,  -- 생성 당시 스타일 (이력 보존)
     content    TEXT        NOT NULL,
+    trace_id   VARCHAR(36),  -- reply_type='ai_draft'에만 채워짐. 이 초안을 만든 run_agent 호출의 LangSmith trace id
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -532,6 +533,7 @@ CREATE TABLE onboarding_scenarios (
     status              VARCHAR(10)  NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'answered', 'skipped')),
     shown_on            DATE,
+    trace_id            VARCHAR(36),  -- draft_text를 만든 run_agent 호출의 LangSmith trace id
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
     UNIQUE (store_id, category)
 );
@@ -576,5 +578,25 @@ CREATE TABLE brand_ceo_notices (
 );
 
 CREATE INDEX idx_brand_ceo_notices_lookup ON brand_ceo_notices(connection_id, shop_no);
+
+-- ----------------------------------------------------------------------------
+-- 26. draft_feedback_scores — AI 초안과 사장님 최종본의 코사인 유사도 1건당
+--     1행(LangSmith 연동 + 측정 대시보드, "순환 측정 장치"). 경로 A
+--     (review_replies 경유)/경로 B(onboarding_scenarios 경유) 둘 다 이
+--     테이블에 쓴다. 집계(카테고리별 평균)는 daily_settlements와 같은
+--     정규화 원칙으로 조회 시점에 계산하고 별도로 캐싱하지 않는다.
+-- ----------------------------------------------------------------------------
+CREATE TABLE draft_feedback_scores (
+    id                 BIGSERIAL PRIMARY KEY,
+    store_id           BIGINT       NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    category           VARCHAR(24)  NOT NULL,
+    similarity_score   NUMERIC(5,4) NOT NULL CHECK (similarity_score BETWEEN -1 AND 1),  -- 코사인 유사도, 클램핑 없음
+    trace_id           VARCHAR(36)  NOT NULL,  -- 이 측정의 LangSmith trace id
+    source_review_id   BIGINT       REFERENCES reviews(id) ON DELETE SET NULL,
+    source_scenario_id BIGINT       REFERENCES onboarding_scenarios(id) ON DELETE SET NULL,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_draft_feedback_scores_lookup ON draft_feedback_scores(store_id, category, created_at DESC);
 
 COMMIT;
