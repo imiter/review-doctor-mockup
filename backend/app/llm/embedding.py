@@ -47,3 +47,18 @@ def embed_query(text: str) -> list[float]:
     (Voyage가 검색/저장 각각에 다른 프롬프트를 앞에 붙인다) 반드시 구분해
     써야 한다."""
     return _embed([text], "query")[0]
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """두 임베딩 벡터의 코사인 유사도(-1~1). golden_examples 검색이 쓰는
+    pgvector의 <-> 연산자(DB 레벨, 거리)와 달리, 이건 두 벡터를 이미
+    메모리에 들고 있을 때 쓰는 순수 Python 계산이다(app/llm/feedback.py가
+    AI 초안과 사장님 최종본의 유사도를 잴 때 쓴다, 스펙 4.2절).
+    둘 중 하나가 영벡터면(이론상으로만 가능, 실제 텍스트 임베딩에서는
+    안 나옴) 0으로 돌려준다 — ZeroDivisionError를 내는 대신."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)

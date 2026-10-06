@@ -37,6 +37,12 @@ def _no_voyage_key(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_langsmith_key(monkeypatch):
+    for key in ("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY", "LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2"):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _mock_generate_ai_reply(monkeypatch):
     """모든 리뷰(no_issue 포함)가 generate_ai_reply(RAG)를 타므로(2026-08-24),
     실제 Claude API를 호출하지 않도록 기본값으로 monkeypatch한다. 생성 결과
