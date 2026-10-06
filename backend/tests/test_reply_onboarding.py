@@ -199,6 +199,66 @@ def test_answer_already_answered_returns_409(client, seeded_user, auth_headers, 
     assert res.status_code == 409
 
 
+def test_answer_scenario_schedules_feedback_when_trace_id_present(client, auth_headers, db_session, seeded_user, monkeypatch):
+    import app.routers.reply_onboarding as onboarding_router
+
+    monkeypatch.setattr(onboarding_router, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(onboarding_router, "compute_golden_example_embedding_background", lambda golden_example_id: None)
+    calls = []
+    monkeypatch.setattr(onboarding_router, "record_draft_feedback_background", lambda **kwargs: calls.append(kwargs))
+
+    from app.models import OnboardingScenario
+
+    store = seeded_user["store"]
+    scenario = OnboardingScenario(
+        store_id=store.id, category="delivery", virtual_review_text="배달이 늦었어요",
+        draft_text="불편드려 죄송합니다", trace_id="cccccccc-cccc-cccc-cccc-cccccccccccc",
+        status="pending", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(scenario)
+    db_session.commit()
+
+    resp = client.post(
+        f"/reply-onboarding/scenarios/{scenario.id}/answer",
+        json={"content": "고쳐 쓴 답변"}, headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["trace_id"] == "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    assert calls[0]["draft_text"] == "불편드려 죄송합니다"
+    assert calls[0]["final_text"] == "고쳐 쓴 답변"
+    assert calls[0]["source_scenario_id"] == scenario.id
+
+
+def test_answer_scenario_skips_feedback_without_trace_id(client, auth_headers, db_session, seeded_user, monkeypatch):
+    import app.routers.reply_onboarding as onboarding_router
+
+    monkeypatch.setattr(onboarding_router, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(onboarding_router, "compute_golden_example_embedding_background", lambda golden_example_id: None)
+    calls = []
+    monkeypatch.setattr(onboarding_router, "record_draft_feedback_background", lambda **kwargs: calls.append(kwargs))
+
+    from app.models import OnboardingScenario
+
+    store = seeded_user["store"]
+    scenario = OnboardingScenario(
+        store_id=store.id, category="price", virtual_review_text="가격이 비싸요",
+        draft_text="양해 부탁드립니다", trace_id=None,
+        status="pending", created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(scenario)
+    db_session.commit()
+
+    resp = client.post(
+        f"/reply-onboarding/scenarios/{scenario.id}/answer",
+        json={"content": "답변"}, headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    assert calls == []
+
+
 def test_skip_does_not_promote_and_stays_available_for_rescan(client, db_session, seeded_user, auth_headers, reply_styles, monkeypatch):
     _patch_llm(monkeypatch)
     scenarios = client.post("/reply-onboarding/wizard", headers=auth_headers).json()

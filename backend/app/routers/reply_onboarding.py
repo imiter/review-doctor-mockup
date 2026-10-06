@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
+from app.llm.feedback import record_draft_feedback_background
 from app.llm.onboarding import find_uncovered_categories, get_or_create_scenario
 from app.llm.rag import compute_golden_example_embedding_background
 from app.llm.style_profile import refresh_store_style_profile_background
@@ -137,6 +138,17 @@ def answer_scenario(
     db.commit()
     background_tasks.add_task(refresh_store_style_profile_background, scenario.store_id)
     background_tasks.add_task(compute_golden_example_embedding_background, example.id)
+    if scenario.trace_id is not None:
+        # 경로 B 측정(스펙 4.2절) — 훈련카드 AI초안과 사장님 실제 답변의
+        # 유사도. trace_id가 없는 건(이 마이그레이션 이전에 만들어진
+        # 시나리오) 측정 대상에서 자연히 빠진다. 기존 코드가 commit 뒤에도
+        # scenario.store_id/example.id를 그대로 읽는 것과 같은 패턴이라
+        # 별도로 값을 미리 뽑아둘 필요 없다.
+        background_tasks.add_task(
+            record_draft_feedback_background,
+            trace_id=scenario.trace_id, draft_text=scenario.draft_text, final_text=body.content,
+            store_id=scenario.store_id, category=scenario.category, source_scenario_id=scenario.id,
+        )
     return _row(scenario)
 
 

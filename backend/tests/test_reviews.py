@@ -68,6 +68,54 @@ def test_save_final_reply_transitions_status_and_blocks_duplicate(client, db_ses
     assert dup.status_code == 409
 
 
+def test_save_final_reply_schedules_feedback_when_draft_has_trace_id(client, auth_headers, db_session, seeded_user, platforms, monkeypatch):
+    import app.routers.reviews as reviews_mod
+    from app.models import ReviewReply
+
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
+    calls = []
+    monkeypatch.setattr(reviews_mod, "record_draft_feedback_background", lambda **kwargs: calls.append(kwargs))
+
+    store = seeded_user["store"]
+    review = make_review(db_session, store, platforms, rating=5, content="맛있어요")
+    draft = ReviewReply(
+        review_id=review.id, reply_type="ai_draft", style_id=None,
+        content="AI 초안", trace_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(draft)
+    db_session.commit()
+
+    resp = client.post(f"/reviews/{review.id}/reply", json={"content": "고쳐 쓴 최종본"}, headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["trace_id"] == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    assert calls[0]["draft_text"] == "AI 초안"
+    assert calls[0]["final_text"] == "고쳐 쓴 최종본"
+    assert calls[0]["store_id"] == store.id
+    assert calls[0]["category"] == review.category
+    assert calls[0]["source_review_id"] == review.id
+
+
+def test_save_final_reply_skips_feedback_when_no_draft_existed(client, auth_headers, db_session, seeded_user, platforms, monkeypatch):
+    import app.routers.reviews as reviews_mod
+
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
+    calls = []
+    monkeypatch.setattr(reviews_mod, "record_draft_feedback_background", lambda **kwargs: calls.append(kwargs))
+
+    store = seeded_user["store"]
+    review = make_review(db_session, store, platforms, rating=5, content="맛있어요")
+
+    resp = client.post(f"/reviews/{review.id}/reply", json={"content": "처음부터 직접 썼어요"}, headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert calls == []  # 초안이 없었으니 측정할 쌍이 없다
+
+
 def test_reviews_scoped_to_own_store_not_other_users(client, db_session, seeded_user, platforms, reply_styles, auth_headers):
     from app.auth import hash_password
     from app.models import Store, User

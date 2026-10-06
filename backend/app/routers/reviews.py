@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
+from app.llm.feedback import record_draft_feedback_background
 from app.llm.generate import generate_ai_reply_with_trace
 from app.llm.rag import compute_golden_example_embedding_background
 from app.llm.style_profile import refresh_store_style_profile_background
@@ -192,6 +193,18 @@ def save_final_reply(
         db.flush()  # 배경 작업에 넘길 id를 얻으려면 INSERT를 먼저 반영해야 한다
         background_tasks.add_task(refresh_store_style_profile_background, review.store_id)
         background_tasks.add_task(compute_golden_example_embedding_background, example.id)
+
+    if draft is not None and draft.trace_id is not None:
+        # 초안이 있었고(수동 생성이든 Plan 2의 자동답글 보류든) 그 초안이
+        # trace_id를 들고 있으면 — 즉 LangGraph로 생성된 초안이면 — 사장님이
+        # 그걸 그대로 썼든 고쳐 썼든 유사도를 측정한다(스펙 4.2절 경로 A,
+        # 초안을 그대로 승인한 경우도 "AI가 잘 맞춘" 유의미한 신호다).
+        # 응답을 느리게 만들면 안 되므로 BackgroundTasks로 미룬다.
+        background_tasks.add_task(
+            record_draft_feedback_background,
+            trace_id=draft.trace_id, draft_text=draft.content, final_text=reply.content,
+            store_id=review.store_id, category=review.category, source_review_id=review.id,
+        )
 
     db.commit()
     return {"id": reply.id, "content": reply.content}
