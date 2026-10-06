@@ -2926,6 +2926,142 @@ def test_sync_backlog_reply_failure_does_not_fail_whole_job(db_session, sync_set
     assert "기존 미답변" in job.error_message
 
 
+def test_sync_holds_preexisting_review_as_ai_draft_when_verification_fails(db_session, sync_setup, reply_styles, monkeypatch):
+    """소급 처리(backlog) 경로에서도 run_agent가 재시도 2회를 다 써도 검증을
+    통과 못 하면(passed_verification=False), 배민에는 제출하지 않고
+    ai_draft + status="pending"으로 보류해야 한다 — 신규 리뷰 경로의
+    test_sync_holds_review_as_ai_draft_when_verification_fails와 동일한
+    보장이 `for review in backlog:` 루프에도 있는지 확인한다(기존에는 이
+    분기가 "소급 처리는 항상 성공한다"고 가정한 테스트
+    test_sync_answers_preexisting_unanswered_review_when_pro만 있었다 —
+    2026-10-06 리뷰 보완)."""
+    import app.review_sync as review_sync_mod
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    backlog_review = Review(
+        store_id=job.store_id, platform_id=job.platform_id, menu_summary="옛날메뉴",
+        external_review_id=9010, platform_shop_no=str(_FakeSession.shop_no),
+        rating=5, content="예전부터 있던 리뷰", customer_nickname="옛날고객4",
+        customer_order_count=1, category="no_issue", is_sensitive=False,
+        sentiment_conflict=False, status="unanswered",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(backlog_review)
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])  # 이번엔 새 리뷰 없음
+    monkeypatch.setattr(
+        review_sync_mod, "run_agent",
+        lambda db, review, store, style: AgentResult(content="소급 보류 초안", passed_verification=False, retry_count=2),
+    )
+    submit_calls = []
+    monkeypatch.setattr(
+        review_sync_mod, "submit_reply",
+        lambda page, shop_no, external_review_id, content: submit_calls.append((shop_no, external_review_id, content)),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    db_session.refresh(job)
+    db_session.refresh(backlog_review)
+    assert backlog_review.status == "pending"  # 자동 제출 안 됨, 보류
+    assert submit_calls == []  # 배민에 제출되지 않았다
+    draft = db_session.query(ReviewReply).filter_by(review_id=backlog_review.id, reply_type="ai_draft").one()
+    assert draft.content == "소급 보류 초안"
+    assert draft.style_id == reply_styles.id
+    # final 답글은 저장되지 않았어야 한다 — ai_draft만 있어야 정상.
+    assert db_session.query(ReviewReply).filter_by(review_id=backlog_review.id, reply_type="final").count() == 0
+    # 보류는 실패가 아니다 — auto_reply_errors에 집계돼 job을 실패로 만들면
+    # 안 된다(신규 리뷰 경로의 보류 분기와 동일한 보장).
+    assert job.status == "success"
+    assert job.error_message is None
+
+
+def test_sync_commits_backlog_hold_before_later_failure(db_session, sync_setup, reply_styles, monkeypatch):
+    """소급 처리 중 검증 실패로 ai_draft 보류한 직후에는 그 상태가 즉시
+    커밋돼야 한다 — job 뒷부분(매출 동기화 등)에서 예상 밖 예외가 나
+    sync_reviews_for_job이 db.rollback()을 해도 방금 반영한 보류 상태가
+    사라지면 안 된다.
+
+    사라지면 review.status가 다시 "unanswered"로 보여 다음 동기화의
+    backlog 루프가 같은 리뷰를 또 run_agent에 태워, 이미 사장님이 볼 수도
+    있는 ai_draft 행과는 별개로 중복 ai_draft 행을 또 만들 수 있다 — 신규
+    리뷰 경로 test_sync_commits_new_review_auto_reply_before_later_failure의
+    backlog 대응 테스트다(2026-10-06 리뷰 보완). backlog 분기 특유의
+    `db.commit()` 위치(if/else 공통 커밋)가 실제로 지켜지지 않으면 이
+    테스트가 실패해야 한다 — 신규 리뷰 쪽은 성공(True) 분기의 커밋
+    누락/오배치만 잡아내는 테스트가 있었고, 보류(False) 분기 쪽의 커밋
+    누락/오배치를 잡는 테스트는 신규/소급 양쪽 모두 없었다."""
+    import app.review_sync as review_sync_mod
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    backlog_review = Review(
+        store_id=job.store_id, platform_id=job.platform_id, menu_summary="옛날메뉴",
+        external_review_id=9011, platform_shop_no=str(_FakeSession.shop_no),
+        rating=5, content="예전부터 있던 리뷰", customer_nickname="옛날고객5",
+        customer_order_count=1, category="no_issue", is_sensitive=False,
+        sentiment_conflict=False, status="unanswered",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(backlog_review)
+    db_session.commit()
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
+    run_agent_calls = []
+
+    def _fake_run_agent(db, review, store, style):
+        run_agent_calls.append(review.id)
+        return AgentResult(content="소급 보류 초안", passed_verification=False, retry_count=2)
+
+    monkeypatch.setattr(review_sync_mod, "run_agent", _fake_run_agent)
+    submit_calls = []
+    monkeypatch.setattr(
+        review_sync_mod, "submit_reply",
+        lambda page, shop_no, external_review_id, content: submit_calls.append((shop_no, external_review_id, content)),
+    )
+
+    # 신규 리뷰 루프/소급 처리가 끝난 바로 뒤(매출 증분 범위 계산)에서
+    # 예상 밖 예외를 터뜨린다 — 이 지점은 어떤 except에도 걸리지 않아
+    # sync_reviews_for_job의 마지막 방어선까지 올라가 db.rollback()을
+    # 유발한다(신규 리뷰 경로 테스트와 완전히 동일한 지점).
+    def _boom(*a, **kw):
+        raise RuntimeError("매출 동기화 중 커넥션 오류 (시뮬레이션)")
+
+    monkeypatch.setattr(review_sync_mod, "filter_months_needing_sync", _boom)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    db_session.refresh(job)
+    assert job.status == "failed"  # job 자체는 뒤에서 실패
+    assert len(run_agent_calls) == 1  # 이번 패스에서 한 번만 처리됐다
+    assert submit_calls == []  # 보류라서 배민에는 나가지 않았다
+
+    # rollback을 겪었지만 보류 상태(ai_draft + status="pending")는 그대로
+    # 남아있어야 한다.
+    review = db_session.query(Review).filter_by(external_review_id=9011).one()
+    assert review.status == "pending"
+    assert db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="ai_draft").count() == 1
+
+    # 같은 리뷰가 다음 동기화에서 다시 소급 대상으로 재처리되지 않는다 →
+    # 중복 ai_draft 행도, 중복 run_agent 호출도 일어나지 않는다. (다음 pass의
+    # backlog 쿼리는 status == "unanswered"만 대상으로 하므로, status가
+    # rollback으로 "unanswered"로 되돌아갔다면 여기서 다시 걸렸을 것이다.)
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert len(run_agent_calls) == 1
+    assert db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="ai_draft").count() == 1
+
+
 def test_sync_falls_back_to_default_category_when_classification_fails(db_session, sync_setup, monkeypatch):
     import app.review_sync as review_sync_mod
 
