@@ -681,13 +681,19 @@ react-native-keychain 토큰 저장)를 그대로 따르되, 색상 팔레트는
 - users 테이블 컬럼은 최소화: id, email, nickname, phone_hash,
   marketing_agreed, created_at.
 
-## DB 설계 (24개 테이블)
+## DB 설계 (28개 테이블)
 users, stores, platforms, store_platform_connections, subscriptions,
 orders, reviews, golden_examples, store_style_profile, review_replies,
 reply_styles, reply_settings, daily_settlements, repurchase_metrics,
 ad_campaigns, ad_performance_metrics, ad_rank_snapshots, alerts,
 social_accounts, signup_verifications, review_sync_jobs,
-baemin_shop_brands, brand_ad_click_metrics, payments.
+baemin_shop_brands, brand_ad_click_metrics, payments,
+onboarding_scenarios, brand_menu_info, procedural_rules, brand_ceo_notices.
+
+> 테이블 수가 24 → 28로 늘었다(2026-10-06). procedural_rules/brand_ceo_notices가
+> 이번에 새로 생긴 두 개이고, brand_menu_info(2026-08-26 "RAG 메뉴 그라운딩" 절)와
+> onboarding_scenarios(답글 온보딩)는 그때 이 목록에 추가하는 걸 빠뜨린 것이라
+> 지금 같이 채웠다 — 둘 다 이미 `schema.sql`과 코드에는 있었다.
 
 ### 테이블 용도
 - users: 사장 계정. 전화번호는 phone_hash로 비식별화.
@@ -711,12 +717,25 @@ baemin_shop_brands, brand_ad_click_metrics, payments.
   사진마다 별도로 다루는 로직(모더레이션, 좋아요 등)이 없어 단순 표시용
   목록이라 정규화 실익이 없다고 판단. 기존에 동기화된 리뷰는 이 컬럼이
   빈 배열로 남고, 다음 동기화부터 채워진다(소급 백필 없음).
-- golden_examples: RAG few-shot 소스. 사장님이 직접 쓰거나 승인한 진짜
-  답글(is_manual=true)과 예시 부족 시 보충하는 순수 AI 생성 모범답안
-  (is_synthetic=true)을 함께 담는다. 검색은 category로 먼저 거르고, 그
-  안에서 embedding(pgvector `vector(1024)`, Voyage AI로 계산, nullable)
-  기반 코사인 거리로 Postgres가 SQL 레벨에서 직접 순위를 매긴다
-  (2026-08-26, 위 "골든 예시 벡터 검색" 절 참고).
+- golden_examples: RAG few-shot 소스. 사장님이 직접 쓴 진짜 답글을 담는다.
+  검색은 category로 먼저 거르고, 그 안에서 embedding(pgvector `vector(1024)`,
+  Voyage AI로 review_text를 벡터화, nullable) 기반 코사인 거리로 Postgres가
+  SQL 레벨에서 직접 순위를 매긴다(2026-08-26, 위 "골든 예시 벡터 검색" 절
+  참고). 묶는 기준은 is_manual/is_synthetic 플래그가 아니라 `source`
+  컬럼이다(2026-10-06 재작성 — 아래 "일화 기억: source 기반 3단계 검색" 절
+  참고). reply_embedding(2026-10-06 추가)은 embedding과 달리 **reply_text**를
+  벡터화한 값이고, 검색이 아니라 경로 C 답글의 말투 일관성 체크에만 쓴다.
+- onboarding_scenarios: 답글 온보딩("훈련카드")이 보여주는 매장×카테고리별
+  가상 리뷰 + 마중물 초안. 사장님이 답하면 그 답글이 golden_examples
+  (source='onboarding', 경로 B)로 승격된다. UNIQUE(store_id, category)로
+  매장×카테고리당 1행만 두고 재사용한다.
+- brand_menu_info: 브랜드(shop_no)별 배민 메뉴관리 화면의 가게소개/원산지/
+  메뉴소개 텍스트와 전체 메뉴 항목(JSONB). RAG 답글 생성의 "사실 근거"
+  의미 기억이다(위 "RAG 메뉴 그라운딩" 절 참고).
+- procedural_rules: LLM 답글 생성에 꽂히는 절차 지시문(아래 "절차 기억:
+  procedural_rules" 절 참고). 전역 테이블 — store_id가 없다.
+- brand_ceo_notices: 브랜드(shop_no)별 배민 사장님공지(아래 "의미 기억:
+  사장님공지" 절 참고).
 - store_style_profile: 매장별 답글 스타일 규칙(5~7줄) 캐싱. 진짜
   골든 예시로만 재생성한다.
 - review_replies: AI 추천 답글 Mock과 사장 최종 답글.
@@ -764,6 +783,170 @@ baemin_shop_brands, brand_ad_click_metrics, payments.
   때문). ad_campaigns(카테고리 기반, 광고 순위 모니터링용)와는 별개.
 - payments: 토스페이먼츠 결제 기록(테스트 키). 일회성 결제만, 정기결제 없음.
 
+### 스키마 변경 절차 (Alembic, 2026-08-06 이후 번복 — 2026-10-06)
+원래 이 문서 맨 아래 "추가 합의 사항"에 "Alembic 제거. schema.sql +
+seed.sql이 DB 정본 산출물"이라고 못박아 뒀었다. 교육 과제물 시절에는
+맞는 결정이었다 — DB가 과제 산출물이었고 운영 중인 데이터가 없었으니
+"스키마 파일 하나 = 정본"이 가장 읽기 쉬웠다. 실 SaaS로 전환하고 Railway에
+실제 데이터가 쌓이는 지금은 그 방식에 **배포 경로가 아예 없다**는 게
+드러났다: AI 에이전트 메모리 아키텍처 작업(procedural_rules,
+brand_ceo_notices, golden_examples 컬럼 3개)을 운영에 반영하려면 사람이
+`ALTER TABLE`을 기억해서 손으로 돌려야 하고, 까먹으면 배포된 코드가 없는
+컬럼을 찾다가 터진다. 이 프로젝트는 정확히 그 "수동 단계 누락" 패턴으로
+이미 두 번 사고를 겪었다 — `crawler/.env.worker`의
+`CREDENTIAL_ENCRYPTION_KEY` 누락(위 "배포 환경(Railway)에서의 로그인 위임"
+절)과 같은 파일의 `ANTHROPIC_API_KEY` 누락(분류가 조용히 실패해 불만
+리뷰가 no_issue로 방치됐던 그 버그, 위 "LLM 기반 답글 생성" 절). 환경변수
+두 번이면 스키마도 반드시 같은 방식으로 터진다고 보고, 사용자 결정으로
+**Alembic을 도입했다**.
+
+새 작업 방식:
+- 스키마를 바꿀 때 `schema.sql`을 직접 손으로 고치지 않는다. 모델
+  (`backend/app/models.py`)을 바꾸고 `cd backend && alembic revision
+  --autogenerate -m "설명"`으로 마이그레이션을 만든 뒤 **사람이 생성 결과를
+  검토·수정**한다(복잡한 변경은 손으로 쓴다).
+- `schema.sql`은 이제 정본이 아니라 **현재 스키마의 사람이 읽는 스냅샷**
+  이다. 마이그레이션이 올라간 뒤 DB에서 다시 뽑아(`pg_dump --schema-only`
+  또는 손으로) 맞춰준다. 용도는 두 가지뿐 — 전체 구조를 한눈에 읽는
+  문서, 그리고 마이그레이션을 하나씩 돌리고 싶지 않은 새 로컬 개발 환경의
+  초기 세팅. 컬럼 물리 순서까지 실제 DB와 일치시켜 둔다(그래서
+  golden_examples는 created_at이 마지막이 아니다 — 뒤 두 컬럼이 ALTER로
+  붙었기 때문). 이 역할을 정리하면서 맨 앞의 `DROP TABLE IF EXISTS` 목록에
+  테이블 4개(golden_examples/store_style_profile/onboarding_scenarios/
+  brand_menu_info)가 빠져 있던 것도 고쳤다 — `CASCADE`는 "이 테이블을
+  참조하는 제약"만 같이 지우고 "참조하는 테이블"은 안 지우기 때문에, 기존
+  로컬 DB에 이 파일을 재적용하면 `relation "golden_examples" already exists`로
+  깨지고 있었다(실측 확인). 이제 처음 적용이든 재적용이든 깨끗하게 돌아간다.
+- 접속 대상은 `alembic.ini`가 아니라 `backend/alembic/env.py`가 읽는
+  `DATABASE_URL` 환경변수다(`app/db.py`와 같은 값). ini에 URL을
+  하드코딩하면 "코드가 보는 DB"와 "마이그레이션이 보는 DB"가 갈라진다.
+- 리비전: `0001`은 커밋 ae2b960 시점(= 메모리 아키텍처 작업 직전)의
+  전체 스키마 **기준선**, `0002`가 이 작업의 DDL 델타 전부다.
+- **운영 반영은 사용자가 직접 하는 수동 단계다**(Railway 배포가 항상
+  수동 `railway up`인 이 프로젝트 관례와 같다). 운영 DB에는 이미 0001
+  시점 스키마가 들어있으므로 **최초 1회만** 기준선을 "이미 적용됨"으로
+  표시한 뒤 올린다:
+
+      # 운영 DATABASE_URL을 가진 환경에서, backend/ 디렉터리에서
+      alembic current          # 비어 있으면 아직 추적 안 되는 상태
+      alembic stamp 0001       # DDL을 돌리지 않고 기준선 도달만 기록
+      alembic upgrade head     # 0002만 실제로 적용된다
+
+  이후부터는 배포할 때마다 `alembic upgrade head` 하나만 돌리면 된다.
+  0001을 stamp 하지 않고 바로 `upgrade head`를 돌리면 이미 있는 테이블을
+  다시 만들려다 실패한다(실패로 끝나고 DDL은 한 트랜잭션이라 깨진 상태로
+  남지는 않는다). 이 절차는 로컬 Postgres의 임시 DB로 양쪽 경로를 실측
+  검증했다 — 빈 DB에서 `upgrade head`를 돌린 결과가 `schema.sql` 적용
+  결과와 `alembic_version` 테이블만 빼고 완전히 동일하고, ae2b960 스키마 +
+  데이터가 있는 DB에서 stamp 후 upgrade하면 0002만 적용되고 기존 행이
+  그대로 남는다. **운영 DB에는 아직 돌리지 않았다.**
+
+### 절차 기억: procedural_rules (2026-10-06)
+답글 생성 프롬프트에 꽂히던 지시문들이 `backend/app/llm/generate.py`에
+문자열 상수로 하드코딩돼 있었다(`_COMPLAINT_TONE_OVERRIDE`, few-shot
+"스타일만 참고, 사건 내용 복사 금지", 메뉴 그라운딩 지시, no_issue 프레이밍,
+"찐사장님 말투" 톤 지시). 코드를 배포하지 않으면 한 줄도 못 고치는
+구조였는데, 이건 "제품 품질 기준"이라 운영 중에 조정할 일이 생긴다 —
+그래서 `procedural_rules` 테이블(`rule_key`/`instruction_text`/`active`/
+`description`)로 옮기고 generate.py는 조회해서 꽂기만 한다. 시드는
+`backend/scripts/seed_procedural_rules.py`가 멱등하게 넣는다(스키마와 데이터를
+섞지 않는 기존 구분 유지 — 마이그레이션에는 시드가 없다).
+
+`store_id`가 없는 **전역** 테이블이다 — 이 규칙들은 "이 AI 제품이 어떻게
+답글을 쓰는가"에 대한 제품 차원의 품질/안전 기준이지 매장별 취향이 아니다
+(매장별로 다르게 하고 싶은 건 `reply_settings`가 맡는다). 여러 매장이
+구독하는 SaaS로 갈수록 오히려 모든 구독자에게 동일하게 적용돼야 하는
+기준이라는 게 분명해진다. **언제 어떤 규칙을 적용할지 판단하는 if/elif는
+그대로 Python에 둔다** — 조건까지 데이터로 표현하는 규칙 엔진은 지금
+규칙 5~6개 규모에 과한 설계라 만들지 않았다. 같이 `classify.py`의
+`delivery` 카테고리 설명도 "배달 지연·파손·라이더 응대"로 넓혔다 —
+안 그러면 "라이더가 불친절했다"가 `service`(가게가 통제 가능한 영역)로
+잘못 분류돼 새 책임 경계 규칙이 걸리지 않는다.
+
+### 의미 기억: 사장님공지 (brand_ceo_notices, 2026-10-06)
+`brand_menu_info`(가게소개/원산지/메뉴소개)에 이어, RAG가 참고할 "이 가게의
+사실" 소스를 하나 더 붙였다 — 사장님광장의 "사장님공지"(`GET
+/v1/review/shops/{shopNo}/ceo/notices`). 리뷰·매출과 똑같은 organic-response
+가로채기 패턴이라(`page.on("response")`, `backend/scrapers/baemin_notices.py`)
+"절대 금지"/"예외 허용" 목록에 새로 여는 항목이 없다. 함께 제안됐던
+"주문안내"는 실측해보니 신규 데이터가 아니라 이미
+`brand_menu_info.menu_intro`로 수집되던 필드였다(API 필드명은 `menuIntro`인데
+사장님광장 UI 탭 이름이 "주문안내").
+
+저장은 공지 1건 = 1행(`brand_ceo_notices`)이고, 이미지는 저장하지 않는다 —
+파이프라인에 vision 호출이 전혀 없어 당장 쓸 데가 없다(YAGNI). 동기화는
+`brand_menu_info`의 30일 스킵 패턴을 그대로 재사용하고(별도 추적 테이블 없이
+`MAX(synced_at)`을 그때그때 계산), 동기화할 때는 그 (connection_id, shop_no)
+행을 전부 지우고 다시 넣는 **전체 교체**다 — 유일한 용도가 "RAG에 넣을 현재
+활성 공지"라 과거 이력을 추적할 이유가 없어서 UNIQUE 제약도 굳이 걸지 않았다
+(지우고 넣으므로 중복이 구조적으로 안 생긴다). RAG에는
+`display_status == "DISPLAY"` AND `block_type == "NONE"`인 공지만 골라
+가게소개/원산지/메뉴소개와 같은 자리에 "사실 근거용"으로 주입한다.
+
+### 일화 기억: source 기반 3단계 검색 + 경로 C (2026-10-06)
+`fetch_golden_examples`의 우선순위를 `is_manual`/`is_synthetic` 플래그 기준에서
+`source` 컬럼 기준 3단계로 재작성했다. 그 플래그로는 아무것도 못 가르고
+있었던 게 이유다 — organic이든 onboarding이든 전부
+`is_manual=true, is_synthetic=false`로 똑같이 들어가서, "사장님이 진짜 리뷰에
+쓴 답글"과 "온보딩 가상 리뷰에 쓴 답글"을 구분할 방법이 아예 없었다(코드가
+둘을 가르는 척하면서 실은 못 가르고 있었다).
+
+- **1단계**: 사람이 직접 쓴 답글(`source` ∈ organic/organic_direct/backfill)
+  중 고신뢰 신호가 있고 `needs_confirmation=false`인 것. 신호는 셋 중
+  하나(OR): 그 리뷰가 들어온 시점의 누적 리뷰 ≤3건, 불만 카테고리
+  (`category != 'no_issue'`), 별점-내용 불일치(`sentiment_conflict`).
+  "이 상황이면 사장님이 직접 쓸 수밖에 없었다"는 정황 신호이고, 텍스트를
+  보고 AI가 썼는지 판별하는 방식(AI가 AI를 탐지하는 셈)은 기각했다.
+  신호는 컬럼으로 저장하지 않고 조회 시점에 `source_review_id`로 연결된
+  `reviews`를 상관 서브쿼리로 세어 계산한다(정규화 원칙 — 저장된 파생값
+  대신 조회 시 계산).
+- **2단계**: 사람이 직접 쓴 답글 중 신호가 없거나 `needs_confirmation=true`인
+  것. 불확실한 데이터는 플래그만 세우고 버리지 않는다.
+- **3단계**: onboarding(가상 리뷰에 쓴 답글). 순수 폴백이라 맨 뒤.
+
+단계 안에서는 기존과 똑같이 embedding 유사도 순위다(단계가 유사도를 이긴다).
+`source='synthetic'`(순수 AI 생성 모범답안으로 예시를 증강하는 메커니즘)은
+CHECK에서 빼고 스크립트도 삭제했다 — 애초에 "명시적으로 채택하지 않음"으로
+기록된 접근("메아리 증폭": 편향만 증폭되고 정보량은 그대로)이라 새 설계에
+들어갈 자리가 없다. `is_synthetic` 컬럼 자체는 되돌릴 여지로 남겼지만 이제
+항상 false다.
+
+**경로 C(`source='organic_direct'`)**: 사장님이 앱을 거치지 않고 배민에 직접
+단 답글이다. `review_sync.py`가 `extract_owner_reply`로 감지해 지금까지
+`ReviewReply`로만 저장하던 것을 golden_example로도 승격한다. 단 이 경로는
+경로 A/B보다 **더 신뢰할 수 있는 게 아니라 구조적 보증이 가장 약하다** —
+사장님이 다른 AI 도구로 만들어 배민에 붙여넣었을 수도 있다(기존 700여 건이
+"별도 AI 도구 + 직접 작성" 혼합이었던 것과 같은 위험). 그래서 승격할 때
+**말투 일관성 체크**를 거친다: 후보 답글의 임베딩이 그 매장의 신뢰 가능한
+예시(경로 A/B = organic/backfill/onboarding) 답글 클러스터와 충분히 가까우면
+통과, 동떨어진 이상치면 `needs_confirmation=true`를 세운다. 저장 자체를
+막지는 않고(데이터를 버리지 않는다는 원칙), 1단계에서만 빼서 2단계로
+내린다 — 시스템이 스스로 "진짜 사장님 말투인지 의심됨"으로 표시한 답글을
+"가장 신뢰할 수 있는" 단계에 올릴 수는 없기 때문이다. 의심되는 소수 건을
+사장님께 확인받는 UI는 아직 범위 밖이다.
+
+이 체크는 **답글끼리 비교한다**(최종 리뷰 C3에서 고침). 처음 구현은
+`golden_examples.embedding`을 기준으로 삼았는데 그 컬럼은 언제나 review_text를
+벡터화한 값이라, 사실 "이 새 리뷰가 과거 리뷰들과 내용이 비슷한가"를 재고
+있었다 — 묻고 싶은 질문("이 답글이 이 가게 말투인가")과 아무 상관이 없는
+값이었다(설계 문서의 참고 코드 자체에 있던 버그). reply_text를 벡터화한
+`reply_embedding` 컬럼을 따로 추가해 그걸 기준으로 바꿨고, 기존 행은
+`backend/scripts/backfill_golden_example_reply_embeddings.py`로 채운다(멱등,
+`reply_embedding IS NULL`인 행만). 베이스라인에 **onboarding도 포함한다**
+(같은 리뷰에서 지적) — 온보딩 답변도 사장님이 훈련카드 시나리오에 직접 쓴
+글이라 똑같이 유효한 신뢰 신호이고, 빼놓으면 온보딩 데이터밖에 없는 신생
+매장은 베이스라인이 영원히 0이라 정작 이 체크가 가장 필요한 매장에서
+체크가 통째로 무력화된다. 반대로 `organic_direct`는 지금 검증 중인 경로
+자신이라 계속 제외한다(자기 자신을 기준으로 재면 의미가 없다).
+
+**자동답글 제출 직후 즉시 커밋**(같은 리뷰 C1): 경로 C가 생기면서 신규 리뷰
+자동답글 경로에도 소급 처리 경로와 같은 즉시 커밋이 필요해졌다. 원래는
+"rollback되면 Review 행이 사라지고 다음 동기화가 `extract_owner_reply`로
+재감지하니 자기치유된다"고 봤지만, 그 재감지된 답글은 사실 우리가 방금
+제출한 AI 산출물인데 경로 C가 "사장님이 직접 쓴 답글"로 오인해 승격시킨다 —
+AI가 자기 산출물을 다시 학습하는 순환 오염이다. 그래서 제출 성공 직후
+`db.commit()`으로 그 리뷰+답글만은 확정적으로 남긴다.
+
 ### 핵심 관계 (모든 관계에 외래키와 삭제 정책 명시)
 - users 1:N stores
 - stores N:M platforms (중간 테이블 store_platform_connections)
@@ -784,6 +967,10 @@ baemin_shop_brands, brand_ad_click_metrics, payments.
 - review_sync_jobs는 store, platform 참조
 - baemin_shop_brands는 store_platform_connections 참조
 - brand_ad_click_metrics는 store와 platform 참조 (shop_no는 FK가 아니라 값만 저장)
+- stores 1:N onboarding_scenarios (UNIQUE(store_id, category))
+- brand_menu_info, brand_ceo_notices는 store_platform_connections 참조
+  (shop_no는 FK가 아니라 값만 저장 — brand_ad_click_metrics와 같은 관례)
+- procedural_rules는 아무것도 참조하지 않는다 (전역 테이블, store_id 없음)
 
 ### 정규화 원칙
 - 매출 요약은 별도 테이블로 저장하지 않는다. daily_settlements를 기간별로
@@ -993,4 +1180,9 @@ scrapers/baemin_ads.py`)의 UI 흐름은 2026-08-18 실 계정 캡처를 기준�
 - orders에 platform_id FK 추가 (주문내역 플랫폼 표시, 플랫폼별 분석용).
 - ad_performance_metrics는 원본(광고비·클릭수·광고주문수·광고매출)만 저장.
   CPC/CVR/AOV/ACoS/점수는 acos.py가 조회 시 실제 공식으로 계산 (정규화 원칙 준수).
-- Alembic 제거. schema.sql + seed.sql이 DB 정본 산출물. SQLAlchemy 모델은 schema.sql에 1:1로 맞춤.
+- ~~Alembic 제거. schema.sql + seed.sql이 DB 정본 산출물.~~ **2026-10-06에
+  번복했다** — 스키마 변경은 Alembic 마이그레이션으로 하고, schema.sql은
+  현재 스키마의 사람이 읽는 스냅샷이 됐다(위 "스키마 변경 절차 (Alembic)"
+  절 참고). seed.sql은 그대로 Mock 데이터의 정본이다. SQLAlchemy 모델을
+  스키마에 1:1로 맞춘다는 원칙은 유지되지만, 방향이 반대가 됐다 — 이제
+  모델이 먼저이고 마이그레이션/schema.sql이 그걸 따른다.

@@ -1,7 +1,12 @@
 -- ============================================================================
 -- Delivery Review & Store Insight MVP — PostgreSQL Schema
 -- ============================================================================
--- 22개 테이블. 모든 FK에 ON DELETE 정책 명시.
+-- 28개 테이블. 모든 FK에 ON DELETE 정책 명시.
+--
+-- 이 파일은 2026-10-06부터 **정본이 아니라 현재 스키마의 스냅샷**이다.
+-- 스키마를 바꿀 때 이 파일을 손으로 고치지 말고 Alembic 마이그레이션
+-- (backend/alembic/)을 만들고, 이 파일은 그 뒤 DB에서 다시 뽑아 맞춘다.
+-- 자세한 절차는 CLAUDE.md "스키마 변경 절차 (Alembic)" 절 참고.
 --
 -- 삭제 정책 원칙:
 --   ON DELETE CASCADE  — 부모에 종속된 소유 데이터 (사장 탈퇴 → 매장/주문/리뷰 연쇄 삭제)
@@ -21,9 +26,17 @@ BEGIN;
 -- golden_examples.embedding(벡터 검색, 2026-08-26)이 쓰는 pgvector 확장.
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- 28개 테이블 전부를 나열한다. CASCADE는 "이 테이블을 참조하는 제약"을 같이
+-- 지울 뿐 "참조하는 테이블"까지 지우지는 않아서, 빠진 테이블이 하나라도 있으면
+-- 이 파일을 기존 DB에 재적용할 때 `relation ... already exists`로 깨진다
+-- (golden_examples/store_style_profile/onboarding_scenarios/brand_menu_info가
+-- 실제로 그 상태였다 — 2026-10-06 실측 확인해 채웠다).
 DROP TABLE IF EXISTS
-    payments, brand_ad_click_metrics, brand_ceo_notices, baemin_shop_brands, review_sync_jobs, signup_verifications, social_accounts, alerts, ad_rank_snapshots,
-    ad_performance_metrics, ad_campaigns, repurchase_metrics, daily_settlements, review_replies,
+    procedural_rules, brand_ceo_notices, brand_menu_info, onboarding_scenarios,
+    payments, brand_ad_click_metrics, baemin_shop_brands, review_sync_jobs,
+    signup_verifications, social_accounts, store_style_profile, golden_examples,
+    alerts, ad_rank_snapshots, ad_performance_metrics, ad_campaigns,
+    repurchase_metrics, daily_settlements, review_replies,
     reviews, orders, reply_settings, reply_styles, subscriptions, store_platform_connections,
     platforms, stores, users
 CASCADE;
