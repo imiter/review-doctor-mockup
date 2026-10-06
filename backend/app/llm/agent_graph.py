@@ -181,7 +181,20 @@ def fix_draft_node(state: AgentState) -> dict:
     쪽에도 "LLM 재판단 금지" 원칙이 그대로 적용된다). 복붙 위반이 있으면
     (이모지와 동시에 있어도) 겹친 예시를 콕 집어 "그 문장만 피해서 다시
     써라"는 좁은 지시로 딱 한 번 재생성한다 — 막연한 "다시 해봐"는
-    쓰지 않는다. 재생성 결과에도 이모지 제거를 다시 적용한다."""
+    쓰지 않는다. 재생성 결과에도 이모지 제거를 다시 적용한다.
+
+    재생성할 때는 **겹친 예시를 few-shot 목록에서 아예 빼고** 호출한다.
+    그 예시를 그대로 남겨두면 프롬프트가 "이 문장을 쓰지 마라"는 지시와
+    "이 문장이 좋은 예시다"라는 데모를 동시에 들고 가는, 서로 모순되는
+    신호가 된다 — 이 프로젝트는 이모지 작업에서 이미 "텍스트 지시만으로는
+    few-shot 데모를 안정적으로 못 이긴다"는 걸 실측으로 확인하고, 지시를
+    더 세게 쓰는 대신 예시 쪽에서 모순 신호를 지우는 방식으로 해결했다
+    (CLAUDE.md "no_issue 리뷰도 RAG로 통합" 절의 _strip_emoji 처리). 같은
+    이유로 여기서도 지목한 예시 하나만 빼고, 나머지 예시는 그대로 남겨
+    말투 그라운딩은 유지한다. 남은 예시가 하나도 없게 되는 경우(겹친 게
+    유일한 예시였을 때)도 그대로 둔다 — 그라운딩할 다른 예시가 실제로
+    없는 상태이고, _build_system_prompt가 빈 목록을 "(아직 참고할 예시가
+    없습니다.)"로 처리한다."""
     violations = state["violations"]
     retry_count = state["retry_count"] + 1
     tone_overridden = state["tone_overridden"]
@@ -200,7 +213,10 @@ def fix_draft_node(state: AgentState) -> dict:
         f'방금 만든 답글이 다음 예시와 너무 비슷합니다: "{match.reply_text}". '
         "이 문장을 그대로 쓰지 말고, 같은 상황이지만 표현을 완전히 새로 바꿔서 다시 작성하세요."
     )
-    patch = generate_draft_node(state, extra_instruction=extra_instruction)
+    remaining_examples = [ex for ex in (state.get("examples") or []) if ex is not match]
+    patch = generate_draft_node(
+        {**state, "examples": remaining_examples}, extra_instruction=extra_instruction,
+    )
     return {
         "draft": _apply_tone_cleanup(patch["draft"], tone_overridden),
         "retry_count": retry_count,

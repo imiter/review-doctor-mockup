@@ -13,11 +13,13 @@ from app.llm.agent_graph import (
 from app.models import GoldenExample, Review
 
 
-def _golden(reply_text: str, *, category: str = "food_quality", store_id: int = 1) -> GoldenExample:
+def _golden(
+    reply_text: str, *, category: str = "food_quality", store_id: int = 1, id: int = 1,
+) -> GoldenExample:
     """영속화하지 않는 GoldenExample — 노드 단위 테스트는 state에 객체를
     직접 꽂아 넣기만 하므로 DB가 필요 없다."""
     return GoldenExample(
-        id=1, store_id=store_id, category=category, review_text="r",
+        id=id, store_id=store_id, category=category, review_text="r",
         reply_text=reply_text, is_manual=True, is_synthetic=False, source="organic",
     )
 
@@ -278,7 +280,7 @@ def test_fix_draft_regenerates_with_targeted_instruction_for_copy_paste(monkeypa
     captured = {}
 
     def _fake_call(system, user, max_tokens):
-        captured["user"] = user
+        captured["system"], captured["user"] = system, user
         return "새로 생성된 답글"
 
     monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call)
@@ -294,6 +296,61 @@ def test_fix_draft_regenerates_with_targeted_instruction_for_copy_paste(monkeypa
     assert "예시 답글 원문" in captured["user"]
     assert result["draft"] == "새로 생성된 답글"
     assert result["retry_count"] == 1
+    # 지목한 예시가 유일한 예시였으면 few-shot 목록은 비는 게 정상이다 —
+    # 그라운딩할 다른 예시가 실제로 없는 상태이므로 특별 취급하지 않는다.
+    assert "(아직 참고할 예시가 없습니다.)" in captured["system"]
+
+
+def test_fix_draft_drops_matched_example_from_few_shot_but_keeps_others(monkeypatch):
+    """복붙 재생성 프롬프트는 "이 문장 쓰지 마라"는 지시와 "이 문장이 좋은
+    예시다"라는 데모를 동시에 들고 가면 안 된다 — 이 프로젝트는 이모지
+    작업에서 이미 텍스트 지시만으로는 few-shot 데모를 못 이긴다는 걸
+    실측했고, 예시 쪽에서 모순 신호를 지우는 방식으로 해결했다. 겹친 예시
+    하나만 빼고 나머지 예시는 말투 그라운딩용으로 남아야 한다."""
+    captured = {}
+
+    def _fake_call(system, user, max_tokens):
+        captured["system"], captured["user"] = system, user
+        return "새로 생성된 답글"
+
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call)
+    matched = _golden("겹친 예시 원문", id=1)
+    other = _golden("관계없는 다른 예시 원문", id=2)
+    state = _draft_state(
+        draft="겹친 예시 원문", violations=["copy_paste"],
+        copy_paste_match=matched, examples=[matched, other],
+    )
+
+    result = fix_draft_node(state)
+
+    # 겹친 예시는 few-shot 블록(시스템 프롬프트)에서 빠졌지만,
+    assert "겹친 예시 원문" not in captured["system"]
+    # 유저 메시지의 "이것만 피해라" 지시문에는 그대로 들어가야 한다.
+    assert "겹친 예시 원문" in captured["user"]
+    # 나머지 예시는 말투 그라운딩용으로 살아있어야 한다.
+    assert "관계없는 다른 예시 원문" in captured["system"]
+    assert result["draft"] == "새로 생성된 답글"
+    assert result["retry_count"] == 1
+
+
+def test_fix_draft_does_not_mutate_examples_in_returned_state(monkeypatch):
+    """few-shot에서 빼는 건 재생성 호출 한 번에 한정된다 — 그래프 state의
+    examples를 영구히 줄여버리면 fix_draft 뒤 다시 도는 verify_draft가 그
+    예시와의 복붙을 더는 못 잡는다."""
+    monkeypatch.setattr(
+        "app.llm.agent_graph.call_sonnet_via_langgraph",
+        lambda system, user, max_tokens: "새로 생성된 답글",
+    )
+    matched = _golden("겹친 예시 원문")
+    state = _draft_state(
+        draft="겹친 예시 원문", violations=["copy_paste"],
+        copy_paste_match=matched, examples=[matched],
+    )
+
+    result = fix_draft_node(state)
+
+    assert "examples" not in result  # state의 examples를 덮어쓰지 않는다
+    assert state["examples"] == [matched]  # 넘겨받은 리스트 자체도 그대로
 
 
 def test_fix_draft_strips_emoji_from_regenerated_draft_when_tone_overridden(monkeypatch):
