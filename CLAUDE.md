@@ -651,6 +651,90 @@ Voyage가 배치 안에 빈 문자열이 하나라도 있으면 요청 전체를
 "null"(텍스트)로 저장돼, `embedding.is_(None)` 같은 `IS NULL` 조회가
 전혀 매칭되지 않았다(백필 스크립트 테스트에서 실측 확인).
 
+### 답글 생성의 LangGraph 에이전트화 (예외 허용 아님 — 기존 RAG 파이프라인
+재구성, DB 설계 "절차/의미/일화 기억" 작업의 후속)
+원래 `generate_ai_reply`(`backend/app/llm/generate.py`) 하나가 기억 조회
+→ 프롬프트 빌드 → Sonnet 호출 → 이모지 스트립을 전부 순서대로 처리하는
+단일 함수였으나, "진짜 사장님 말투 재현"이라는 북극성 목표를 지키면서도
+검증·재시도·보류를 구조적으로 넣을 수 있도록 LangGraph `StateGraph`로
+재구성했다(2026-10-06, 설계
+`docs/superpowers/specs/2026-10-03-ai-agent-llmops-reply-design.md` 2절,
+구현 `backend/app/llm/agent_graph.py`). `generate_ai_reply`의 시그니처/
+반환형은 그대로라 호출부(`reviews.py`/`reply_onboarding.py`)는 수정이
+전혀 필요 없다 — 내부에서 `run_agent(...).content`를 돌려주는 얇은
+래퍼가 됐다.
+
+그래프는 노드 5개다: `retrieve_memory`(기존 로직을 그대로 옮김) →
+`generate_draft`(Sonnet 호출, `langchain-anthropic`의 `ChatAnthropic` 경유 —
+`client.py`의 raw Anthropic SDK 경로와는 별개로
+`backend/app/llm/langchain_client.py`에 새로 둔 래퍼) → `verify_draft`
+(결정론적 체크만, LLM 자기비판 없음 — 이모지 규칙 위반과 few-shot 예시
+복붙 여부) → 위반 있으면 `fix_draft`(최대 2회 재시도) → `verify_draft`
+재검증 → `finalize`. **검증에 LLM 재판단을 쓰지 않은 이유**: 모델이 자기
+출력을 다시 평가하면 특징적인 말투가 무난한 "도움되는 조수" 톤으로
+수렴하는 경향이 있어, RAG를 도입한 목적 자체(사장님 실제 말투 재현)와
+정면으로 충돌한다고 판단했다.
+
+**자동 제출 게이트(위 "안전 게이트 강화" 절의 별점 5점/no_issue/비민감/
+불일치없음 네 조건)는 이번에 전혀 넓히지 않았다** — 2026-10-05엔 이
+루프를 새 안전장치로 삼아 범위를 한 번에 넓히기로 했었으나, 아직 실측
+검증이 부족하다는 판단으로 사용자가 단계적 적용으로 되돌렸다(설계 문서
+2.1절 "적용 범위 확대" 참고). 지금 바뀐 건 "기존 좁은 범위 안의
+안전성"이다 — 재시도 2회를 다 써도 검증을 못 통과하면 **더 이상
+무조건 제출하지 않고 보류한다**. 보류는 새 테이블/컬럼 없이 기존 수동
+"AI 추천 답글" 메커니즘(`ReviewReply(reply_type="ai_draft")` +
+`review.status="pending"`)을 재사용하므로 프런트엔드 변경도 없다 — 보류된
+리뷰는 "AI 추천 답글" 화면에 검증 실패한 마지막 초안이 이미 채워진 채로
+뜬다. 동시에 `alerts`에 `unanswered_review` 알림을 남긴다(2026-10-06 최종
+리뷰 — 처음엔 안 남겼다가, 알림이 없으면 자동답글이 조용히 멈춰도
+사장님이 알 방법이 전혀 없다는 지적을 받아 추가했다. `job.error_message`도
+그대로 None이라 이게 유일한 신호다).
+
+**신규 리뷰 자동답글 경로도 즉시 커밋으로 바뀌었다** — 경로 C(배민 직접
+답글 승격, 위 "일화 기억: source 기반 3단계 검색 + 경로 C" 절)가 생기면서,
+자동답글 제출/보류 직후 rollback이 나면 다음 동기화가 그 결과를
+`extract_owner_reply`로 "사장님이 직접 쓴 답글"로 오인해 AI 산출물을 다시
+학습하는 순환 오염이 생길 수 있다는 걸 2026-10-06 최종 리뷰에서 확인했다 —
+그래서 제출 성공/보류 둘 다 그 자리에서 `db.commit()`한다(소급 처리
+경로는 이미 그랬었고, 신규 리뷰 경로도 같은 이유로 맞췄다).
+
+**새로 생긴 필수 배포 단계 — 크롤 워커에도 `pip install` 필요**:
+`langchain-anthropic`/`langgraph`가 `backend/requirements.txt`에
+추가됐고, `app/main.py` → `store_connections.py` → `review_sync.py` →
+`agent_graph.py` 경로로 **모듈 import 시점에** 로드된다. 크롤 워커
+(맥북)도 정확히 같은 `app.main:app`을 띄우는 프로세스이고(위 "배민
+데이터 자동 동기화 스케줄러" 절 참고), CLAUDE.md가 이미 두 번(위
+"배포 환경(Railway)에서의 로그인 위임"의 `CREDENTIAL_ENCRYPTION_KEY`
+누락, "LLM 기반 답글 생성"의 `ANTHROPIC_API_KEY` 누락) 겪은 "워커 쪽
+환경만 깜빡 안 맞춰서 조용히 깨지는" 패턴과 같은 종류의 위험이다 — 다만
+이번엔 조용히 일부만 깨지는 게 아니라, 워커가 `ModuleNotFoundError`로
+**아예 기동을 못 해** 가게 연결/데이터 동기화/자동답글 전체가 한 번에
+죽는다. **배포(Railway)와 워커(맥북) 양쪽 다 `pip install -r
+backend/requirements.txt`를 다시 돌려야 한다** — 둘 다 아직 실제로
+돌리지 않았다.
+
+**운영 반영 순서 — Plan 1(Alembic)과 겹친다**: 위 "스키마 변경 절차
+(Alembic)" 절이 이미 적어둔 대로, Plan 1의 마이그레이션(`0001`
+stamp → `0002` upgrade → `seed_procedural_rules.py` →
+`backfill_golden_example_reply_embeddings.py`)도 아직 운영 DB에 반영
+안 된 상태다. 이 LangGraph 작업은 **스키마 변경이 없다**(새 테이블/
+컬럼 없음 — 2026-10-06 최종 리뷰에서 직접 확인) — 그래서 Plan 1의
+DB 반영과는 독립적으로 아무 때나 먼저 배포해도 되지만, 위 `pip
+install` 단계는 양쪽 프로세스 모두에 반드시 같이 가야 한다. 운영
+배포 전 사람이 한 번에 처리해야 할 수동 단계가 Plan 1 몫(DB
+마이그레이션+시드/백필 2개)과 Plan 2 몫(워커 `pip install`)으로 쌓여
+있다는 걸 기록해둔다 — 따로따로 발견하기보다 한 번에 묶어서 처리하는
+게 안전하다.
+
+**`langchain-anthropic`/`langgraph`만 상한을 둬서 버전을 제한한다**
+(`langchain-anthropic>=1.7,<2`, `langgraph>=1,<2>`) — 이 프로젝트는
+의존성을 버전 고정 없이 쓰는 관례지만, `langchain_client.py`는 설치된
+버전의 내부 동작(pydantic 필드 별칭, 응답 content가 문자열인지 블록
+리스트인지)에 명시적으로 의존해(파일 docstring 참고) 메이저 업그레이드
+한 번이 백엔드 전체 import를 깨뜨릴 수 있다고 2026-10-06 최종 리뷰에서
+지적받았다 — 하한은 안 걸고 상한만 둬서 "버전 안 고정" 관례의 취지는
+유지하면서 이 위험만 막는다.
+
 ### 모바일 앱 (예외 허용)
 원래 "Flutter 앱 구현 금지"로 모바일 앱 자체를 범위 밖으로 뒀으나, 웹과 같은
 백엔드를 쓰는 React Native 앱을 추가하기로 결정했다(추후 결정으로 예외 허용 —
