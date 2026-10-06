@@ -99,6 +99,37 @@ def test_save_final_reply_schedules_feedback_when_draft_has_trace_id(client, aut
     assert calls[0]["source_review_id"] == review.id
 
 
+def test_save_final_reply_schedules_feedback_even_when_approved_verbatim(client, auth_headers, db_session, seeded_user, platforms, monkeypatch):
+    """승격 if-블록(draft.content != reply.content)은 안 타지만(초안을 그대로
+    승인), 측정은 여전히 트리거돼야 한다 — 두 로직이 서로 독립적이라는 걸
+    확인하는 테스트(미래의 "단순화"가 측정 호출을 승격 if-블록 안으로 옮기는
+    실수를 막는다)."""
+    import app.routers.reviews as reviews_mod
+    from app.models import GoldenExample, ReviewReply
+
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
+    calls = []
+    monkeypatch.setattr(reviews_mod, "record_draft_feedback_background", lambda **kwargs: calls.append(kwargs))
+
+    store = seeded_user["store"]
+    review = make_review(db_session, store, platforms, rating=5, content="맛있어요")
+    draft = ReviewReply(
+        review_id=review.id, reply_type="ai_draft", style_id=None,
+        content="AI 초안 그대로", trace_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(draft)
+    db_session.commit()
+
+    resp = client.post(f"/reviews/{review.id}/reply", json={"content": "AI 초안 그대로"}, headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["trace_id"] == "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    assert db_session.query(GoldenExample).count() == 0  # 초안 그대로 승인했으니 승격은 되지 않는다
+
+
 def test_save_final_reply_skips_feedback_when_no_draft_existed(client, auth_headers, db_session, seeded_user, platforms, monkeypatch):
     import app.routers.reviews as reviews_mod
 
