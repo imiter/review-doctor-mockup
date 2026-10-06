@@ -84,11 +84,17 @@ def upgrade() -> None:
     # 증강하는 메커니즘)을 제거하고 'organic_direct'(경로 C)를 넣는다.
     # 제약 이름은 Postgres가 자동 생성하는 `<table>_<column>_check` 규칙을
     # 따르므로(원본 schema.sql이 인라인 CHECK로 만들었다) 그 이름으로
-    # 지운다. 'synthetic' 행이 운영 DB에 실제로 있으면 새 CHECK 추가가
-    # 실패하는데, 그건 조용히 통과하는 것보다 나은 결과다 — 이 계획이
-    # synthetic 메커니즘 자체를 제거했으므로 그런 행은 사람이 보고
-    # 결정해야 한다(실측: 이 메커니즘은 끝까지 "채택하지 않음"으로
-    # 남아 생성 경로가 없었다).
+    # 지운다.
+    #
+    # 'synthetic' 행이 운영 DB에 실제로 있으면 새 CHECK 추가가 실패하는데
+    # (CheckViolation, 전체 롤백 — 재시도 가능), 조용히 통과하는 것보다
+    # 나은 결과라 의도적으로 막지 않는다. 정정: 이 메커니즘에 생성 경로가
+    # 없었다는 이전 메모는 틀렸다 — `seed_synthetic_golden_examples.py`가
+    # 2026-08-22~10-06 약 6주간 실제로 존재했고, Task 8(4fc8d42) 전까지는
+    # `fetch_golden_examples`가 이 행들을 실제로 읽어 썼다(배포 전 반드시
+    # `SELECT count(*) FROM golden_examples WHERE source='synthetic'`로
+    # 확인할 것 — 있으면 CHECK 추가 전에 사람이 보고 `organic`/`backfill`
+    # 중 적절한 쪽으로 재분류하거나 삭제를 결정한다).
     op.execute("ALTER TABLE golden_examples DROP CONSTRAINT IF EXISTS golden_examples_source_check")
     op.execute("""
         ALTER TABLE golden_examples ADD CONSTRAINT golden_examples_source_check

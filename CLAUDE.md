@@ -825,21 +825,49 @@ brand_ceo_notices, golden_examples 컬럼 3개)을 운영에 반영하려면 사
 - **운영 반영은 사용자가 직접 하는 수동 단계다**(Railway 배포가 항상
   수동 `railway up`인 이 프로젝트 관례와 같다). 운영 DB에는 이미 0001
   시점 스키마가 들어있으므로 **최초 1회만** 기준선을 "이미 적용됨"으로
-  표시한 뒤 올린다:
+  표시한 뒤 올린다. **DDL뿐 아니라 시드/백필 스크립트 2개까지가 한
+  세트다** — 이 중 하나라도 빠지면 조용히 기능 일부가 죽은 채로 남는다
+  (아래 각 스텝 옆에 왜 빠지면 안 되는지 적어둔다):
 
       # 운영 DATABASE_URL을 가진 환경에서, backend/ 디렉터리에서
+
+      # 0) 0001의 CHECK 교체가 실패하지 않는지 먼저 확인 — synthetic
+      #    메커니즘은 "끝까지 채택 안 함"이 아니라 2026-08-22~10-06 약
+      #    6주간 실제로 존재했었다(seed_synthetic_golden_examples.py,
+      #    4fc8d42에서 삭제됨). 그 행이 남아있으면 새 CHECK 추가가
+      #    실패한다(안전하게 롤백되긴 하지만, 미리 사람이 보는 게 낫다).
+      psql "$DATABASE_URL" -c "SELECT count(*) FROM golden_examples WHERE source='synthetic'"
+      # 0건이 아니면 0002를 돌리기 전에 그 행들을 organic/backfill 중
+      # 적절한 쪽으로 재분류하거나 삭제할지 사람이 먼저 결정한다.
+
       alembic current          # 비어 있으면 아직 추적 안 되는 상태
       alembic stamp 0001       # DDL을 돌리지 않고 기준선 도달만 기록
       alembic upgrade head     # 0002만 실제로 적용된다
 
-  이후부터는 배포할 때마다 `alembic upgrade head` 하나만 돌리면 된다.
-  0001을 stamp 하지 않고 바로 `upgrade head`를 돌리면 이미 있는 테이블을
-  다시 만들려다 실패한다(실패로 끝나고 DDL은 한 트랜잭션이라 깨진 상태로
-  남지는 않는다). 이 절차는 로컬 Postgres의 임시 DB로 양쪽 경로를 실측
-  검증했다 — 빈 DB에서 `upgrade head`를 돌린 결과가 `schema.sql` 적용
-  결과와 `alembic_version` 테이블만 빼고 완전히 동일하고, ae2b960 스키마 +
-  데이터가 있는 DB에서 stamp 후 upgrade하면 0002만 적용되고 기존 행이
-  그대로 남는다. **운영 DB에는 아직 돌리지 않았다.**
+      # 1) procedural_rules 시드 — 안 돌리면 에러는 안 나지만
+      #    generate.py의 _FALLBACK_RULES(축약된 대체 문구)로 조용히
+      #    대체된다 — 그중 no_issue_framing 대체 문구는 2026-08-24에
+      #    고쳤던 "구체적 취향/요청 반영" 문구가 빠져있어, 안 돌리면 그
+      #    버그가 조용히 되살아난다.
+      python -m scripts.seed_procedural_rules
+
+      # 2) golden_examples.reply_embedding 백필 — VOYAGE_API_KEY 필요.
+      #    안 돌리면 기존 행 전부 reply_embedding IS NULL이라
+      #    check_voice_consistency의 비교 기준(baseline) 자체가 0건으로
+      #    남는다 — 즉 이번에 고친 C3(경로 C 말투 일관성 체크)가 운영에서
+      #    그냥 작동을 안 하는 상태로 남는다. 이 스텝이 제일 중요하다.
+      python -m scripts.backfill_golden_example_reply_embeddings
+
+  이후 배포할 때마다 DDL이 또 바뀌었으면 `alembic upgrade head`만 다시
+  돌리면 된다(시드/백필은 최초 1회성 — 새 마이그레이션이 새 규칙/컬럼을
+  또 추가하지 않는 한 반복 불필요). 0001을 stamp 하지 않고 바로
+  `upgrade head`를 돌리면 이미 있는 테이블을 다시 만들려다 실패한다
+  (실패로 끝나고 DDL은 한 트랜잭션이라 깨진 상태로 남지는 않는다). 이
+  절차는 로컬 Postgres의 임시 DB로 양쪽 경로를 실측 검증했다 — 빈 DB에서
+  `upgrade head`를 돌린 결과가 `schema.sql` 적용 결과와 `alembic_version`
+  테이블만 빼고 완전히 동일하고, ae2b960 스키마 + 데이터가 있는 DB에서
+  stamp 후 upgrade하면 0002만 적용되고 기존 행이 그대로 남는다. **운영
+  DB에는 아직 돌리지 않았다.**
 
 ### 절차 기억: procedural_rules (2026-10-06)
 답글 생성 프롬프트에 꽂히던 지시문들이 `backend/app/llm/generate.py`에
