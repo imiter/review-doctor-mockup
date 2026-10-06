@@ -91,17 +91,24 @@ def _confidence_signal_exists(store_id: int):
     )
 
 
-def _query_ranked(db: Session, store_id: int, category: str, query_embedding: list[float] | None, limit: int, *, sources: tuple[str, ...], require_signal: bool | None = None) -> list[GoldenExample]:
-    """한 단계(sources + 신호 조건)에 해당하는 예시를 유사도 순으로 limit개
-    까지 가져온다. require_signal=None이면 신호를 따지지 않는다(3단계)."""
+def _query_ranked(db: Session, store_id: int, category: str, query_embedding: list[float] | None, limit: int, *, sources: tuple[str, ...], confidence: bool | None = None) -> list[GoldenExample]:
+    """한 단계(sources + 신뢰 조건)에 해당하는 예시를 유사도 순으로 limit개
+    까지 가져온다.
+
+    confidence=True  → 1단계: 고신뢰 신호가 있고 needs_confirmation=False인 것만.
+    confidence=False → 2단계: 그 나머지 전부(신호가 없는 것, 그리고 신호가
+                        있어도 needs_confirmation=True라 1단계에서 빠진 것) —
+                        1단계 조건의 정확한 여집합이라 겹치거나 빠지는 행이 없다.
+    confidence=None  → 신뢰 조건을 전혀 안 따진다(3단계, onboarding)."""
     q = select(GoldenExample).where(
         GoldenExample.store_id == store_id,
         GoldenExample.category == category,
         GoldenExample.source.in_(sources),
     )
-    if require_signal is not None:
+    if confidence is not None:
         signal = _confidence_signal_exists(store_id)
-        q = q.where(signal if require_signal else ~signal)
+        tier1_condition = signal & GoldenExample.needs_confirmation.is_(False)
+        q = q.where(tier1_condition if confidence else ~tier1_condition)
 
     if query_embedding is not None:
         # embedding이 있는 행을 먼저(유사도 오름차순), 없는 행은 그 뒤에
@@ -120,8 +127,16 @@ def _query_ranked(db: Session, store_id: int, category: str, query_embedding: li
 def fetch_golden_examples(db: Session, store_id: int, category: str, query_text: str, limit: int = 3) -> list[GoldenExample]:
     """골든 예시 조회, source 기반 3단계 우선순위:
 
-    1단계 — 사람이 직접 쓴 답글(_HUMAN_SOURCES) 중 고신뢰 신호가 있는 것
-    2단계 — 사람이 직접 쓴 답글 중 신호가 없는 것
+    1단계 — 사람이 직접 쓴 답글(_HUMAN_SOURCES) 중 고신뢰 신호가 있는 것,
+            단 needs_confirmation=True(경로 C에서 말투 이상치로 찍힌 미확인
+            행, promote_direct_reply_to_golden_example 참고)는 제외한다 —
+            시스템이 스스로 "진짜 사장님 말투인지 의심됨"으로 표시한 답글을
+            그 반대인 "가장 신뢰할 수 있는" 단계에 올릴 수는 없다(2026-10-06).
+    2단계 — 사람이 직접 쓴 답글 중 신호가 없는 것, 또는 신호가 있어도
+            needs_confirmation=True라 1단계에서 제외된 것. 데이터 자체는
+            여전히 유효하므로 버리지 않고 이 단계로 내린다 — 불확실한
+            데이터는 플래그만 세우고 버리지 않는다는 이 프로젝트의 원칙과
+            같다(CLAUDE.md).
     3단계 — onboarding(가상 리뷰에 쓴 답글). 진짜 리뷰에 대한 답글이 모자랄
             때만 쓰는 순수 폴백이라 맨 뒤다.
 
@@ -134,14 +149,14 @@ def fetch_golden_examples(db: Session, store_id: int, category: str, query_text:
 
     picked = _query_ranked(
         db, store_id, category, query_embedding, limit,
-        sources=_HUMAN_SOURCES, require_signal=True,
+        sources=_HUMAN_SOURCES, confidence=True,
     )
     if len(picked) >= limit:
         return picked
 
     picked += _query_ranked(
         db, store_id, category, query_embedding, limit - len(picked),
-        sources=_HUMAN_SOURCES, require_signal=False,
+        sources=_HUMAN_SOURCES, confidence=False,
     )
     if len(picked) >= limit:
         return picked

@@ -37,6 +37,39 @@ def test_refresh_creates_profile_from_manual_examples_only(db_session, seeded_us
     assert "이물질이 나왔어요" in captured["user"]
 
 
+def test_refresh_excludes_needs_confirmation_examples(db_session, seeded_user, monkeypatch):
+    """needs_confirmation=True(경로 C — 배민에 직접 단 답글이 기존 신뢰
+    예시 클러스터와 말투가 어긋나는 이상치로 판정된 것)인 예시는
+    is_manual=true/is_synthetic=false를 만족해도 스타일 요약 입력에서
+    빠져야 한다 — 아직 사람이 확인하지 않은, 진짜 사장님 말투인지 의심되는
+    답글이 "이 사장님의 말투" 요약에 섞이면 안 된다."""
+    sid = seeded_user["store"].id
+    confirmed = _make_example(db_session, sid, is_manual=True, is_synthetic=False)
+    unconfirmed = GoldenExample(
+        store_id=sid, category="hygiene", review_text="의심스러운 리뷰 본문",
+        reply_text="의심스러운 답글 본문",
+        is_manual=True, is_synthetic=False, source="organic_direct",
+        needs_confirmation=True, created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(unconfirmed)
+    db_session.commit()
+
+    captured = {}
+
+    def _fake_call_sonnet(system, user, **kw):
+        captured["user"] = user
+        return "- 구체적 원인을 설명한다"
+
+    monkeypatch.setattr(style_profile.client, "call_sonnet", _fake_call_sonnet)
+
+    style_profile.refresh_store_style_profile(db_session, sid)
+
+    profile = db_session.query(StoreStyleProfile).filter_by(store_id=sid).one()
+    assert profile.generated_from_count == 1  # needs_confirmation 예시는 제외
+    assert "의심스러운 리뷰 본문" not in captured["user"]
+    assert "이물질이 나왔어요" in captured["user"]  # confirmed 예시는 그대로 반영
+
+
 def test_refresh_updates_existing_profile(db_session, seeded_user, monkeypatch):
     sid = seeded_user["store"].id
     db_session.add(StoreStyleProfile(

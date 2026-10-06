@@ -1,7 +1,12 @@
 """매장별 답글 스타일 규칙 캐싱 — golden_examples 중 is_manual=true AND
-is_synthetic=false인 데이터로만 재생성한다. 가상 데이터로 스타일을
-뽑으면 AI가 자기 산출물을 학습하는 순환 오염이 생기므로 이 필터는
-반드시 지킨다."""
+is_synthetic=false AND needs_confirmation=false인 데이터로만 재생성한다.
+가상 데이터로 스타일을 뽑으면 AI가 자기 산출물을 학습하는 순환 오염이
+생기므로 이 필터는 반드시 지킨다. needs_confirmation=true 행(경로 C —
+배민에 직접 단 답글이 기존 신뢰 예시 클러스터와 말투가 어긋나는 이상치로
+판정된 것, app/llm/rag.py의 promote_direct_reply_to_golden_example 참고)도
+같은 이유로 제외한다 — 아직 사람이 확인하지 않은, 진짜 사장님 말투인지
+의심되는 답글을 "이 사장님의 말투"를 정의하는 요약에 그대로 반영하면 안
+된다(2026-10-06)."""
 
 from datetime import datetime, timezone
 
@@ -26,6 +31,7 @@ def refresh_store_style_profile(db: Session, store_id: int) -> None:
             GoldenExample.store_id == store_id,
             GoldenExample.is_manual.is_(True),
             GoldenExample.is_synthetic.is_(False),
+            GoldenExample.needs_confirmation.is_(False),
         )
     ).all()
     if not examples:

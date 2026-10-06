@@ -4,12 +4,13 @@ from app.llm.rag import count_recent_same_category, fetch_golden_examples
 from app.models import GoldenExample, Review
 
 
-def _make_example(db_session, store_id, *, category, source, created_at, source_review_id=None):
+def _make_example(db_session, store_id, *, category, source, created_at, source_review_id=None, needs_confirmation=False):
     ex = GoldenExample(
         store_id=store_id, category=category,
         review_text="리뷰", reply_text="답글",
         is_manual=True, is_synthetic=False, source=source,
         source_review_id=source_review_id, created_at=created_at,
+        needs_confirmation=needs_confirmation,
     )
     db_session.add(ex)
     db_session.flush()
@@ -109,6 +110,50 @@ def test_linked_review_without_any_signal_stays_in_tier2(db_session, seeded_user
 
     # 1단계는 비어 있고, 2단계(신호 없는 organic) → 3단계(onboarding) 순서
     assert [r.id for r in result] == [linked_no_signal.id, onboarding.id]
+
+
+def test_needs_confirmation_excluded_from_tier1(db_session, seeded_user, platforms):
+    """needs_confirmation=True인 organic 답글은 고신뢰 신호가 있어도
+    1단계에서 제외된다(경로 C에서 말투 이상치로 찍힌 미확인 행,
+    promote_direct_reply_to_golden_example 참고). 미확인 예시를 일부러 더
+    최신으로 만들어 뒀다 — 1단계에 포함된다면 최신순으로 먼저 나왔을
+    것이므로, confirmed 예시가 먼저 나오는 것 자체가 배제를 증명한다."""
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    now = datetime.now(timezone.utc)
+    _pad_reviews(db_session, sid, pid, 5, created_at=now - timedelta(days=10))  # 신호 (a) 끔
+    confirmed_signal_review = _make_review(db_session, sid, pid, category="delivery", created_at=now - timedelta(days=5))
+    unconfirmed_signal_review = _make_review(db_session, sid, pid, category="delivery", created_at=now)
+    confirmed = _make_example(db_session, sid, category="delivery", source="organic",
+                              created_at=now - timedelta(days=3), source_review_id=confirmed_signal_review.id)
+    unconfirmed = _make_example(db_session, sid, category="delivery", source="organic",
+                                created_at=now, source_review_id=unconfirmed_signal_review.id,
+                                needs_confirmation=True)
+    db_session.commit()
+
+    result = fetch_golden_examples(db_session, sid, "delivery", "쿼리", limit=1)
+
+    assert [r.id for r in result] == [confirmed.id]
+
+
+def test_needs_confirmation_falls_to_tier2_when_nothing_else_fills_limit(db_session, seeded_user, platforms):
+    """needs_confirmation=True 행은 1단계에서 빠지지만 완전히 버려지지는
+    않는다 — 다른 1·2단계 예시가 없어 limit을 못 채우면 2단계로 내려와
+    여전히 반환된다(불확실한 데이터는 플래그만 세우고 버리지 않는다는
+    원칙)."""
+    sid = seeded_user["store"].id
+    pid = platforms["baemin"].id
+    now = datetime.now(timezone.utc)
+    _pad_reviews(db_session, sid, pid, 5, created_at=now - timedelta(days=10))
+    signal_review = _make_review(db_session, sid, pid, category="hygiene", created_at=now)
+    unconfirmed = _make_example(db_session, sid, category="hygiene", source="organic",
+                                created_at=now, source_review_id=signal_review.id,
+                                needs_confirmation=True)
+    db_session.commit()
+
+    result = fetch_golden_examples(db_session, sid, "hygiene", "쿼리", limit=3)
+
+    assert [r.id for r in result] == [unconfirmed.id]
 
 
 # ---------------------------------------------------------------------------
