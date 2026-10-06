@@ -11,5 +11,7 @@ httpx
 cryptography
 playwright
 anthropic
+langchain-anthropic
+langgraph
 pgvector
 alembic
