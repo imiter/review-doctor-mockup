@@ -33,8 +33,8 @@ from app.models import (
     StorePlatformConnection,
     Subscription,
 )
+from app.llm.agent_graph import run_agent
 from app.llm.classify import ClassificationError, classify_review
-from app.llm.generate import generate_ai_reply
 from app.llm.rag import promote_direct_reply_to_golden_example
 from app.plan import effective_plan
 from scrapers.baemin_ads import BaeminAdsScrapeError, fetch_brand_click_metrics, fetch_cpc_booking, map_click_metrics_by_date
@@ -531,34 +531,52 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                     and not review.sentiment_conflict
                 ):
                     try:
-                        content = generate_ai_reply(db, review, store, auto_reply_style)
-                        submit_reply(session.page, shop_no, review.external_review_id, content)
-                        db.add(ReviewReply(
-                            review_id=review.id, reply_type="final", style_id=auto_reply_style.id,
-                            content=content, created_at=datetime.now(timezone.utc),
-                        ))
-                        review.status = "answered"
-                        # golden_examples로 승격하지 않는다 — 사람이 한 번도
-                        # 검토하지 않은 순수 AI 산출물이다. save_final_reply(사장님이
-                        # 직접 등록 버튼을 누른 경로)와 달리 여기서 승격하면
-                        # "AI 산출물을 AI가 다시 학습하는" 순환 오염이 된다
-                        # (golden_examples.is_manual=true는 사람이 직접 쓰거나
-                        # 승인한 것이라는 전제 — CLAUDE.md 참고).
-                        #
-                        # 실제 배민에 답글이 이미 나갔다 — 아래 소급 처리
-                        # 경로와 똑같은 이유로 여기서도 즉시 커밋한다. 원래는
-                        # "rollback되면 Review 행 자체가 사라지고 다음 동기화가
-                        # extract_owner_reply로 재감지하니 자기치유된다"고 봤지만,
-                        # 그 자기치유는 경로 C(배민 직접 답글 승격)가 생긴 뒤로는
-                        # 오히려 오염원이다(2026-10-06 최종 리뷰에서 지적) —
-                        # 재감지된 그 답글은 사실 우리 시스템이 방금 제출한 AI
-                        # 산출물인데, promote_direct_reply_to_golden_example이
-                        # 그걸 "사장님이 배민에 직접 단 답글"로 오인해
-                        # is_manual=True 골든 예시로 승격시킨다. 즉 AI가 자기
-                        # 산출물을 다시 학습하는 순환 오염이 되고, 위 주석이
-                        # 애초에 막으려던 바로 그 사고가 rollback 한 번으로
-                        # 되살아난다. 그래서 제출 성공 직후 이 리뷰+답글만은
-                        # 확정적으로 남긴다.
+                        result = run_agent(db, review, store, auto_reply_style)
+                        if result.passed_verification:
+                            submit_reply(session.page, shop_no, review.external_review_id, result.content)
+                            db.add(ReviewReply(
+                                review_id=review.id, reply_type="final", style_id=auto_reply_style.id,
+                                content=result.content, created_at=datetime.now(timezone.utc),
+                            ))
+                            review.status = "answered"
+                            # golden_examples로 승격하지 않는다 — 사람이 한 번도
+                            # 검토하지 않은 순수 AI 산출물이다. save_final_reply(사장님이
+                            # 직접 등록 버튼을 누른 경로)와 달리 여기서 승격하면
+                            # "AI 산출물을 AI가 다시 학습하는" 순환 오염이 된다
+                            # (golden_examples.is_manual=true는 사람이 직접 쓰거나
+                            # 승인한 것이라는 전제 — CLAUDE.md 참고).
+                        else:
+                            # run_agent가 재시도(최대 2회)를 다 써도 결정론적
+                            # 검증을 못 통과했다 — 배민에는 제출하지 않고
+                            # 보류한다. 기존 "AI 추천 답글" 화면(reviews.py의
+                            # generate_reply)이 이미 쓰는 ai_draft/pending
+                            # 패턴을 그대로 재사용해서, 사장님이 백지가 아니라
+                            # 이 실패한 초안을 검토·수정해 등록할 수 있게
+                            # 한다 — 새 테이블/컬럼 없음.
+                            db.add(ReviewReply(
+                                review_id=review.id, reply_type="ai_draft", style_id=auto_reply_style.id,
+                                content=result.content, created_at=datetime.now(timezone.utc),
+                            ))
+                            review.status = "pending"
+                        # 두 분기 모두 상태 변화가 이미 배민(제출 성공) 혹은
+                        # DB(ai_draft 보류)에 반영됐다 — 아래와 똑같은 이유로
+                        # 즉시 커밋한다. 원래는 "rollback되면 Review 행 자체가
+                        # 사라지고 다음 동기화가 extract_owner_reply로
+                        # 재감지하니 자기치유된다"고 봤지만, 그 자기치유는
+                        # 경로 C(배민 직접 답글 승격)가 생긴 뒤로는 오히려
+                        # 오염원이다(2026-10-06 최종 리뷰에서 지적) — 재감지된
+                        # 그 답글은 사실 우리 시스템이 방금 제출한 AI 산출물인데,
+                        # promote_direct_reply_to_golden_example이 그걸
+                        # "사장님이 배민에 직접 단 답글"로 오인해 is_manual=True
+                        # 골든 예시로 승격시킨다. 즉 AI가 자기 산출물을 다시
+                        # 학습하는 순환 오염이 되고, 위 주석이 애초에 막으려던
+                        # 바로 그 사고가 rollback 한 번으로 되살아난다. 보류
+                        # 분기도 마찬가지다 — ai_draft+status="pending"이
+                        # rollback으로 날아가면 review.status가 다시
+                        # "unanswered"로 보여 다음 동기화의 소급 처리 루프가
+                        # 같은 리뷰를 또 run_agent에 태워 중복 보류/중복 제출
+                        # 시도를 할 수 있다. 그래서 제출 성공/보류 둘 다 이
+                        # 시점에 확정적으로 남긴다.
                         db.commit()
                     except Exception as e:
                         # 자동 답글 실패가 리뷰 저장 자체를 되돌리지 않는다 —
@@ -602,19 +620,32 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                 ).all()
                 for review in backlog:
                     try:
-                        content = generate_ai_reply(db, review, store, auto_reply_style)
-                        submit_reply(session.page, shop_no, review.external_review_id, content)
-                        db.add(ReviewReply(
-                            review_id=review.id, reply_type="final", style_id=auto_reply_style.id,
-                            content=content, created_at=datetime.now(timezone.utc),
-                        ))
-                        review.status = "answered"
-                        # 실제 배민에 답글이 이미 나갔다 — 이 시점 이후 어디서
-                        # 무엇이 실패해 job 전체가 rollback되더라도, 방금 성공한
-                        # 이 제출 기록만은 절대 같이 날아가면 안 된다(날아가면
-                        # 다음 동기화 때 같은 리뷰에 또 제출해 배민에 중복 답글이
-                        # 달린다). 신규 리뷰 경로도 2026-10-06부터 같은 이유로
-                        # 즉시 커밋한다 — 거기서 기대했던 "rollback되면 다음
+                        result = run_agent(db, review, store, auto_reply_style)
+                        if result.passed_verification:
+                            submit_reply(session.page, shop_no, review.external_review_id, result.content)
+                            db.add(ReviewReply(
+                                review_id=review.id, reply_type="final", style_id=auto_reply_style.id,
+                                content=result.content, created_at=datetime.now(timezone.utc),
+                            ))
+                            review.status = "answered"
+                        else:
+                            # 신규 리뷰 경로와 동일한 보류 메커니즘 — 재시도를
+                            # 다 써도 검증을 못 통과했으면 배민에 제출하지
+                            # 않고 ai_draft/pending으로 남겨 사장님이 검토하게
+                            # 한다(위 신규 리뷰 블록 주석 참고).
+                            db.add(ReviewReply(
+                                review_id=review.id, reply_type="ai_draft", style_id=auto_reply_style.id,
+                                content=result.content, created_at=datetime.now(timezone.utc),
+                            ))
+                            review.status = "pending"
+                        # 실제 배민에 답글이 이미 나갔거나(제출 성공), DB에
+                        # ai_draft 보류 상태가 반영됐다(검증 실패) — 이 시점
+                        # 이후 어디서 무엇이 실패해 job 전체가 rollback되더라도,
+                        # 방금 반영된 이 상태 변화만은 절대 같이 날아가면 안
+                        # 된다(날아가면 다음 동기화 때 같은 리뷰를 또 처리해
+                        # 배민에 중복 답글을 내거나 중복 보류를 시도한다).
+                        # 신규 리뷰 경로도 2026-10-06부터 같은 이유로 즉시
+                        # 커밋한다 — 거기서 기대했던 "rollback되면 다음
                         # 동기화가 owner_reply로 재감지한다"는 자기치유가 실은
                         # 경로 C 오염을 일으킨다는 걸 확인했다(위 신규 리뷰
                         # 블록 주석 참고).

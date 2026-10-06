@@ -5,6 +5,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.credential_crypto import CredentialCryptoError, encrypt_credential
+from app.llm.agent_graph import AgentResult
 from app.models import AdCampaign, Alert, BaeminShopBrand, BrandAdClickMetric, BrandCeoNotice, BrandMenuInfo, DailySettlement, Order, RepurchaseMetric, Review, ReviewReply, ReviewSyncJob, StorePlatformConnection
 from app.review_sync import notices_need_refresh, replace_brand_ceo_notices, sync_reviews_for_job, upsert_brand_ad_click_metric, upsert_daily_settlement, upsert_order, upsert_repurchase_metric
 from scrapers.baemin_ads import BaeminAdsScrapeError
@@ -2410,7 +2411,7 @@ def test_sync_does_not_auto_reply_when_not_pro(db_session, sync_setup, reply_sty
         review_sync_mod, "classify_review",
         lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
     )
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "run_agent", lambda db, review, store, style: pytest.fail("should not be called"))
     monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
 
     sync_reviews_for_job(job, conn, db_session)
@@ -2436,7 +2437,10 @@ def test_sync_auto_replies_to_five_star_review_when_enabled(db_session, sync_set
         review_sync_mod, "classify_review",
         lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
     )
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "감사합니다!")
+    monkeypatch.setattr(
+        review_sync_mod, "run_agent",
+        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0),
+    )
     submit_calls = []
     monkeypatch.setattr(
         review_sync_mod, "submit_reply",
@@ -2450,6 +2454,85 @@ def test_sync_auto_replies_to_five_star_review_when_enabled(db_session, sync_set
     assert submit_calls == [(fake_session.shop_no, _RAW_1["id"], "감사합니다!")]
     final_reply = db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="final").one()
     assert final_reply.content == "감사합니다!"
+
+
+def test_sync_holds_review_as_ai_draft_when_verification_fails(db_session, sync_setup, reply_styles, monkeypatch):
+    """run_agent가 재시도 2회를 다 써도 검증을 통과 못 하면(passed_verification=False),
+    배민에는 제출하지 않고 ai_draft + status="pending"으로 보류해야 한다 —
+    reviews.py의 수동 "AI 추천 답글" 버튼(generate_reply)이 이미 쓰는
+    패턴과 동일하다(Task 5, 2026-10-06)."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])  # rating 5.0
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(
+        review_sync_mod, "run_agent",
+        lambda db, review, store, style: AgentResult(content="검증 실패한 초안", passed_verification=False, retry_count=2),
+    )
+    submit_calls = []
+    monkeypatch.setattr(
+        review_sync_mod, "submit_reply",
+        lambda page, shop_no, external_review_id, content: submit_calls.append((shop_no, external_review_id, content)),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review.status == "pending"  # 자동 제출 안 됨, 보류
+    assert submit_calls == []  # 배민에 제출되지 않았다
+    draft = db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="ai_draft").one()
+    assert draft.content == "검증 실패한 초안"
+    assert draft.style_id == reply_styles.id
+    # final 답글은 저장되지 않았어야 한다 — ai_draft만 있어야 정상.
+    assert db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="final").count() == 0
+
+
+def test_sync_submits_normally_when_verification_passes(db_session, sync_setup, reply_styles, monkeypatch):
+    """run_agent가 검증을 통과하면(passed_verification=True) 기존과 동일하게
+    배민에 실제 제출되고 review.status가 answered가 돼야 한다 — 대조군으로
+    위 보류 테스트와 분기가 실제로 나뉘는지 확인한다."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])  # rating 5.0
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(
+        review_sync_mod, "run_agent",
+        lambda db, review, store, style: AgentResult(content="검증 통과한 답글", passed_verification=True, retry_count=0),
+    )
+    submit_calls = []
+    monkeypatch.setattr(
+        review_sync_mod, "submit_reply",
+        lambda page, shop_no, external_review_id, content: submit_calls.append((shop_no, external_review_id, content)),
+    )
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review.status == "answered"  # 기존과 동일하게 제출됨
+    assert submit_calls == [(fake_session.shop_no, _RAW_1["id"], "검증 통과한 답글")]
+    final_reply = db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="final").one()
+    assert final_reply.content == "검증 통과한 답글"
+    assert db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="ai_draft").count() == 0
 
 
 def test_sync_does_not_auto_reply_below_rating_floor(db_session, sync_setup, reply_styles, monkeypatch):
@@ -2469,7 +2552,7 @@ def test_sync_does_not_auto_reply_below_rating_floor(db_session, sync_setup, rep
         review_sync_mod, "classify_review",
         lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
     )
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "run_agent", lambda db, review, store, style: pytest.fail("should not be called"))
     monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
 
     sync_reviews_for_job(job, conn, db_session)
@@ -2496,7 +2579,7 @@ def test_sync_does_not_auto_reply_when_category_is_not_no_issue(db_session, sync
         review_sync_mod, "classify_review",
         lambda content, rating: ReviewClassification(category="food_quality", is_sensitive=False, sentiment_conflict=False),
     )
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "run_agent", lambda db, review, store, style: pytest.fail("should not be called"))
     monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
 
     sync_reviews_for_job(job, conn, db_session)
@@ -2521,7 +2604,7 @@ def test_sync_does_not_auto_reply_when_sensitive(db_session, sync_setup, reply_s
         review_sync_mod, "classify_review",
         lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=True, sentiment_conflict=False),
     )
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "run_agent", lambda db, review, store, style: pytest.fail("should not be called"))
     monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
 
     sync_reviews_for_job(job, conn, db_session)
@@ -2547,7 +2630,7 @@ def test_sync_does_not_auto_reply_when_sentiment_conflict(db_session, sync_setup
         review_sync_mod, "classify_review",
         lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=True),
     )
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "run_agent", lambda db, review, store, style: pytest.fail("should not be called"))
     monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
 
     sync_reviews_for_job(job, conn, db_session)
@@ -2617,7 +2700,10 @@ def test_sync_auto_reply_failure_does_not_fail_whole_job(db_session, sync_setup,
         review_sync_mod, "classify_review",
         lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
     )
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "감사합니다!")
+    monkeypatch.setattr(
+        review_sync_mod, "run_agent",
+        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0),
+    )
 
     def _raise(*a, **kw):
         raise BaeminReplySubmitError("네트워크 오류")
@@ -2649,7 +2735,10 @@ def test_sync_auto_reply_does_not_promote_to_golden_examples(db_session, sync_se
         review_sync_mod, "classify_review",
         lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
     )
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "감사합니다!")
+    monkeypatch.setattr(
+        review_sync_mod, "run_agent",
+        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0),
+    )
     monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: None)
 
     sync_reviews_for_job(job, conn, db_session)
@@ -2682,7 +2771,10 @@ def test_sync_commits_new_review_auto_reply_before_later_failure(db_session, syn
         review_sync_mod, "classify_review",
         lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
     )
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "감사합니다!")
+    monkeypatch.setattr(
+        review_sync_mod, "run_agent",
+        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0),
+    )
     submit_calls = []
     monkeypatch.setattr(
         review_sync_mod, "submit_reply",
@@ -2740,7 +2832,10 @@ def test_sync_answers_preexisting_unanswered_review_when_pro(db_session, sync_se
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])  # 이번엔 새 리뷰 없음
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "소급 답글입니다!")
+    monkeypatch.setattr(
+        review_sync_mod, "run_agent",
+        lambda db, review, store, style: AgentResult(content="소급 답글입니다!", passed_verification=True, retry_count=0),
+    )
     submit_calls = []
     monkeypatch.setattr(
         review_sync_mod, "submit_reply",
@@ -2779,7 +2874,7 @@ def test_sync_skips_preexisting_review_not_matching_criteria(db_session, sync_se
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: pytest.fail("should not be called"))
+    monkeypatch.setattr(review_sync_mod, "run_agent", lambda db, review, store, style: pytest.fail("should not be called"))
     monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: pytest.fail("should not be called"))
 
     sync_reviews_for_job(job, conn, db_session)
@@ -2812,7 +2907,10 @@ def test_sync_backlog_reply_failure_does_not_fail_whole_job(db_session, sync_set
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
-    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "답글")
+    monkeypatch.setattr(
+        review_sync_mod, "run_agent",
+        lambda db, review, store, style: AgentResult(content="답글", passed_verification=True, retry_count=0),
+    )
 
     def _boom(*a, **kw):
         raise RuntimeError("배민 제출 실패")
