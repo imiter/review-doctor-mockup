@@ -44,6 +44,8 @@ type BreakdownRowActual = {
   ad_cost_amount: number; misc_amount: number; actual_deposit: number;
 };
 type BreakdownRow = BreakdownRowEstimate | BreakdownRowActual;
+type DraftFeedbackCategory = { category: string; label: string; avg_similarity: number; sample_count: number };
+type DraftFeedbackTrendResponse = { categories: DraftFeedbackCategory[] };
 
 const ALERT_LABEL: Record<string, { label: string; color: string }> = {
   negative_review: { label: "부정 리뷰", color: "text-danger" },
@@ -229,6 +231,7 @@ export default function DashboardPage() {
   const [sales, setSales] = useState<SummaryResponse | null>(null);
   const [deposits, setDeposits] = useState<SummaryResponse | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [feedbackTrend, setFeedbackTrend] = useState<DraftFeedbackTrendResponse | null>(null);
   const [openModal, setOpenModal] = useState<"ugacle" | "sales_breakdown" | "repurchase" | "sales_daily" | "deposit_daily" | null>(null);
   const [brands, setBrands] = useState<ShopBrand[]>([]);
   const [selectedShopNo, setSelectedShopNo] = useState("");
@@ -249,6 +252,7 @@ export default function DashboardPage() {
     if (!storeId || !baeminPlatformId) return;
     apiGet<DashboardResponse>(`/dashboard?store_id=${storeId}&platform_id=${baeminPlatformId}`).then(setDashboard);
     apiGet<Alert[]>(`/alerts?store_id=${storeId}`).then((a) => setAlerts(a.slice(0, 5)));
+    apiGet<DraftFeedbackTrendResponse>(`/dashboard/draft-feedback-trend?store_id=${storeId}`).then(setFeedbackTrend);
   }, [storeId, baeminPlatformId]);
 
   useEffect(() => {
@@ -411,6 +415,36 @@ export default function DashboardPage() {
           )}
         </Card>
       </div>
+
+      <Card title="AI 초안 학습 추세">
+        <p className="mb-3 text-xs text-muted">
+          AI가 제안한 초안과 사장님이 실제로 등록한 최종 답글이 얼마나
+          비슷한지 카테고리별로 보여줍니다. 높을수록 AI가 사장님 말투에
+          가깝게 쓰고 있다는 뜻이에요.
+        </p>
+        {feedbackTrend === null || feedbackTrend.categories.length === 0 ? (
+          <p className="text-sm text-muted">아직 측정된 데이터가 없습니다.</p>
+        ) : (
+          <ul className="space-y-3">
+            {feedbackTrend.categories.map((c) => (
+              <li key={c.category}>
+                <div className="mb-1 flex items-center justify-between text-xs">
+                  <span className="text-foreground">{c.label}</span>
+                  <span className="text-muted">
+                    {(c.avg_similarity * 100).toFixed(1)}% · {c.sample_count}건
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-surface-2">
+                  <div
+                    className="h-2 rounded-full bg-accent"
+                    style={{ width: `${Math.max(0, Math.min(100, c.avg_similarity * 100))}%` }}
+                  />
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
 
       {openModal === "ugacle" && (
         <Modal title="우가클 점수" onClose={() => setOpenModal(null)}><UgacleModal storeId={storeId} shopNo={selectedShopNo} /></Modal>
