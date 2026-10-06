@@ -13,5 +13,6 @@ playwright
 anthropic
 langchain-anthropic>=1.7,<2
 langgraph>=1,<2
+langsmith>=0.14,<1
 pgvector
 alembic

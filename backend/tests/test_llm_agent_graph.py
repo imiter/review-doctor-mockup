@@ -1,4 +1,5 @@
 import difflib
+import uuid
 from datetime import datetime, timezone
 
 import pytest
@@ -578,3 +579,42 @@ def test_run_agent_propagates_node_exceptions_unwrapped(db_session, seeded_user,
 
     with pytest.raises(RuntimeError, match="retrieve_memory 실패"):
         run_agent(db_session, review, store, reply_styles)
+
+
+def test_run_agent_returns_valid_trace_id(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """run_agent의 반환값에 trace_id가 항상 채워져 있고, 유효한 UUID
+    문자열이어야 한다 — 이후 호출부가 이걸 ReviewReply/OnboardingScenario에
+    저장해두고 나중에 LangSmith feedback을 그 trace에 붙이는 데 쓴다.
+    call_sonnet_via_langgraph를 몽키패치하는 이유: 이 테스트는 전체
+    run_agent을 실제로 끝까지 돌리므로(다른 노드를 미리 터뜨리는 식으로
+    짧게 끝내지 않는다), 몽키패치 없이 두면 conftest의 _no_anthropic_key가
+    지워둔 ANTHROPIC_API_KEY 때문에 KeyError로 죽는다(이 파일의
+    test_run_agent_does_not_hit_langgraph_recursion_limit이 쓰는 것과
+    동일한 패턴)."""
+    store = seeded_user["store"]
+    review = _make_review(db_session, store, platforms)
+    monkeypatch.setattr(
+        "app.llm.agent_graph.call_sonnet_via_langgraph",
+        lambda system, user, max_tokens: "감사합니다",
+    )
+
+    result = run_agent(db_session, review, store, reply_styles)
+
+    assert isinstance(result.trace_id, str)
+    uuid.UUID(result.trace_id)  # ValueError를 던지지 않으면 유효한 UUID
+
+
+def test_run_agent_gives_each_call_a_different_trace_id(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """같은 리뷰로 run_agent을 두 번 불러도 trace_id가 겹치면 안 된다 —
+    겹치면 서로 다른 생성 시도의 feedback이 같은 trace에 뒤섞인다."""
+    store = seeded_user["store"]
+    review = _make_review(db_session, store, platforms)
+    monkeypatch.setattr(
+        "app.llm.agent_graph.call_sonnet_via_langgraph",
+        lambda system, user, max_tokens: "감사합니다",
+    )
+
+    first = run_agent(db_session, review, store, reply_styles)
+    second = run_agent(db_session, review, store, reply_styles)
+
+    assert first.trace_id != second.trace_id

@@ -8,9 +8,14 @@
 
 노드 5개와 StateGraph 조립, run_agent 진입점이 모두 이 파일에 있다.
 generate.py의 generate_ai_reply 자체는 아직 건드리지 않는다 —
-generate_ai_reply를 이 그래프 호출로 교체하는 것은 Task 4다."""
+generate_ai_reply를 이 그래프 호출로 교체하는 것은 Task 4다.
+
+LangSmith 트레이싱(2026-10-07, LangSmith 연동 플랜)은 run_agent이 발급하는
+trace_id를 _GRAPH.invoke의 config={"run_id": ...}로 넘기는 것으로만
+연결한다 — 그래프 구조/노드 자체는 건드리지 않는다."""
 
 import difflib
+import uuid
 from dataclasses import dataclass
 from typing import TypedDict
 
@@ -292,15 +297,35 @@ class AgentResult:
     content: str
     passed_verification: bool
     retry_count: int
+    trace_id: str
 
 
 def run_agent(db: Session, review: Review, store: Store, style: ReplyStyle) -> AgentResult:
     """그래프 진입점. passed_verification=False면 결정론적 검증을 끝까지
     통과하지 못한 초안이라는 뜻이다 — 그래도 content는 돌려준다(사장님이
-    직접 고쳐 쓸 수 있도록). 이 신호로 자동 제출 여부를 가르는 건 Task 5."""
-    final_state = _GRAPH.invoke({"db": db, "review": review, "store": store, "style": style})
+    직접 고쳐 쓸 수 있도록). 이 신호로 자동 제출 여부를 가르는 건 Task 5.
+
+    trace_id는 이 호출 하나를 가리키는 LangSmith run id다 — 직접 uuid4로
+    만들어서 config["run_id"]로 명시적으로 넘긴다(LangSmith가 자동으로
+    매기게 두면 호출부가 나중에 이 trace를 다시 찾아갈 방법이 없다).
+    LANGSMITH_TRACING_V2가 설정 안 돼 있으면 이 config는 그냥 무시되고
+    아무 네트워크 호출도 없다 — trace_id 자체는 항상 발급되고(테스트/로컬
+    환경에서도) 호출부가 저장해두는 값이라, 나중에 LANGSMITH_TRACING_V2를
+    켜면 그때부터의 trace만 실제로 LangSmith에 남는다. category/store_id를
+    metadata로 같이 보내는 이유는 측정 대시보드(Task 6)가 카테고리별로
+    집계해야 하기 때문(스펙 4.2절)."""
+    trace_id = uuid.uuid4()
+    final_state = _GRAPH.invoke(
+        {"db": db, "review": review, "store": store, "style": style},
+        config={
+            "run_id": trace_id,
+            "metadata": {"category": review.category, "store_id": store.id},
+            "tags": ["agent_graph"],
+        },
+    )
     return AgentResult(
         content=final_state["final_content"],
         passed_verification=final_state["passed_verification"],
         retry_count=final_state["retry_count"],
+        trace_id=str(trace_id),
     )

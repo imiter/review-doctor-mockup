@@ -1,3 +1,4 @@
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -2439,7 +2440,7 @@ def test_sync_auto_replies_to_five_star_review_when_enabled(db_session, sync_set
     )
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0),
+        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0, trace_id=str(uuid.uuid4())),
     )
     submit_calls = []
     monkeypatch.setattr(
@@ -2477,7 +2478,7 @@ def test_sync_holds_review_as_ai_draft_when_verification_fails(db_session, sync_
     )
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="검증 실패한 초안", passed_verification=False, retry_count=2),
+        lambda db, review, store, style: AgentResult(content="검증 실패한 초안", passed_verification=False, retry_count=2, trace_id=str(uuid.uuid4())),
     )
     submit_calls = []
     monkeypatch.setattr(
@@ -2521,7 +2522,7 @@ def test_sync_submits_normally_when_verification_passes(db_session, sync_setup, 
     )
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="검증 통과한 답글", passed_verification=True, retry_count=0),
+        lambda db, review, store, style: AgentResult(content="검증 통과한 답글", passed_verification=True, retry_count=0, trace_id=str(uuid.uuid4()))
     )
     submit_calls = []
     monkeypatch.setattr(
@@ -2706,7 +2707,7 @@ def test_sync_auto_reply_failure_does_not_fail_whole_job(db_session, sync_setup,
     )
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0),
+        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0, trace_id=str(uuid.uuid4()))
     )
 
     def _raise(*a, **kw):
@@ -2741,7 +2742,7 @@ def test_sync_auto_reply_does_not_promote_to_golden_examples(db_session, sync_se
     )
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0),
+        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0, trace_id=str(uuid.uuid4()))
     )
     monkeypatch.setattr(review_sync_mod, "submit_reply", lambda *a, **kw: None)
 
@@ -2777,7 +2778,7 @@ def test_sync_commits_new_review_auto_reply_before_later_failure(db_session, syn
     )
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0),
+        lambda db, review, store, style: AgentResult(content="감사합니다!", passed_verification=True, retry_count=0, trace_id=str(uuid.uuid4()))
     )
     submit_calls = []
     monkeypatch.setattr(
@@ -2838,7 +2839,7 @@ def test_sync_answers_preexisting_unanswered_review_when_pro(db_session, sync_se
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])  # 이번엔 새 리뷰 없음
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="소급 답글입니다!", passed_verification=True, retry_count=0),
+        lambda db, review, store, style: AgentResult(content="소급 답글입니다!", passed_verification=True, retry_count=0, trace_id=str(uuid.uuid4()))
     )
     submit_calls = []
     monkeypatch.setattr(
@@ -2913,7 +2914,7 @@ def test_sync_backlog_reply_failure_does_not_fail_whole_job(db_session, sync_set
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="답글", passed_verification=True, retry_count=0),
+        lambda db, review, store, style: AgentResult(content="답글", passed_verification=True, retry_count=0, trace_id=str(uuid.uuid4()))
     )
 
     def _boom(*a, **kw):
@@ -2961,7 +2962,7 @@ def test_sync_holds_preexisting_review_as_ai_draft_when_verification_fails(db_se
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])  # 이번엔 새 리뷰 없음
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="소급 보류 초안", passed_verification=False, retry_count=2),
+        lambda db, review, store, style: AgentResult(content="소급 보류 초안", passed_verification=False, retry_count=2, trace_id=str(uuid.uuid4()))
     )
     submit_calls = []
     monkeypatch.setattr(
@@ -3029,7 +3030,7 @@ def test_sync_commits_backlog_hold_before_later_failure(db_session, sync_setup, 
 
     def _fake_run_agent(db, review, store, style):
         run_agent_calls.append(review.id)
-        return AgentResult(content="소급 보류 초안", passed_verification=False, retry_count=2)
+        return AgentResult(content="소급 보류 초안", passed_verification=False, retry_count=2, trace_id=str(uuid.uuid4()))
 
     monkeypatch.setattr(review_sync_mod, "run_agent", _fake_run_agent)
     submit_calls = []
