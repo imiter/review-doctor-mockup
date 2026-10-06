@@ -2657,6 +2657,66 @@ def test_sync_auto_reply_does_not_promote_to_golden_examples(db_session, sync_se
     assert db_session.query(GoldenExample).count() == 0
 
 
+def test_sync_commits_new_review_auto_reply_before_later_failure(db_session, sync_setup, reply_styles, monkeypatch):
+    """신규 리뷰에 자동 답글을 실제 배민에 제출한 직후에는 그 리뷰+답글이
+    즉시 커밋돼야 한다 — job 뒷부분(매출 동기화 등)에서 예상 밖 예외가 나
+    `sync_reviews_for_job`이 db.rollback()을 해도 "방금 배민에 나간 답글"이
+    DB에서 사라지면 안 된다.
+
+    사라지면 다음 동기화가 그 리뷰를 다시 신규로 보고, 배민에 이미 달려있는
+    (우리가 제출한) 그 답글을 `extract_owner_reply`로 감지해
+    promote_direct_reply_to_golden_example이 "사장님이 직접 쓴 답글"로
+    승격시킨다 — AI가 자기 산출물을 다시 학습하는 순환 오염(2026-10-06
+    최종 리뷰 C1)."""
+    import app.review_sync as review_sync_mod
+    from app.llm.classify import ReviewClassification
+    from app.models import GoldenExample, Review
+
+    job, conn = sync_setup
+    _enable_auto_reply(db_session, job.store_id, reply_styles.id)
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
+    monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [_RAW_1])
+    monkeypatch.setattr(
+        review_sync_mod, "classify_review",
+        lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
+    )
+    monkeypatch.setattr(review_sync_mod, "generate_ai_reply", lambda db, review, store, style: "감사합니다!")
+    submit_calls = []
+    monkeypatch.setattr(
+        review_sync_mod, "submit_reply",
+        lambda page, shop_no, external_review_id, content: submit_calls.append((shop_no, external_review_id, content)),
+    )
+
+    # 리뷰 루프/소급 처리가 끝난 바로 뒤(매출 증분 범위 계산)에서 예상 밖
+    # 예외를 터뜨린다 — 이 지점은 어떤 except에도 걸리지 않아
+    # sync_reviews_for_job의 마지막 방어선까지 올라가 db.rollback()을 유발한다.
+    def _boom(*a, **kw):
+        raise RuntimeError("매출 동기화 중 커넥션 오류 (시뮬레이션)")
+
+    monkeypatch.setattr(review_sync_mod, "filter_months_needing_sync", _boom)
+
+    sync_reviews_for_job(job, conn, db_session)
+
+    db_session.refresh(job)
+    assert job.status == "failed"  # job 자체는 뒤에서 실패
+    assert len(submit_calls) == 1  # 배민에는 이미 나갔다
+
+    # rollback을 겪었지만 리뷰와 답글은 그대로 남아있어야 한다.
+    review = db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).one()
+    assert review.status == "answered"
+    assert db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="final").count() == 1
+
+    # 같은 리뷰가 다음 동기화에서 다시 신규로 처리되지 않는다 → 배민 중복
+    # 제출도, 경로 C 골든예시 승격(순환 오염)도 일어나지 않는다.
+    sync_reviews_for_job(job, conn, db_session)
+
+    assert len(submit_calls) == 1
+    assert db_session.query(Review).filter_by(external_review_id=_RAW_1["id"]).count() == 1
+    assert db_session.query(GoldenExample).count() == 0
+
+
 def test_sync_answers_preexisting_unanswered_review_when_pro(db_session, sync_setup, reply_styles, monkeypatch):
     """자동답글을 켜기 전부터 이미 DB에 있던 미답변 5점/no_issue 리뷰도,
     Pro 매장이면 다음 동기화 때 소급으로 답글이 달려야 한다."""

@@ -543,6 +543,22 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                         # "AI 산출물을 AI가 다시 학습하는" 순환 오염이 된다
                         # (golden_examples.is_manual=true는 사람이 직접 쓰거나
                         # 승인한 것이라는 전제 — CLAUDE.md 참고).
+                        #
+                        # 실제 배민에 답글이 이미 나갔다 — 아래 소급 처리
+                        # 경로와 똑같은 이유로 여기서도 즉시 커밋한다. 원래는
+                        # "rollback되면 Review 행 자체가 사라지고 다음 동기화가
+                        # extract_owner_reply로 재감지하니 자기치유된다"고 봤지만,
+                        # 그 자기치유는 경로 C(배민 직접 답글 승격)가 생긴 뒤로는
+                        # 오히려 오염원이다(2026-10-06 최종 리뷰에서 지적) —
+                        # 재감지된 그 답글은 사실 우리 시스템이 방금 제출한 AI
+                        # 산출물인데, promote_direct_reply_to_golden_example이
+                        # 그걸 "사장님이 배민에 직접 단 답글"로 오인해
+                        # is_manual=True 골든 예시로 승격시킨다. 즉 AI가 자기
+                        # 산출물을 다시 학습하는 순환 오염이 되고, 위 주석이
+                        # 애초에 막으려던 바로 그 사고가 rollback 한 번으로
+                        # 되살아난다. 그래서 제출 성공 직후 이 리뷰+답글만은
+                        # 확정적으로 남긴다.
+                        db.commit()
                     except Exception as e:
                         # 자동 답글 실패가 리뷰 저장 자체를 되돌리지 않는다 —
                         # 리뷰는 이미 정상 동기화됐고, 다음에 사장님이 수동으로
@@ -596,10 +612,11 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                         # 무엇이 실패해 job 전체가 rollback되더라도, 방금 성공한
                         # 이 제출 기록만은 절대 같이 날아가면 안 된다(날아가면
                         # 다음 동기화 때 같은 리뷰에 또 제출해 배민에 중복 답글이
-                        # 달린다 — 신규 리뷰 경로는 rollback 시 Review 행 자체가
-                        # 사라져 다음 동기화가 owner_reply로 재감지하지만, 이
-                        # 소급 처리 경로는 행이 원래 있던 것이라 그 자기치유가
-                        # 없다). 그래서 여기서만 즉시 개별 커밋한다.
+                        # 달린다). 신규 리뷰 경로도 2026-10-06부터 같은 이유로
+                        # 즉시 커밋한다 — 거기서 기대했던 "rollback되면 다음
+                        # 동기화가 owner_reply로 재감지한다"는 자기치유가 실은
+                        # 경로 C 오염을 일으킨다는 걸 확인했다(위 신규 리뷰
+                        # 블록 주석 참고).
                         db.commit()
                     except Exception as e:
                         auto_reply_errors.append(f"리뷰 {review.id}(별점 {review.rating}, 기존 미답변): {e}")
