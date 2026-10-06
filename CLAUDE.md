@@ -727,7 +727,7 @@ install` 단계는 양쪽 프로세스 모두에 반드시 같이 가야 한다.
 게 안전하다.
 
 **`langchain-anthropic`/`langgraph`만 상한을 둬서 버전을 제한한다**
-(`langchain-anthropic>=1.7,<2`, `langgraph>=1,<2>`) — 이 프로젝트는
+(`langchain-anthropic>=1.7,<2`, `langgraph>=1,<2`) — 이 프로젝트는
 의존성을 버전 고정 없이 쓰는 관례지만, `langchain_client.py`는 설치된
 버전의 내부 동작(pydantic 필드 별칭, 응답 content가 문자열인지 블록
 리스트인지)에 명시적으로 의존해(파일 docstring 참고) 메이저 업그레이드
