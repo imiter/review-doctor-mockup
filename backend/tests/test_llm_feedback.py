@@ -94,3 +94,33 @@ def test_record_draft_feedback_background_keeps_db_row_when_langsmith_fails(db_s
 
     row = db_session.query(DraftFeedbackScore).one()
     assert float(row.similarity_score) == pytest.approx(0.0)
+
+
+def test_record_draft_feedback_background_stores_negative_similarity_without_clamping(db_session, seeded_user, monkeypatch):
+    """음수 코사인 유사도도 DB에 저장되어야 한다(클램핑 없음) —
+    반대 방향 벡터는 -1을 반환하며, 이는 유효한 측정값이다."""
+    import app.llm.feedback as feedback_mod
+
+    store = seeded_user["store"]
+    monkeypatch.setattr(feedback_mod, "embed_documents", lambda texts: [[1.0, 0.0], [-1.0, 0.0]])
+    monkeypatch.setattr(feedback_mod, "SessionLocal", lambda: db_session)
+    created_feedback = []
+
+    class _FakeClient:
+        def create_feedback(self, **kwargs):
+            created_feedback.append(kwargs)
+
+    monkeypatch.setattr(feedback_mod, "_LangSmithClient", _FakeClient)
+
+    record_draft_feedback_background(
+        trace_id="77777777-7777-7777-7777-777777777777",
+        draft_text="초안", final_text="완전히 반대인 최종본",
+        store_id=store.id, category="price",
+    )
+
+    row = db_session.query(DraftFeedbackScore).one()
+    assert float(row.similarity_score) == pytest.approx(-1.0)
+    assert created_feedback == [{
+        "run_id": "77777777-7777-7777-7777-777777777777",
+        "key": "draft_final_similarity", "score": pytest.approx(-1.0),
+    }]

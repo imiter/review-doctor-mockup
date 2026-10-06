@@ -15,11 +15,14 @@ Voyage 임베딩 계산과 LangSmith feedback 기록은 서로 독립적인 두 
 LangSmith 쪽은 DB 기록이 끝난 뒤 별도로 시도하고 실패해도 이미 쓴 DB
 행에는 영향 없다."""
 
+import logging
 from datetime import datetime, timezone
 
 from app.db import SessionLocal
 from app.llm.embedding import cosine_similarity, embed_documents
 from app.models import DraftFeedbackScore
+
+logger = logging.getLogger(__name__)
 
 try:
     from langsmith import Client as _LangSmithClient
@@ -35,6 +38,7 @@ def record_draft_feedback_background(
         draft_vec, final_vec = embed_documents([draft_text, final_text])
         score = cosine_similarity(draft_vec, final_vec)
     except Exception:
+        logger.exception("AI초안-최종본 유사도 측정용 임베딩 실패, trace_id=%s", trace_id)
         return  # Voyage 호출 실패(키 미설정 등) — 측정 자체를 스킵한다
 
     db = SessionLocal()
@@ -52,4 +56,4 @@ def record_draft_feedback_background(
     try:
         _LangSmithClient().create_feedback(run_id=trace_id, key="draft_final_similarity", score=score)
     except Exception:
-        pass  # LangSmith 기록 실패해도 위 DB 기록은 이미 끝났다
+        logger.exception("LangSmith feedback 기록 실패, trace_id=%s", trace_id)
