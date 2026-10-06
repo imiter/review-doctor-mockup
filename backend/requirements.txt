@@ -11,7 +11,7 @@ httpx
 cryptography
 playwright
 anthropic
-langchain-anthropic
-langgraph
+langchain-anthropic>=1.7,<2
+langgraph>=1,<2
 pgvector
 alembic

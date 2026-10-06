@@ -24,7 +24,7 @@ import os
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
-SONNET_MODEL = "claude-sonnet-5"
+from app.llm.client import SONNET_MODEL
 
 
 def _client(max_tokens: int) -> ChatAnthropic:
