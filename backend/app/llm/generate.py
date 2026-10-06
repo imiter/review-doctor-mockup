@@ -37,8 +37,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.llm.rag import count_recent_same_category, fetch_golden_examples
-from app.models import BaeminShopBrand, BrandCeoNotice, BrandMenuInfo, ProceduralRule, ReplyStyle, Review, Store, StorePlatformConnection, StoreStyleProfile
+from app.models import BaeminShopBrand, BrandCeoNotice, BrandMenuInfo, ProceduralRule, ReplyStyle, Review, Store, StorePlatformConnection
 
 _FALLBACK_STYLE_RULES = "아직 학습된 스타일이 없습니다. 정중하고 진솔한 사과문 원칙을 따르세요."
 

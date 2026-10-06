@@ -69,7 +69,10 @@ def list_reviews(
     result = []
     for r in reviews:
         final_reply = next((rp for rp in r.replies if rp.reply_type == "final"), None)
-        draft_reply = next((rp for rp in r.replies if rp.reply_type == "ai_draft"), None)
+        draft_reply = max(
+            (rp for rp in r.replies if rp.reply_type == "ai_draft"),
+            key=lambda rp: rp.created_at, default=None,
+        )
         secondary_replies = [rp for rp in r.replies if rp.reply_type == "secondary"]
         result.append({
             "id": r.id,
