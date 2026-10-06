@@ -2495,6 +2495,10 @@ def test_sync_holds_review_as_ai_draft_when_verification_fails(db_session, sync_
     assert draft.style_id == reply_styles.id
     # final 답글은 저장되지 않았어야 한다 — ai_draft만 있어야 정상.
     assert db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="final").count() == 0
+    # 보류가 조용히 사라지면 안 된다 — 대시보드/기본 필터가 보는 unanswered_review
+    # Alert가 생성돼야 사장님이 알 수 있다(2026-10-06 최종 리뷰 보완).
+    alert = db_session.query(Alert).filter_by(store_id=job.store_id, alert_type="unanswered_review").one()
+    assert review.menu_summary in alert.message
 
 
 def test_sync_submits_normally_when_verification_passes(db_session, sync_setup, reply_styles, monkeypatch):
@@ -2980,6 +2984,10 @@ def test_sync_holds_preexisting_review_as_ai_draft_when_verification_fails(db_se
     # 안 된다(신규 리뷰 경로의 보류 분기와 동일한 보장).
     assert job.status == "success"
     assert job.error_message is None
+    # 신규 리뷰 경로와 동일하게 backlog 보류도 unanswered_review Alert를
+    # 남겨야 한다(2026-10-06 최종 리뷰 보완).
+    alert = db_session.query(Alert).filter_by(store_id=job.store_id, alert_type="unanswered_review").one()
+    assert backlog_review.menu_summary in alert.message
 
 
 def test_sync_commits_backlog_hold_before_later_failure(db_session, sync_setup, reply_styles, monkeypatch):

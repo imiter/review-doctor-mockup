@@ -558,6 +558,11 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                                 content=result.content, created_at=datetime.now(timezone.utc),
                             ))
                             review.status = "pending"
+                            db.add(Alert(
+                                store_id=job.store_id, alert_type="unanswered_review",
+                                message=f"자동 답글 검증에 실패해 리뷰가 보류됐습니다: {review.menu_summary} — 직접 확인해주세요",
+                                created_at=datetime.now(timezone.utc),
+                            ))
                         # 두 분기 모두 상태 변화가 이미 배민(제출 성공) 혹은
                         # DB(ai_draft 보류)에 반영됐다 — 아래와 똑같은 이유로
                         # 즉시 커밋한다. 원래는 "rollback되면 Review 행 자체가
@@ -638,6 +643,11 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                                 content=result.content, created_at=datetime.now(timezone.utc),
                             ))
                             review.status = "pending"
+                            db.add(Alert(
+                                store_id=job.store_id, alert_type="unanswered_review",
+                                message=f"자동 답글 검증에 실패해 리뷰가 보류됐습니다: {review.menu_summary} — 직접 확인해주세요",
+                                created_at=datetime.now(timezone.utc),
+                            ))
                         # 실제 배민에 답글이 이미 나갔거나(제출 성공), DB에
                         # ai_draft 보류 상태가 반영됐다(검증 실패) — 이 시점
                         # 이후 어디서 무엇이 실패해 job 전체가 rollback되더라도,
