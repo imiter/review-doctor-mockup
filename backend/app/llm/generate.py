@@ -294,10 +294,23 @@ def _build_user_message(review: Review, category_label: str, repeat_count: int, 
 
 def generate_ai_reply(db: Session, review: Review, store: Store, style: ReplyStyle) -> str:
     """app/llm/agent_graph.py의 LangGraph 루프를 돌리고 최종 텍스트만
-    반환한다 — 기존 호출부(reviews.py의 수동 생성, reply_onboarding.py의
-    훈련카드 초안)는 검증 통과 여부를 몰라도 되므로 공개 시그니처를
-    그대로 유지한다. 검증 결과(통과/보류)가 필요한 review_sync.py의
-    자동답글 경로는 이 함수가 아니라 run_agent를 직접 쓴다(Task 5)."""
+    반환한다 — 기존 호출부 중 trace_id가 필요 없는 곳(지금은 없지만,
+    새 호출부를 추가할 때 trace 추적이 필요 없다면 이 함수를 그대로 써도
+    된다)은 이 공개 시그니처를 그대로 쓴다(Plan 2에서 못박은 제약). 검증
+    결과(통과/보류)가 필요한 review_sync.py의 자동답글 경로는 이 함수가
+    아니라 run_agent을 직접 쓴다(Plan 2 Task 5). trace_id가 필요한 호출부
+    (reviews.py의 수동 생성 버튼, onboarding.py의 훈련카드 초안 — 둘 다
+    나중에 사장님이 고쳐 쓴 최종본과의 유사도를 재야 한다, 스펙 4.2절)는
+    generate_ai_reply_with_trace를 쓴다."""
+    return generate_ai_reply_with_trace(db, review, store, style)[0]
+
+
+def generate_ai_reply_with_trace(db: Session, review: Review, store: Store, style: ReplyStyle) -> tuple[str, str]:
+    """generate_ai_reply와 동일하지만 LangSmith trace_id도 함께 반환한다.
+    호출부가 이 trace_id를 ReviewReply.trace_id/OnboardingScenario.trace_id에
+    저장해두면, app/llm/feedback.py가 나중에 그 trace에 유사도 feedback을
+    붙일 수 있다."""
     from app.llm.agent_graph import run_agent
 
-    return run_agent(db, review, store, style).content
+    result = run_agent(db, review, store, style)
+    return result.content, result.trace_id

@@ -47,13 +47,19 @@ def _mock_generate_ai_reply(monkeypatch):
     """모든 리뷰(no_issue 포함)가 generate_ai_reply(RAG)를 타므로(2026-08-24),
     실제 Claude API를 호출하지 않도록 기본값으로 monkeypatch한다. 생성 결과
     자체를 검증하려는 테스트는 monkeypatch.setattr(reviews_mod,
-    "generate_ai_reply", ...)를 테스트 본문에서 다시 호출해 이 기본값을
-    덮어쓸 수 있다(같은 monkeypatch 인스턴스라 나중 호출이 우선)."""
+    "generate_ai_reply_with_trace", ...)를 테스트 본문에서 다시 호출해 이
+    기본값을 덮어쓸 수 있다(같은 monkeypatch 인스턴스라 나중 호출이
+    우선). 반환값이 튜플인 이유: 2026-10-07부터 reviews.py가
+    generate_ai_reply_with_trace(content, trace_id)를 쓴다(LangSmith
+    연동 플랜, app/llm/generate.py)."""
     from app.routers import reviews as reviews_mod
 
     monkeypatch.setattr(
-        reviews_mod, "generate_ai_reply",
-        lambda db, review, store, style: f"{review.customer_nickname}님 감사합니다! (테스트 기본 응답)",
+        reviews_mod, "generate_ai_reply_with_trace",
+        lambda db, review, store, style: (
+            f"{review.customer_nickname}님 감사합니다! (테스트 기본 응답)",
+            "00000000-0000-0000-0000-000000000000",
+        ),
     )
 
 

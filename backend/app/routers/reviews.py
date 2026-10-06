@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
-from app.llm.generate import generate_ai_reply
+from app.llm.generate import generate_ai_reply_with_trace
 from app.llm.rag import compute_golden_example_embedding_background
 from app.llm.style_profile import refresh_store_style_profile_background
 from app.models import GoldenExample, ReplyStyle, Review, ReviewReply, Subscription, User
@@ -126,7 +126,7 @@ def generate_reply(
             )
 
     try:
-        content = generate_ai_reply(db, review, review.store, style)
+        content, trace_id = generate_ai_reply_with_trace(db, review, review.store, style)
     except Exception:
         raise HTTPException(
             503,
@@ -136,7 +136,7 @@ def generate_reply(
 
     draft = ReviewReply(
         review_id=review.id, reply_type="ai_draft", style_id=style.id,
-        content=content, created_at=datetime.now(timezone.utc),
+        content=content, trace_id=trace_id, created_at=datetime.now(timezone.utc),
     )
     db.add(draft)
     if review.status == "unanswered":

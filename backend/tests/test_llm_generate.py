@@ -605,3 +605,35 @@ def test_generate_ai_reply_skips_inactive_rule(db_session, seeded_user, platform
     generate.generate_ai_reply(db_session, review, store, reply_styles)
 
     assert "비활성 문구" not in captured["p"]
+
+
+def test_generate_ai_reply_with_trace_returns_content_and_trace_id(monkeypatch):
+    import app.llm.generate as generate_mod
+
+    class _FakeResult:
+        content = "생성된 답글"
+        trace_id = "77777777-7777-7777-7777-777777777777"
+
+    monkeypatch.setattr("app.llm.agent_graph.run_agent", lambda *a, **kw: _FakeResult())
+
+    content, trace_id = generate_mod.generate_ai_reply_with_trace(None, None, None, None)
+
+    assert content == "생성된 답글"
+    assert trace_id == "77777777-7777-7777-7777-777777777777"
+
+
+def test_generate_ai_reply_still_returns_only_content(monkeypatch):
+    """기존 공개 시그니처(str 반환)는 바뀌면 안 된다 — reviews.py 밖의
+    호출부가 더 있을 수 있어 Plan 2에서 못박은 제약(Global Constraints
+    참고)."""
+    import app.llm.generate as generate_mod
+
+    class _FakeResult:
+        content = "생성된 답글"
+        trace_id = "88888888-8888-8888-8888-888888888888"
+
+    monkeypatch.setattr("app.llm.agent_graph.run_agent", lambda *a, **kw: _FakeResult())
+
+    result = generate_mod.generate_ai_reply(None, None, None, None)
+
+    assert result == "생성된 답글"

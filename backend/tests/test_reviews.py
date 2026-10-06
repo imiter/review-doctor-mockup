@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from app.models import Review, Subscription
+from app.models import Review, Subscription, ReviewReply
 
 
 def make_review(db_session, store, platforms, rating, content="테스트 리뷰"):
@@ -26,6 +26,28 @@ def test_generate_reply_returns_ai_content_and_sets_pending(client, db_session, 
 
     listed = client.get("/reviews?status=pending", headers=auth_headers).json()
     assert [r["id"] for r in listed] == [review.id]
+
+
+def test_generate_reply_stores_trace_id_on_draft(client, auth_headers, db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    import app.routers.reviews as reviews_mod
+    from app.models import ReviewReply
+
+    store = seeded_user["store"]
+    review = make_review(db_session, store, platforms, rating=5, content="맛있어요")
+
+    monkeypatch.setattr(
+        reviews_mod, "generate_ai_reply_with_trace",
+        lambda db, review, store, style: ("생성된 답글", "99999999-9999-9999-9999-999999999999"),
+    )
+
+    resp = client.post(
+        f"/reviews/{review.id}/generate-reply",
+        json={"style_id": reply_styles.id}, headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    draft = db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="ai_draft").one()
+    assert draft.trace_id == "99999999-9999-9999-9999-999999999999"
 
 
 def test_save_final_reply_transitions_status_and_blocks_duplicate(client, db_session, seeded_user, platforms, reply_styles, auth_headers, monkeypatch):
@@ -201,7 +223,7 @@ def test_generate_reply_uses_ai_path_for_no_issue_review_too(client, db_session,
     db_session.add(review)
     db_session.commit()
 
-    monkeypatch.setattr(reviews_mod, "generate_ai_reply", lambda db, review, store, style: "AI가 만든 답글입니다.")
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply_with_trace", lambda db, review, store, style: ("AI가 만든 답글입니다.", "00000000-0000-0000-0000-000000000000"))
 
     res = client.post(
         f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
@@ -225,7 +247,7 @@ def test_generate_reply_uses_ai_path_for_problem_review(client, db_session, seed
     db_session.add(review)
     db_session.commit()
 
-    monkeypatch.setattr(reviews_mod, "generate_ai_reply", lambda db, review, store, style: "AI가 만든 답글입니다.")
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply_with_trace", lambda db, review, store, style: ("AI가 만든 답글입니다.", "00000000-0000-0000-0000-000000000000"))
 
     res = client.post(
         f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
@@ -256,7 +278,7 @@ def test_generate_reply_returns_503_with_korean_error_when_ai_generation_fails(
     def _raise(db, review, store, style):
         raise RuntimeError("네트워크 오류")
 
-    monkeypatch.setattr(reviews_mod, "generate_ai_reply", _raise)
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply_with_trace", _raise)
 
     res = client.post(
         f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
@@ -395,7 +417,7 @@ def test_generate_reply_tone_overridden_true_when_sensitive(client, db_session, 
     db_session.add(review)
     db_session.commit()
 
-    monkeypatch.setattr(reviews_mod, "generate_ai_reply", lambda db, review, store, style: "답글")
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply_with_trace", lambda db, review, store, style: ("답글", "00000000-0000-0000-0000-000000000000"))
 
     res = client.post(
         f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,
@@ -420,7 +442,7 @@ def test_generate_reply_tone_overridden_false_when_not_sensitive(client, db_sess
     db_session.add(review)
     db_session.commit()
 
-    monkeypatch.setattr(reviews_mod, "generate_ai_reply", lambda db, review, store, style: "답글")
+    monkeypatch.setattr(reviews_mod, "generate_ai_reply_with_trace", lambda db, review, store, style: ("답글", "00000000-0000-0000-0000-000000000000"))
 
     res = client.post(
         f"/reviews/{review.id}/generate-reply", json={"style_id": reply_styles.id}, headers=auth_headers,

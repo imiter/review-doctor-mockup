@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.llm import client
 from app.llm.classify import VALID_CATEGORIES
-from app.llm.generate import CATEGORY_LABELS, generate_ai_reply
+from app.llm.generate import CATEGORY_LABELS, generate_ai_reply_with_trace
 from app.models import GoldenExample, OnboardingScenario, ReplySetting, ReplyStyle, Review, Store
 
 # 실제 별점이 아니라 프롬프트 컨텍스트용 플레이스홀더 — generate_ai_reply의
@@ -91,11 +91,11 @@ def get_or_create_scenario(db: Session, store: Store, category: str) -> Onboardi
         customer_nickname="", customer_order_count=1, category=category,
         is_sensitive=(category == "hygiene"), created_at=datetime.now(timezone.utc),
     )
-    draft_text = generate_ai_reply(db, fake_review, store, _default_style(db, store))
+    draft_text, trace_id = generate_ai_reply_with_trace(db, fake_review, store, _default_style(db, store))
 
     scenario = OnboardingScenario(
         store_id=store.id, category=category,
-        virtual_review_text=virtual_review_text, draft_text=draft_text,
+        virtual_review_text=virtual_review_text, draft_text=draft_text, trace_id=trace_id,
         status="pending", created_at=datetime.now(timezone.utc),
     )
     db.add(scenario)

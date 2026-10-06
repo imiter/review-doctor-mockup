@@ -162,6 +162,21 @@ def test_default_style_uses_store_configured_style_over_default(db_session, seed
     assert result.id != reply_styles.id
 
 
+def test_get_or_create_scenario_stores_trace_id(db_session, seeded_user, monkeypatch):
+    import app.llm.onboarding as onboarding_mod
+
+    store = seeded_user["store"]
+    monkeypatch.setattr(onboarding_mod, "generate_virtual_review", lambda category: "가상 리뷰")
+    monkeypatch.setattr(
+        onboarding_mod, "generate_ai_reply_with_trace",
+        lambda db, review, store, style: ("가상 답글", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+    )
+
+    scenario = onboarding_mod.get_or_create_scenario(db_session, store, "delivery")
+
+    assert scenario.trace_id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+
 def test_generate_virtual_review_uses_category_label(monkeypatch):
     captured = {}
 
