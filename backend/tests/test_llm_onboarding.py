@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from app.llm import generate, onboarding
+from app.llm import onboarding
 from app.models import GoldenExample, OnboardingScenario, ReplySetting, ReplyStyle, Review
 
 
@@ -47,7 +47,7 @@ def test_find_uncovered_categories_all_six_for_fresh_store(db_session, seeded_us
 def test_get_or_create_scenario_creates_new_one(db_session, seeded_user, reply_styles, monkeypatch):
     store = seeded_user["store"]
     monkeypatch.setattr(onboarding.client, "call_haiku", lambda system, user, **kw: "가상 리뷰 본문")
-    monkeypatch.setattr(generate.client, "call_sonnet", lambda system, user, **kw: "마중물 초안")
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", lambda system, user, **kw: "마중물 초안")
 
     scenario = onboarding.get_or_create_scenario(db_session, store, "hygiene")
 
@@ -62,7 +62,7 @@ def test_get_or_create_scenario_reuses_existing_without_calling_llm_again(db_ses
     store = seeded_user["store"]
     calls = []
     monkeypatch.setattr(onboarding.client, "call_haiku", lambda system, user, **kw: calls.append(1) or "가상 리뷰")
-    monkeypatch.setattr(generate.client, "call_sonnet", lambda system, user, **kw: "초안")
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", lambda system, user, **kw: "초안")
 
     first = onboarding.get_or_create_scenario(db_session, store, "hygiene")
     second = onboarding.get_or_create_scenario(db_session, store, "hygiene")
@@ -101,7 +101,7 @@ def test_get_or_create_scenario_recovers_from_concurrent_insert_race(db_session,
         return "이 값은 쓰이지 않는다 — winner가 이미 커밋됐다"
 
     monkeypatch.setattr(onboarding.client, "call_haiku", _sneaky_call_haiku)
-    monkeypatch.setattr(generate.client, "call_sonnet", lambda system, user, **kw: "초안")
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", lambda system, user, **kw: "초안")
 
     scenario = onboarding.get_or_create_scenario(db_session, store, "hygiene")
 

@@ -39,7 +39,7 @@ def test_generate_ai_reply_includes_style_profile_and_examples(db_session, seede
         captured["user"] = user
         return "죄송합니다, 확인하겠습니다."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     result = generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -65,7 +65,7 @@ def test_generate_ai_reply_without_style_profile_uses_fallback_instruction(db_se
     def _fake_call_sonnet(system, user, **kw):
         return "죄송합니다."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     result = generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -89,7 +89,7 @@ def test_generate_ai_reply_injects_sensitive_instruction(db_session, seeded_user
         captured["user"] = user
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -118,7 +118,7 @@ def test_generate_ai_reply_omits_complaint_framing_for_no_issue_review(db_sessio
         captured["user"] = user
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -143,7 +143,7 @@ def test_generate_ai_reply_includes_persona_tone_instruction_when_no_issue(db_se
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -170,7 +170,7 @@ def test_generate_ai_reply_overrides_tone_for_non_sensitive_complaint(db_session
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -195,7 +195,7 @@ def test_generate_ai_reply_overrides_tone_when_sensitive(db_session, seeded_user
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -220,7 +220,7 @@ def test_generate_ai_reply_overrides_tone_when_sentiment_conflict(db_session, se
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -244,7 +244,7 @@ def test_generate_ai_reply_strips_emoji_from_output_when_sensitive(db_session, s
     db_session.commit()
 
     monkeypatch.setattr(
-        generate.client, "call_sonnet",
+        "app.llm.agent_graph.call_sonnet_via_langgraph",
         lambda system, user, **kw: "안녕하세요😊 죄송합니다🙏 확인하겠습니다😞",
     )
 
@@ -265,7 +265,7 @@ def test_generate_ai_reply_keeps_emoji_for_no_issue_review(db_session, seeded_us
     db_session.add(review)
     db_session.commit()
 
-    monkeypatch.setattr(generate.client, "call_sonnet", lambda system, user, **kw: "감사합니다😊")
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", lambda system, user, **kw: "감사합니다😊")
 
     result = generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -298,7 +298,7 @@ def test_generate_ai_reply_strips_emoji_from_examples_when_sensitive(db_session,
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -330,7 +330,7 @@ def test_generate_ai_reply_grounding_present_even_when_tone_overridden(db_sessio
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -366,7 +366,7 @@ def test_generate_ai_reply_uses_matched_brand_name_not_store_name(db_session, se
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -392,7 +392,7 @@ def test_generate_ai_reply_falls_back_to_store_name_when_no_brand_match(db_sessi
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -435,7 +435,7 @@ def test_generate_ai_reply_includes_matched_menu_composition(db_session, seeded_
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -460,7 +460,7 @@ def test_generate_ai_reply_omits_menu_section_when_no_brand_menu_info(db_session
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -499,7 +499,7 @@ def test_generate_ai_reply_includes_active_ceo_notice(db_session, seeded_user, p
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -541,7 +541,7 @@ def test_generate_ai_reply_excludes_blocked_or_hidden_ceo_notice(db_session, see
         captured["system"] = system
         return "..."
 
-    monkeypatch.setattr(generate.client, "call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, seeded_user["store"], reply_styles)
 
@@ -573,7 +573,7 @@ def test_generate_ai_reply_uses_procedural_rule_text_for_complaint_tone(
         captured["system_prompt"] = system_prompt
         return "테스트 응답"
 
-    monkeypatch.setattr("app.llm.generate.client.call_sonnet", _fake_call_sonnet)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call_sonnet)
 
     generate.generate_ai_reply(db_session, review, store, reply_styles)
 
@@ -598,7 +598,7 @@ def test_generate_ai_reply_skips_inactive_rule(db_session, seeded_user, platform
 
     captured = {}
     monkeypatch.setattr(
-        "app.llm.generate.client.call_sonnet",
+        "app.llm.agent_graph.call_sonnet_via_langgraph",
         lambda system_prompt, user_message, max_tokens: (captured.__setitem__("p", system_prompt), "응답")[1],
     )
 

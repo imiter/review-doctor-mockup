@@ -37,7 +37,6 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.llm import client
 from app.llm.rag import count_recent_same_category, fetch_golden_examples
 from app.models import BaeminShopBrand, BrandCeoNotice, BrandMenuInfo, ProceduralRule, ReplyStyle, Review, Store, StorePlatformConnection, StoreStyleProfile
 
@@ -295,25 +294,11 @@ def _build_user_message(review: Review, category_label: str, repeat_count: int, 
 
 
 def generate_ai_reply(db: Session, review: Review, store: Store, style: ReplyStyle) -> str:
-    profile = db.scalar(select(StoreStyleProfile).where(StoreStyleProfile.store_id == store.id))
-    style_rules = profile.rules if profile is not None else _FALLBACK_STYLE_RULES
-    rules = fetch_active_rules(db)
+    """app/llm/agent_graph.py의 LangGraph 루프를 돌리고 최종 텍스트만
+    반환한다 — 기존 호출부(reviews.py의 수동 생성, reply_onboarding.py의
+    훈련카드 초안)는 검증 통과 여부를 몰라도 되므로 공개 시그니처를
+    그대로 유지한다. 검증 결과(통과/보류)가 필요한 review_sync.py의
+    자동답글 경로는 이 함수가 아니라 run_agent를 직접 쓴다(Task 5)."""
+    from app.llm.agent_graph import run_agent
 
-    examples = fetch_golden_examples(db, store.id, review.category, review.content, limit=3)
-    repeat_count = count_recent_same_category(db, store.id, review.category, days=30)
-    category_label = CATEGORY_LABELS.get(review.category, review.category)
-
-    tone_overridden = review.category != "no_issue" or review.is_sensitive or review.sentiment_conflict
-    tone_instruction = rules["complaint_tone_override"] if tone_overridden else style.tone_instruction
-    if review.category == "delivery":
-        tone_instruction = f"{tone_instruction}\n\n{rules['delivery_boundary']}"
-
-    display_name = _resolve_display_name(db, store, review)
-    menu_context = _find_menu_context(db, store, review)
-    system_prompt = _build_system_prompt(
-        display_name, style_rules, examples, tone_instruction, rules, menu_context,
-        strip_example_emoji=tone_overridden,
-    )
-    user_message = _build_user_message(review, category_label, repeat_count, rules)
-    content = client.call_sonnet(system_prompt, user_message, max_tokens=800)
-    return _strip_emoji(content) if tone_overridden else content
+    return run_agent(db, review, store, style).content

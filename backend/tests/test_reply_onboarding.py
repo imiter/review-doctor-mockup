@@ -1,6 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 
-from app.llm import generate, onboarding
+from app.llm import onboarding
 from app.models import GoldenExample, OnboardingScenario
 
 _ALL_CATEGORIES = {"food_quality", "delivery", "hygiene", "service", "price", "missing_or_wrong_item"}
@@ -8,7 +8,7 @@ _ALL_CATEGORIES = {"food_quality", "delivery", "hygiene", "service", "price", "m
 
 def _patch_llm(monkeypatch, virtual_review="가상 리뷰 본문", draft_text="마중물 초안"):
     monkeypatch.setattr(onboarding.client, "call_haiku", lambda system, user, **kw: virtual_review)
-    monkeypatch.setattr(generate.client, "call_sonnet", lambda system, user, **kw: draft_text)
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", lambda system, user, **kw: draft_text)
 
 
 def test_wizard_returns_all_uncovered_categories(client, seeded_user, auth_headers, reply_styles, monkeypatch):
