@@ -1,5 +1,7 @@
 from datetime import date, datetime, timezone
 
+import pytest
+
 from app.models import Alert, DailySettlement, Order, RepurchaseMetric, Review
 
 
@@ -96,3 +98,46 @@ def test_dashboard_counts_unread_alerts_only(client, db_session, seeded_user, au
 
     body = client.get("/dashboard", headers=auth_headers).json()
     assert body["unread_alerts"] == 1
+
+
+def test_draft_feedback_trend_aggregates_by_category(client, auth_headers, db_session, seeded_user):
+    from app.models import DraftFeedbackScore
+
+    store = seeded_user["store"]
+    db_session.add_all([
+        DraftFeedbackScore(
+            store_id=store.id, category="food_quality", similarity_score=0.9,
+            trace_id="d1111111-1111-1111-1111-111111111111",
+            created_at=datetime.now(timezone.utc),
+        ),
+        DraftFeedbackScore(
+            store_id=store.id, category="food_quality", similarity_score=0.7,
+            trace_id="d2222222-2222-2222-2222-222222222222",
+            created_at=datetime.now(timezone.utc),
+        ),
+        DraftFeedbackScore(
+            store_id=store.id, category="no_issue", similarity_score=0.95,
+            trace_id="d3333333-3333-3333-3333-333333333333",
+            created_at=datetime.now(timezone.utc),
+        ),
+    ])
+    db_session.commit()
+
+    resp = client.get(f"/dashboard/draft-feedback-trend?store_id={store.id}", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    by_category = {c["category"]: c for c in body["categories"]}
+    assert by_category["food_quality"]["sample_count"] == 2
+    assert by_category["food_quality"]["avg_similarity"] == pytest.approx(0.8, abs=0.001)
+    assert by_category["food_quality"]["label"] == "음식 품질(맛/온도/양)"
+    assert by_category["no_issue"]["sample_count"] == 1
+    assert by_category["no_issue"]["label"] == "특이 불만 없음"
+
+
+def test_draft_feedback_trend_empty_when_no_scores(client, auth_headers, seeded_user):
+    store = seeded_user["store"]
+    resp = client.get(f"/dashboard/draft-feedback-trend?store_id={store.id}", headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"categories": []}

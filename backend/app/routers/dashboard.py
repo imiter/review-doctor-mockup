@@ -9,17 +9,21 @@ from sqlalchemy.orm import Session
 from app.acos import calculate_performance
 from app.auth import get_current_user, get_user_default_store_id
 from app.db import get_db
+from app.llm.generate import CATEGORY_LABELS
 from app.models import (
     AdCampaign,
     AdPerformanceMetric,
     Alert,
     DailySettlement,
+    DraftFeedbackScore,
     RepurchaseMetric,
     Review,
     Store,
 )
 
 router = APIRouter(tags=["dashboard"])
+
+_NO_ISSUE_LABEL = "특이 불만 없음"
 
 
 @router.get("/dashboard")
@@ -111,3 +115,34 @@ def list_alerts(store_id: int | None = None, user=Depends(get_current_user), db:
         {"id": a.id, "alert_type": a.alert_type, "message": a.message, "is_read": a.is_read, "created_at": a.created_at.isoformat()}
         for a in alerts
     ]
+
+
+@router.get("/dashboard/draft-feedback-trend")
+def draft_feedback_trend(store_id: int | None = None, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """AI 초안과 사장님 최종본의 유사도를 카테고리별로 집계한다(스펙
+    4.2절 "순환 측정 장치") — 요약을 별도 테이블로 캐싱하지 않고 매
+    조회마다 draft_feedback_scores를 직접 집계한다(daily_settlements와
+    같은 정규화 원칙). 표본이 전혀 없는 카테고리는 응답에서 뺀다(0건을
+    0.0으로 보여주면 "측정됐는데 낮다"로 오해할 수 있다)."""
+    sid = store_id or get_user_default_store_id(user, db)
+    rows = db.execute(
+        select(
+            DraftFeedbackScore.category,
+            func.avg(DraftFeedbackScore.similarity_score),
+            func.count(DraftFeedbackScore.id),
+        )
+        .where(DraftFeedbackScore.store_id == sid)
+        .group_by(DraftFeedbackScore.category)
+        .order_by(func.count(DraftFeedbackScore.id).desc())
+    ).all()
+    return {
+        "categories": [
+            {
+                "category": category,
+                "label": CATEGORY_LABELS.get(category, _NO_ISSUE_LABEL if category == "no_issue" else category),
+                "avg_similarity": round(float(avg_score), 4),
+                "sample_count": count,
+            }
+            for category, avg_score, count in rows
+        ],
+    }
