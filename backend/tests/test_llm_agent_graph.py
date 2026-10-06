@@ -1,7 +1,48 @@
 from datetime import datetime, timezone
 
-from app.llm.agent_graph import generate_draft_node, retrieve_memory_node
-from app.models import Review
+import pytest
+
+from app.llm.agent_graph import (
+    fix_draft_node,
+    generate_draft_node,
+    retrieve_memory_node,
+    route_after_verify,
+    run_agent,
+    verify_draft_node,
+)
+from app.models import GoldenExample, Review
+
+
+def _golden(reply_text: str, *, category: str = "food_quality", store_id: int = 1) -> GoldenExample:
+    """영속화하지 않는 GoldenExample — 노드 단위 테스트는 state에 객체를
+    직접 꽂아 넣기만 하므로 DB가 필요 없다."""
+    return GoldenExample(
+        id=1, store_id=store_id, category=category, review_text="r",
+        reply_text=reply_text, is_manual=True, is_synthetic=False, source="organic",
+    )
+
+
+def _fake_review(*, rating: int = 5, category: str = "no_issue"):
+    return type(
+        "R", (),
+        {"rating": rating, "category": category, "content": "c",
+         "customer_order_count": 1, "is_sensitive": False},
+    )()
+
+
+def _draft_state(**overrides) -> dict:
+    """fix_draft가 복붙 위반으로 재생성할 때 generate_draft_node가 읽는
+    키 전부를 담은 기본 state."""
+    state = {
+        "draft": "초안", "violations": [], "copy_paste_match": None, "retry_count": 0,
+        "display_name": "치킨대장", "style_rules": "s", "examples": [],
+        "tone_instruction": "t",
+        "rules": {"menu_grounding": "m", "few_shot_anti_overfit": "f", "no_issue_framing": "n"},
+        "menu_context": None, "tone_overridden": False,
+        "review": _fake_review(), "category_label": "무난", "repeat_count": 0,
+    }
+    state.update(overrides)
+    return state
 
 
 def test_retrieve_memory_node_populates_state(db_session, seeded_user, platforms, reply_styles):
@@ -107,3 +148,318 @@ def test_generate_draft_node_appends_extra_instruction_to_user_message(monkeypat
     generate_draft_node(state, extra_instruction="예시를 그대로 복사하지 마라")
 
     assert "예시를 그대로 복사하지 마라" in captured["user"]
+
+
+# ---------------------------------------------------------------------------
+# verify_draft_node — 결정론적 체크 둘(이모지 / 복붙)만, LLM 재판단 없음
+# ---------------------------------------------------------------------------
+
+
+def test_verify_draft_flags_emoji_violation_when_tone_overridden():
+    state = {"draft": "죄송합니다 😊", "tone_overridden": True, "examples": []}
+
+    result = verify_draft_node(state)
+
+    assert "emoji" in result["violations"]
+
+
+def test_verify_draft_ignores_emoji_when_tone_not_overridden():
+    """no_issue(칭찬/무난) 리뷰는 페르소나 톤의 이모지를 그대로 쓴다 —
+    이모지가 있다는 사실만으로 위반이 되면 안 된다."""
+    state = {"draft": "감사합니다 😊", "tone_overridden": False, "examples": []}
+
+    result = verify_draft_node(state)
+
+    assert result["violations"] == []
+
+
+def test_verify_draft_flags_copy_paste_violation():
+    example = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.")
+    state = {
+        "draft": "불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.",
+        "tone_overridden": False, "examples": [example],
+    }
+
+    result = verify_draft_node(state)
+
+    assert "copy_paste" in result["violations"]
+    assert result["copy_paste_match"] is example
+
+
+def test_verify_draft_flags_near_verbatim_copy_not_only_exact():
+    """글자 하나 바꿔 임계값을 피해가는 경우까지 잡아야 한다 —
+    SequenceMatcher 비율 0.95(실측)."""
+    example = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.")
+    state = {
+        "draft": "불편을 드려 정말 죄송합니다. 다음에는 더 신경쓰겠습니다.",
+        "tone_overridden": False, "examples": [example],
+    }
+
+    result = verify_draft_node(state)
+
+    assert "copy_paste" in result["violations"]
+
+
+def test_verify_draft_allows_paraphrase_of_example():
+    """같은 상황에 대한 다른 표현(실측 비율 0.34)은 위반이 아니다 —
+    임계값이 너무 낮으면 정상 생성물까지 전부 재시도에 걸린다."""
+    example = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.")
+    state = {
+        "draft": "맛이 기대에 못 미쳐 속상하셨겠어요. 조리 과정을 다시 점검하겠습니다.",
+        "tone_overridden": False, "examples": [example],
+    }
+
+    result = verify_draft_node(state)
+
+    assert result["violations"] == []
+    assert result["copy_paste_match"] is None
+
+
+def test_verify_draft_picks_the_most_similar_example_as_match():
+    """여러 예시가 동시에 임계값을 넘으면, 재지시문에 들어갈 예시는
+    가장 많이 겹친 쪽이어야 한다."""
+    close = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.")
+    closer = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다!")
+    state = {
+        "draft": "불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다!",
+        "tone_overridden": False, "examples": [close, closer],
+    }
+
+    result = verify_draft_node(state)
+
+    assert result["copy_paste_match"] is closer
+
+
+def test_verify_draft_no_violations_when_clean():
+    state = {"draft": "완전히 다른 새 문장입니다.", "tone_overridden": False, "examples": []}
+
+    result = verify_draft_node(state)
+
+    assert result["violations"] == []
+
+
+def test_verify_draft_makes_no_llm_call(monkeypatch):
+    """스펙 2.1절 — 검증은 전부 결정론적이고 LLM 자기비판을 쓰지 않는다
+    (말투가 무난하게 수렴하는 위험 때문에 기각된 접근)."""
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("verify_draft_node는 LLM을 호출하면 안 된다")
+
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fail_if_called)
+    example = _golden("불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.")
+
+    # 위반이 있는 경우와 없는 경우 둘 다 — 어느 분기에서도 호출이 없어야 한다.
+    verify_draft_node({"draft": "죄송합니다 😊", "tone_overridden": True, "examples": [example]})
+    verify_draft_node({"draft": "완전히 다른 새 문장입니다.", "tone_overridden": False, "examples": [example]})
+    verify_draft_node({
+        "draft": "불편을 드려 정말 죄송합니다. 다음엔 더 신경쓰겠습니다.",
+        "tone_overridden": True, "examples": [example],
+    })
+
+
+# ---------------------------------------------------------------------------
+# fix_draft_node
+# ---------------------------------------------------------------------------
+
+
+def test_fix_draft_strips_emoji_without_llm_call(monkeypatch):
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("이모지만 위반이면 LLM을 호출하면 안 된다")
+
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fail_if_called)
+    state = _draft_state(draft="감사합니다 😊", violations=["emoji"], tone_overridden=True)
+
+    result = fix_draft_node(state)
+
+    assert result["draft"] == "감사합니다"
+    assert result["retry_count"] == 1
+
+
+def test_fix_draft_regenerates_with_targeted_instruction_for_copy_paste(monkeypatch):
+    captured = {}
+
+    def _fake_call(system, user, max_tokens):
+        captured["user"] = user
+        return "새로 생성된 답글"
+
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call)
+    example = _golden("예시 답글 원문")
+    state = _draft_state(
+        draft="예시 답글 원문", violations=["copy_paste"],
+        copy_paste_match=example, examples=[example],
+    )
+
+    result = fix_draft_node(state)
+
+    # 막연한 "다시 해봐"가 아니라 어떤 예시와 겹쳤는지 콕 집어 지시해야 한다.
+    assert "예시 답글 원문" in captured["user"]
+    assert result["draft"] == "새로 생성된 답글"
+    assert result["retry_count"] == 1
+
+
+def test_fix_draft_strips_emoji_from_regenerated_draft_when_tone_overridden(monkeypatch):
+    """복붙 재생성 결과에도 이모지 제거를 다시 적용해야 한다 — 불만 리뷰에
+    이모지가 섞이면 안 된다는 보장이 재시도 경로에서 깨지면 안 된다."""
+    monkeypatch.setattr(
+        "app.llm.agent_graph.call_sonnet_via_langgraph",
+        lambda system, user, max_tokens: "새 답글입니다 😊",
+    )
+    example = _golden("예시 답글 원문")
+    state = _draft_state(
+        draft="예시 답글 원문", violations=["copy_paste", "emoji"],
+        copy_paste_match=example, examples=[example], tone_overridden=True,
+    )
+
+    result = fix_draft_node(state)
+
+    assert result["draft"] == "새 답글입니다"
+
+
+def test_fix_draft_falls_back_to_emoji_strip_when_copy_paste_match_missing(monkeypatch):
+    """방어 코드 — copy_paste 위반인데 match 객체가 없으면 지시문을 만들 수
+    없다. 그 상태로 LLM을 부르는 대신(막연한 재시도 금지) 결정론적 정리만
+    하고 재시도 횟수를 올린다."""
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("지목할 예시가 없으면 재생성하지 않는다")
+
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fail_if_called)
+    state = _draft_state(
+        draft="답글 😊", violations=["copy_paste"], copy_paste_match=None, tone_overridden=True,
+    )
+
+    result = fix_draft_node(state)
+
+    assert result["draft"] == "답글"
+    assert result["retry_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# route_after_verify — 재시도 상한
+# ---------------------------------------------------------------------------
+
+
+def test_route_after_verify_goes_to_finalize_when_clean():
+    assert route_after_verify({"violations": [], "retry_count": 0}) == "finalize"
+
+
+def test_route_after_verify_goes_to_fix_draft_when_violations_and_retries_left():
+    assert route_after_verify({"violations": ["emoji"], "retry_count": 0}) == "fix_draft"
+    assert route_after_verify({"violations": ["emoji"], "retry_count": 1}) == "fix_draft"
+
+
+def test_route_after_verify_gives_up_after_max_retries():
+    """off-by-one 경계 — retry_count가 2(=_MAX_RETRIES)에 도달하면 위반이
+    남아 있어도 더 돌리지 않는다."""
+    assert route_after_verify({"violations": ["copy_paste"], "retry_count": 2}) == "finalize"
+    assert route_after_verify({"violations": ["copy_paste"], "retry_count": 3}) == "finalize"
+
+
+# ---------------------------------------------------------------------------
+# run_agent — 그래프 전체
+# ---------------------------------------------------------------------------
+
+
+def _make_review(db_session, store, platforms, **overrides):
+    review = Review(
+        store_id=store.id, platform_id=platforms["baemin"].id, menu_summary="치킨",
+        rating=5, content="맛있어요", customer_nickname="손님", category="no_issue",
+        created_at=datetime.now(timezone.utc), **overrides,
+    )
+    db_session.add(review)
+    db_session.commit()
+    return review
+
+
+def test_run_agent_end_to_end_clean_draft(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    monkeypatch.setattr(
+        "app.llm.agent_graph.call_sonnet_via_langgraph",
+        lambda system, user, max_tokens: "완전히 새로운 답글 문장입니다",
+    )
+    store = seeded_user["store"]
+    review = _make_review(db_session, store, platforms)
+
+    result = run_agent(db_session, review, store, reply_styles)
+
+    assert result.passed_verification is True
+    assert result.retry_count == 0
+    assert result.content == "완전히 새로운 답글 문장입니다"
+
+
+def test_run_agent_recovers_after_one_retry(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """첫 초안이 예시 복붙이면 한 번 재생성하고, 두 번째가 깨끗하면 통과로
+    끝난다 — retry_count는 1."""
+    store = seeded_user["store"]
+    db_session.add(GoldenExample(
+        store_id=store.id, category="no_issue", review_text="r", reply_text="항상 똑같은 답글",
+        is_manual=True, is_synthetic=False, source="organic",
+        created_at=datetime.now(timezone.utc),
+    ))
+    review = _make_review(db_session, store, platforms)
+
+    calls = {"n": 0}
+
+    def _fake_call(system, user, max_tokens):
+        calls["n"] += 1
+        return "항상 똑같은 답글" if calls["n"] == 1 else "오늘도 찾아주셔서 고맙습니다"
+
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call)
+
+    result = run_agent(db_session, review, store, reply_styles)
+
+    assert result.passed_verification is True
+    assert result.retry_count == 1
+    assert result.content == "오늘도 찾아주셔서 고맙습니다"
+    assert calls["n"] == 2  # 초안 1회 + 재생성 1회
+
+
+def test_run_agent_holds_after_max_retries_when_persistently_violating(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """절대 안 고쳐지는 모델 — 무한 루프에 빠지지도, 예외를 던지지도 않고
+    retry_count=2에서 멈춰 passed_verification=False로 보고해야 한다."""
+    store = seeded_user["store"]
+    db_session.add(GoldenExample(
+        store_id=store.id, category="no_issue", review_text="r", reply_text="항상 똑같은 답글",
+        is_manual=True, is_synthetic=False, source="organic",
+        created_at=datetime.now(timezone.utc),
+    ))
+    review = _make_review(db_session, store, platforms)
+
+    calls = {"n": 0}
+
+    def _fake_call(system, user, max_tokens):
+        calls["n"] += 1
+        return "항상 똑같은 답글"
+
+    monkeypatch.setattr("app.llm.agent_graph.call_sonnet_via_langgraph", _fake_call)
+
+    result = run_agent(db_session, review, store, reply_styles)
+
+    assert result.passed_verification is False
+    assert result.retry_count == 2  # 3이 아니다 — 상한이 2회 재시도
+    assert result.content == "항상 똑같은 답글"
+    # 초안 1회 + 재생성 2회 = 3회. 그 이상 호출되면 상한이 새는 것이다.
+    assert calls["n"] == 3
+
+
+def test_run_agent_does_not_hit_langgraph_recursion_limit(db_session, seeded_user, platforms, reply_styles, monkeypatch):
+    """위 '절대 안 고쳐지는' 경로가 LangGraph의 recursion_limit(기본 25)에
+    걸려 GraphRecursionError로 터지는 게 아니라, 우리 라우터가 스스로
+    멈춰서 정상 종료하는지 확인한다."""
+    from langgraph.errors import GraphRecursionError
+
+    store = seeded_user["store"]
+    db_session.add(GoldenExample(
+        store_id=store.id, category="no_issue", review_text="r", reply_text="항상 똑같은 답글",
+        is_manual=True, is_synthetic=False, source="organic",
+        created_at=datetime.now(timezone.utc),
+    ))
+    review = _make_review(db_session, store, platforms)
+    monkeypatch.setattr(
+        "app.llm.agent_graph.call_sonnet_via_langgraph",
+        lambda system, user, max_tokens: "항상 똑같은 답글",
+    )
+
+    try:
+        result = run_agent(db_session, review, store, reply_styles)
+    except GraphRecursionError as exc:  # pragma: no cover - 회귀 시에만 실행
+        pytest.fail(f"재시도 루프가 스스로 멈추지 않았다: {exc}")
+
+    assert result.passed_verification is False

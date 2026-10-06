@@ -6,19 +6,21 @@
 쓰지 않는다 — 말투가 무난하게 수렴할 위험이 있다고 판단해 기각함(스펙
 2.1절), 검증은 전부 결정론적 체크로만 한다.
 
-이 파일은 그중 retrieve_memory/generate_draft 두 노드만 만든다(Task 2) —
-verify_draft/fix_draft/finalize와 StateGraph 조립, run_agent 진입점은
-Task 3에서 추가한다. generate.py의 generate_ai_reply 자체는 이 작업에서
-건드리지 않는다 — generate_ai_reply를 이 그래프 호출로 교체하는 것은
-Task 4다."""
+노드 5개와 StateGraph 조립, run_agent 진입점이 모두 이 파일에 있다.
+generate.py의 generate_ai_reply 자체는 아직 건드리지 않는다 —
+generate_ai_reply를 이 그래프 호출로 교체하는 것은 Task 4다."""
 
+import difflib
+from dataclasses import dataclass
 from typing import TypedDict
 
+from langgraph.graph import END, StateGraph
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.llm.generate import (
     CATEGORY_LABELS,
+    _EMOJI_PATTERN,
     _FALLBACK_STYLE_RULES,
     _build_system_prompt,
     _build_user_message,
@@ -30,6 +32,18 @@ from app.llm.generate import (
 from app.llm.langchain_client import call_sonnet_via_langgraph
 from app.llm.rag import count_recent_same_category, fetch_golden_examples
 from app.models import GoldenExample, ReplyStyle, Review, Store, StoreStyleProfile
+
+# 재시도 상한 — 이 횟수만큼 fix_draft를 돌려도 위반이 남으면 루프를 포기하고
+# passed_verification=False로 끝낸다(무한 루프 금지). 그 신호로 자동 제출
+# 여부를 가르는 건 Task 5의 일이다.
+_MAX_RETRIES = 2
+
+# difflib.SequenceMatcher 비율 — 1.0이면 완전히 동일. 실측 데이터로 보정
+# 전이라 보수적으로 시작한다(스펙 1.4.1의 _CONSISTENCY_DISTANCE_THRESHOLD와
+# 같은 종류의 잠정값 — 운영하면서 조정 대상). 이 값으로 실제 한국어 문장을
+# 재본 결과: 완전 동일 1.0, 어미 하나만 바꾼 사실상 복붙 0.95, 같은 상황을
+# 다르게 쓴 의역 0.34 — 0.8이면 뒤 둘을 뚜렷이 가른다.
+_COPY_PASTE_SIMILARITY_THRESHOLD = 0.8
 
 
 class AgentState(TypedDict, total=False):
@@ -110,3 +124,146 @@ def generate_draft_node(state: AgentState, *, extra_instruction: str | None = No
     content = call_sonnet_via_langgraph(system_prompt, user_message, max_tokens=800)
     draft = _strip_emoji(content) if state["tone_overridden"] else content
     return {"draft": draft}
+
+
+def _apply_tone_cleanup(draft: str, tone_overridden: bool) -> str:
+    """불만 리뷰(tone_overridden)의 답글에서만 이모지를 지운다 — no_issue
+    (칭찬/무난) 리뷰는 페르소나 톤의 이모지를 그대로 둔다. generate_draft와
+    fix_draft가 같은 규칙을 쓰도록 한 군데로 모았다."""
+    return _strip_emoji(draft) if tone_overridden else draft
+
+
+def verify_draft_node(state: AgentState) -> dict:
+    """결정론적 체크 둘만 한다 — LLM 재판단 없음(스펙 2.1절). (a) 불만
+    톤인데 이모지가 섞였는지, (b) few-shot 예시 중 하나를 사실상 그대로
+    복붙했는지(SequenceMatcher 비율로 판단).
+
+    LLM 자기비판을 안 쓰는 이유는 이 프로젝트의 북극성 목표와 정면으로
+    충돌하기 때문이다 — 모델이 자기 출력을 다시 평가하면 특징적인 말투가
+    무난한 "도움되는 조수" 톤으로 수렴하는 경향이 있는데, 우리가 RAG를
+    도입한 목적 자체가 사장님 실제 말투 재현이다.
+
+    (a)는 현재 그래프 배선에서는 사실상 발화하지 않는다 — generate_draft와
+    fix_draft가 tone_overridden이면 이미 같은 _EMOJI_PATTERN으로 이모지를
+    지우고 나오기 때문에, 그 뒤에 같은 패턴으로 검색해봐도 걸릴 수가 없다.
+    그래도 남겨둔다: 이 노드가 보장하는 건 "불만 답글에 이모지가 없다"는
+    사후 불변조건이고, 앞 단계가 바뀌거나(다른 생성 경로 추가) 다른 곳에서
+    이 노드를 재사용할 때 그 불변조건이 조용히 깨지는 걸 막는 그물이다."""
+    draft = state["draft"]
+    violations: list[str] = []
+
+    if state["tone_overridden"] and _EMOJI_PATTERN.search(draft):
+        violations.append("emoji")
+
+    copy_paste_match = _find_copy_paste_match(draft, state.get("examples") or [])
+    if copy_paste_match is not None:
+        violations.append("copy_paste")
+
+    return {"violations": violations, "copy_paste_match": copy_paste_match}
+
+
+def _find_copy_paste_match(draft: str, examples: list[GoldenExample]) -> GoldenExample | None:
+    """초안과 가장 많이 겹치는 예시를 돌려준다(임계값을 넘는 게 없으면
+    None). "가장 많이"가 중요하다 — fix_draft의 재지시문이 "이 문장과
+    비슷하다"며 예시 원문을 콕 집어 넣으므로, 여러 개가 걸렸을 때 엉뚱한
+    쪽을 지목하면 지시가 어긋난다."""
+    best: GoldenExample | None = None
+    best_ratio = _COPY_PASTE_SIMILARITY_THRESHOLD
+    for example in examples:
+        ratio = difflib.SequenceMatcher(None, draft, example.reply_text).ratio()
+        if ratio >= best_ratio:
+            best, best_ratio = example, ratio
+    return best
+
+
+def fix_draft_node(state: AgentState) -> dict:
+    """이모지만 위반이면 코드로 바로 제거한다(LLM 호출 없음 — 고치는
+    쪽에도 "LLM 재판단 금지" 원칙이 그대로 적용된다). 복붙 위반이 있으면
+    (이모지와 동시에 있어도) 겹친 예시를 콕 집어 "그 문장만 피해서 다시
+    써라"는 좁은 지시로 딱 한 번 재생성한다 — 막연한 "다시 해봐"는
+    쓰지 않는다. 재생성 결과에도 이모지 제거를 다시 적용한다."""
+    violations = state["violations"]
+    retry_count = state["retry_count"] + 1
+    tone_overridden = state["tone_overridden"]
+    match = state.get("copy_paste_match")
+
+    if "copy_paste" not in violations or match is None:
+        # 이모지만 위반이거나(결정론적으로 고칠 수 있다), 복붙 위반인데
+        # 지목할 예시 객체가 없는 비정상 상태 — 어느 쪽이든 재생성 지시를
+        # 좁게 만들 수 없으니 LLM을 부르지 않는다.
+        return {
+            "draft": _apply_tone_cleanup(state["draft"], tone_overridden),
+            "retry_count": retry_count,
+        }
+
+    extra_instruction = (
+        f'방금 만든 답글이 다음 예시와 너무 비슷합니다: "{match.reply_text}". '
+        "이 문장을 그대로 쓰지 말고, 같은 상황이지만 표현을 완전히 새로 바꿔서 다시 작성하세요."
+    )
+    patch = generate_draft_node(state, extra_instruction=extra_instruction)
+    return {
+        "draft": _apply_tone_cleanup(patch["draft"], tone_overridden),
+        "retry_count": retry_count,
+    }
+
+
+def route_after_verify(state: AgentState) -> str:
+    """verify_draft 뒤 분기 — 깨끗하면 끝내고, 위반이 있으면 재시도 상한이
+    남았을 때만 fix_draft로 보낸다. 상한에 닿으면 예외를 던지지 않고
+    그냥 끝낸다(위반이 남은 채로 finalize → passed_verification=False)."""
+    if not state["violations"]:
+        return "finalize"
+    if state["retry_count"] >= _MAX_RETRIES:
+        return "finalize"
+    return "fix_draft"
+
+
+def finalize_node(state: AgentState) -> dict:
+    return {
+        "final_content": state["draft"],
+        "passed_verification": not state["violations"],
+    }
+
+
+def _build_graph():
+    graph = StateGraph(AgentState)
+    graph.add_node("retrieve_memory", retrieve_memory_node)
+    graph.add_node("generate_draft", generate_draft_node)
+    graph.add_node("verify_draft", verify_draft_node)
+    graph.add_node("fix_draft", fix_draft_node)
+    graph.add_node("finalize", finalize_node)
+
+    graph.set_entry_point("retrieve_memory")
+    graph.add_edge("retrieve_memory", "generate_draft")
+    graph.add_edge("generate_draft", "verify_draft")
+    graph.add_conditional_edges(
+        "verify_draft", route_after_verify,
+        {"fix_draft": "fix_draft", "finalize": "finalize"},
+    )
+    graph.add_edge("fix_draft", "verify_draft")
+    graph.add_edge("finalize", END)
+    return graph.compile()
+
+
+# 모듈 import 시 한 번만 컴파일한다 — 그래프 구조는 요청마다 달라지지 않고,
+# 상태(db/review/store/style)는 invoke 인자로만 들어간다.
+_GRAPH = _build_graph()
+
+
+@dataclass
+class AgentResult:
+    content: str
+    passed_verification: bool
+    retry_count: int
+
+
+def run_agent(db: Session, review: Review, store: Store, style: ReplyStyle) -> AgentResult:
+    """그래프 진입점. passed_verification=False면 결정론적 검증을 끝까지
+    통과하지 못한 초안이라는 뜻이다 — 그래도 content는 돌려준다(사장님이
+    직접 고쳐 쓸 수 있도록). 이 신호로 자동 제출 여부를 가르는 건 Task 5."""
+    final_state = _GRAPH.invoke({"db": db, "review": review, "store": store, "style": style})
+    return AgentResult(
+        content=final_state["final_content"],
+        passed_verification=final_state["passed_verification"],
+        retry_count=final_state["retry_count"],
+    )
