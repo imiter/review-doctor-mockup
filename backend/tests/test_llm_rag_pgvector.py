@@ -48,6 +48,12 @@ def pg_engine():
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         conn.commit()
+    # drop_all을 먼저 한다 — create_all은 "없는 테이블만" 만들기 때문에,
+    # 지난 실행에서 만들어진 테이블이 그대로 남아 있으면 그 뒤에 추가된
+    # 컬럼(예: 2026-10-06의 golden_examples.reply_embedding)이 영원히
+    # 반영되지 않아 UndefinedColumn으로 깨진다(실측). 이 DB는 이 파일
+    # 전용(delivery_insight_test)이라 매번 비우고 다시 만들어도 안전하다.
+    Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     yield engine
     engine.dispose()
@@ -75,13 +81,13 @@ def pg_store(pg_db):
     return store
 
 
-def _make_example(pg_db, store_id, *, category="food_quality", review_text, embedding, created_at, is_manual=True, is_synthetic=False, source="backfill", source_review_id=None):
+def _make_example(pg_db, store_id, *, category="food_quality", review_text, embedding, created_at, is_manual=True, is_synthetic=False, source="backfill", source_review_id=None, reply_text="답글", reply_embedding=None):
     ex = GoldenExample(
         store_id=store_id, category=category,
-        review_text=review_text, reply_text="답글",
+        review_text=review_text, reply_text=reply_text,
         is_manual=is_manual, is_synthetic=is_synthetic, source=source,
         source_review_id=source_review_id,
-        embedding=embedding, created_at=created_at,
+        embedding=embedding, reply_embedding=reply_embedding, created_at=created_at,
     )
     pg_db.add(ex)
     pg_db.flush()
@@ -159,7 +165,7 @@ def test_check_voice_consistency_true_when_close_to_baseline(pg_db, pg_store):
     for i in range(3):
         _make_example(
             pg_db, pg_store.id, category="delivery",
-            review_text=f"리뷰{i}", embedding=base_vec,
+            review_text=f"리뷰{i}", embedding=None, reply_embedding=base_vec,
             created_at=datetime.now(timezone.utc),
         )
     pg_db.commit()
@@ -176,7 +182,7 @@ def test_check_voice_consistency_false_when_outlier(pg_db, pg_store):
     for i in range(3):
         _make_example(
             pg_db, pg_store.id, category="delivery",
-            review_text=f"리뷰{i}", embedding=base_vec,
+            review_text=f"리뷰{i}", embedding=None, reply_embedding=base_vec,
             created_at=datetime.now(timezone.utc),
         )
     pg_db.commit()
@@ -185,6 +191,101 @@ def test_check_voice_consistency_false_when_outlier(pg_db, pg_store):
     result = check_voice_consistency(pg_db, pg_store.id, "delivery", outlier_vec)
 
     assert result is False
+
+
+def test_check_voice_consistency_ignores_rows_without_reply_embedding(pg_db, pg_store):
+    """reply_embedding이 없는 행(백필 전/Voyage 실패)은 베이스라인에서
+    빠진다 — review_text 임베딩(embedding)만 있는 행을 세어 넘기면 거리
+    계산에 쓸 값이 없는 행을 "기준이 충분하다"고 오판하게 된다."""
+    from app.llm.rag import check_voice_consistency
+
+    for i in range(5):
+        _make_example(
+            pg_db, pg_store.id, category="delivery",
+            review_text=f"리뷰{i}", embedding=[0.5] * 1024, reply_embedding=None,
+            created_at=datetime.now(timezone.utc),
+        )
+    pg_db.commit()
+
+    assert check_voice_consistency(pg_db, pg_store.id, "delivery", [0.5] * 1024) is None
+
+
+def test_check_voice_consistency_compares_reply_text_not_review_text(pg_db, pg_store):
+    """핵심 회귀 테스트(2026-10-06 최종 리뷰 C3) — 리뷰 내용 유사도와 답글
+    말투 유사도가 **정반대 판정**을 내는 상황을 만들어, 함수가 답글 쪽을
+    따르는지 확인한다.
+
+    베이스라인 3건은 review_text 임베딩(embedding)은 후보와 완전히 같고
+    (= 리뷰 내용은 판박이), 답글 임베딩(reply_embedding)은 후보와 직교한다
+    (= 말투는 완전히 다름). 옛 구현(embedding 비교)은 거리 0 → True를
+    냈지만, 올바른 구현은 거리 최대 → False여야 한다."""
+    from app.llm.rag import check_voice_consistency
+
+    candidate_vec = [1.0] + [0.0] * 1023
+    orthogonal_vec = [0.0] * 1023 + [1.0]
+
+    for i in range(3):
+        _make_example(
+            pg_db, pg_store.id, category="delivery",
+            review_text=f"배달이 늦었어요{i}",
+            embedding=candidate_vec,        # 리뷰 내용은 후보와 동일
+            reply_embedding=orthogonal_vec,  # 답글 말투는 후보와 정반대
+            created_at=datetime.now(timezone.utc),
+        )
+    pg_db.commit()
+
+    assert check_voice_consistency(pg_db, pg_store.id, "delivery", candidate_vec) is False
+
+    # 대칭 확인: 반대로 뒤집으면(리뷰 내용은 정반대, 답글 말투는 동일)
+    # 판정도 뒤집혀야 한다 — 함수가 정말 답글 쪽만 본다는 증거.
+    for i in range(3):
+        _make_example(
+            pg_db, pg_store.id, category="hygiene",
+            review_text=f"위생 문제{i}",
+            embedding=orthogonal_vec,       # 리뷰 내용은 후보와 정반대
+            reply_embedding=candidate_vec,  # 답글 말투는 후보와 동일
+            created_at=datetime.now(timezone.utc),
+        )
+    pg_db.commit()
+
+    assert check_voice_consistency(pg_db, pg_store.id, "hygiene", candidate_vec) is True
+
+
+def test_check_voice_consistency_counts_onboarding_as_baseline(pg_db, pg_store):
+    """온보딩(경로 B) 답변도 사장님이 직접 쓴 글이라 베이스라인에 들어간다
+    (2026-10-06 최종 리뷰 I6). 빼놓으면 온보딩 데이터만 있는 신생 매장은
+    베이스라인이 영원히 0이라 이 체크 자체가 무력화된다."""
+    from app.llm.rag import check_voice_consistency
+
+    base_vec = [1.0] + [0.0] * 1023
+    for i in range(3):
+        _make_example(
+            pg_db, pg_store.id, category="delivery", source="onboarding",
+            review_text=f"가상리뷰{i}", embedding=None, reply_embedding=base_vec,
+            created_at=datetime.now(timezone.utc),
+        )
+    pg_db.commit()
+
+    # 판단 불가(None)가 아니라 실제 판정이 나와야 한다.
+    assert check_voice_consistency(pg_db, pg_store.id, "delivery", base_vec) is True
+    assert check_voice_consistency(pg_db, pg_store.id, "delivery", [0.0] * 1023 + [1.0]) is False
+
+
+def test_check_voice_consistency_excludes_organic_direct_from_baseline(pg_db, pg_store):
+    """경로 C(organic_direct)는 지금 검증 대상이라 기준에서 빼야 한다 —
+    자기 자신을 기준으로 재면 체크가 의미를 잃는다."""
+    from app.llm.rag import check_voice_consistency
+
+    base_vec = [1.0] + [0.0] * 1023
+    for i in range(5):
+        _make_example(
+            pg_db, pg_store.id, category="delivery", source="organic_direct",
+            review_text=f"리뷰{i}", embedding=None, reply_embedding=base_vec,
+            created_at=datetime.now(timezone.utc),
+        )
+    pg_db.commit()
+
+    assert check_voice_consistency(pg_db, pg_store.id, "delivery", base_vec) is None
 
 
 def _make_review(pg_db, store_id, *, category, content):
@@ -215,7 +316,7 @@ def test_promote_direct_reply_sets_needs_confirmation_true_when_outlier(pg_db, p
     for i in range(3):
         _make_example(
             pg_db, pg_store.id, category="delivery",
-            review_text=f"기준{i}", embedding=base_vec,
+            review_text=f"기준{i}", embedding=None, reply_embedding=base_vec,
             created_at=datetime.now(timezone.utc),
         )
     pg_db.commit()
@@ -232,6 +333,8 @@ def test_promote_direct_reply_sets_needs_confirmation_true_when_outlier(pg_db, p
     assert example.needs_confirmation is True
     persisted = pg_db.get(GoldenExample, example.id)
     assert persisted.needs_confirmation is True
+    # 승격된 행에도 reply_embedding이 저장돼야 다음 후보의 기준이 될 수 있다.
+    assert persisted.reply_embedding is not None
 
 
 def test_promote_direct_reply_sets_needs_confirmation_false_when_consistent(pg_db, pg_store, monkeypatch):
@@ -241,7 +344,7 @@ def test_promote_direct_reply_sets_needs_confirmation_false_when_consistent(pg_d
     for i in range(3):
         _make_example(
             pg_db, pg_store.id, category="delivery",
-            review_text=f"기준{i}", embedding=base_vec,
+            review_text=f"기준{i}", embedding=None, reply_embedding=base_vec,
             created_at=datetime.now(timezone.utc),
         )
     pg_db.commit()
@@ -260,7 +363,7 @@ def test_promote_direct_reply_sets_needs_confirmation_false_when_consistent(pg_d
 
 
 def test_promote_direct_reply_sets_needs_confirmation_false_when_baseline_insufficient(pg_db, pg_store, monkeypatch):
-    """베이스라인(organic/backfill, embedding 있는 것)이 3개 미만이면
+    """베이스라인(organic/backfill/onboarding, reply_embedding 있는 것)이 3개 미만이면
     check_voice_consistency는 None(판단 불가)을 반환한다 — 이때
     needs_confirmation은 True가 아니라 False여야 한다. `not consistent`나
     `consistent != True`로 구현했다면 None도 True로 취급돼 이 테스트가

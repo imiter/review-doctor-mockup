@@ -519,7 +519,8 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                     db.flush()
                     # 배민에 앱을 거치지 않고 직접 달린 답글(경로 C) — 진짜
                     # 사장님 말투인지 보장이 없어 promote_direct_reply_to_golden_example이
-                    # 기존 신뢰 예시와의 일관성을 확인해 필요하면 needs_confirmation을
+                    # 기존 신뢰 예시(경로 A/B)의 답글 말투와 얼마나 가까운지
+                    # 확인해 필요하면 needs_confirmation을
                     # 세운다(사람이 검토하는 UI는 이 작업 범위 밖).
                     promote_direct_reply_to_golden_example(db, review, reply_row.id, reply_content)
                 elif (

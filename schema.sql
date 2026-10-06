@@ -351,6 +351,12 @@ CREATE TABLE procedural_rules (
 --       참조한다 — 원래 "조인 없이 이 테이블만 필터링"이 원칙이었으나
 --       "그 리뷰 시점의 누적 리뷰 수"는 reviews를 보지 않으면 알 수 없어
 --       이 신호에 한해 참조를 허용했다(app/llm/rag.py).
+--       reply_embedding(2026-10-06 추가)은 embedding과 달리 **reply_text**를
+--       벡터화한 값이다 — 경로 C 답글의 말투 일관성 체크
+--       (check_voice_consistency)가 "이 답글이 이 가게 말투인가"를 재는 기준.
+--       원래 이 체크가 embedding(=리뷰 내용)을 기준으로 삼아 사실상
+--       "리뷰 내용이 비슷한가"를 재고 있던 버그를 고치면서 추가했다. embedding과
+--       같은 이유로 nullable이고, 값이 없는 행은 체크 기준에서 제외된다.
 -- ----------------------------------------------------------------------------
 CREATE TABLE golden_examples (
     id               BIGSERIAL PRIMARY KEY,
@@ -365,8 +371,13 @@ CREATE TABLE golden_examples (
     source_review_id BIGINT       REFERENCES reviews(id) ON DELETE SET NULL,
     source_reply_id  BIGINT       REFERENCES review_replies(id) ON DELETE SET NULL,
     embedding        vector(1024),
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    -- created_at 뒤에 오는 두 컬럼은 마이그레이션 0002가 ALTER TABLE ADD
+    -- COLUMN으로 붙인 것이라 물리적 순서가 이렇다 — 이 파일은 이제 손으로
+    -- 고치는 정본이 아니라 실제 DB의 스냅샷이므로(CLAUDE.md "Alembic 도입"
+    -- 절) 보기 좋게 재배치하지 않고 실제 순서를 그대로 적는다.
     needs_confirmation BOOLEAN    NOT NULL DEFAULT false,
-    created_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
+    reply_embedding  vector(1024)
 );
 
 -- 조회(fetch_golden_examples)가 실제로 거르는 컬럼이 is_manual/is_synthetic에서

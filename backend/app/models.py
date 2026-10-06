@@ -297,6 +297,13 @@ class GoldenExample(Base):
     # 리터럴 "null"(텍스트)로 저장돼 embedding.is_(None) 조회가 전혀
     # 매칭되지 않는 문제를 막는다(실측 확인, 2026-08-26).
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1024).with_variant(JSON(none_as_null=True), "sqlite"))
+    # reply_text를 벡터화한 값 — 말투 일관성 체크(app/llm/rag.py의
+    # check_voice_consistency)가 "이 답글이 이 가게 말투인가"를 재는 데 쓴다.
+    # 위 embedding(review_text)과 용도가 완전히 다르다: 그걸로 비교하면
+    # "리뷰 내용이 비슷한가"를 재게 되는데, 그건 말투와 아무 상관이 없다
+    # (2026-10-06 최종 리뷰 C3). 타입/nullable/variant 패턴은 embedding과
+    # 동일하고, 값이 없는 행(백필 전/Voyage 실패)은 체크 기준에서 빠진다.
+    reply_embedding: Mapped[list[float] | None] = mapped_column(Vector(1024).with_variant(JSON(none_as_null=True), "sqlite"))
     created_at: Mapped[datetime]
 
 

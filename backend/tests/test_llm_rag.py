@@ -308,3 +308,35 @@ def test_count_recent_same_category_within_window(db_session, seeded_user, platf
     count = count_recent_same_category(db_session, sid, "delivery", days=30)
 
     assert count == 1
+
+
+def test_embedding_background_task_fills_both_embeddings(db_session, seeded_user, monkeypatch):
+    """배경 작업 하나가 review_text(embedding)와 reply_text(reply_embedding)를
+    둘 다 채워야 한다 — save_final_reply/answer_scenario는 이 작업만 걸고
+    reply_embedding을 따로 계산하지 않으므로, 여기서 빠지면 그 두 경로로
+    들어온 골든 예시가 말투 일관성 체크의 기준에서 영원히 빠진다
+    (2026-10-06 최종 리뷰 C3)."""
+    import app.llm.rag as rag_mod
+    from sqlalchemy.orm import sessionmaker
+
+    sid = seeded_user["store"].id
+    ex = GoldenExample(
+        store_id=sid, category="food_quality",
+        review_text="양이 적어요", reply_text="죄송합니다, 양을 늘리겠습니다",
+        is_manual=True, is_synthetic=False, source="organic",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(ex)
+    db_session.commit()
+
+    # 배경 작업은 자체 SessionLocal을 여는데, 테스트 DB와 같은 엔진에
+    # 바인딩된 세션메이커로 바꿔치기해야 같은 데이터를 본다.
+    monkeypatch.setattr(rag_mod, "SessionLocal", sessionmaker(bind=db_session.get_bind(), autoflush=False))
+    monkeypatch.setattr(rag_mod, "embed_document", lambda text: [float(len(text))])
+
+    rag_mod.compute_golden_example_embedding_background(ex.id)
+
+    db_session.expire_all()
+    refreshed = db_session.get(GoldenExample, ex.id)
+    assert refreshed.embedding == [float(len("양이 적어요"))]
+    assert refreshed.reply_embedding == [float(len("죄송합니다, 양을 늘리겠습니다"))]

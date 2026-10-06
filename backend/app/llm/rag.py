@@ -25,6 +25,10 @@ Vector 타입의 `.cosine_distance()` 컴패리터). embedding이 아직 없는 
 최신순 폴백으로 돌린다 — 답글 생성이 임베딩 API 가용성에 발목잡히면 안
 된다.
 
+같은 테이블의 reply_embedding은 용도가 완전히 다르다 — review_text가 아니라
+**reply_text**를 벡터화한 값이고, 검색 순위가 아니라 경로 C 답글의 말투
+일관성 체크(check_voice_consistency)에만 쓴다(2026-10-06 추가).
+
 pgvector는 SQLite에는 없는 Postgres 확장이라, 이 파일의 실제 순위 계산
 (cosine_distance SQL 실행)은 in-memory SQLite를 쓰는 기본 유닛 테스트
 스위트에서 검증할 수 없다 — 이 로직만 로컬 Postgres(pgvector 설치됨)를
@@ -41,6 +45,11 @@ from app.models import GoldenExample, Review
 
 _CONSISTENCY_MIN_BASELINE = 3
 _CONSISTENCY_DISTANCE_THRESHOLD = 0.5
+# 말투 일관성 체크(check_voice_consistency)의 기준이 되는 소스 — 사장님이
+# 앱/배민 연동 전부터 실제로 쓴 답글(organic/backfill)과 훈련카드 답변
+# (onboarding, 경로 B). organic_direct(경로 C)는 일부러 빼둔다 — 지금 검증
+# 중인 바로 그 경로를 기준으로 삼으면 자기 자신을 기준으로 재는 셈이 된다.
+_TRUSTED_BASELINE_SOURCES = ("organic", "backfill", "onboarding")
 
 # 사람이 직접 쓴 답글로 간주하는 소스 — 사장님이 앱에서 쓰거나 고친 답글
 # (organic), 배민에 직접 단 답글(organic_direct), 연동 전 기존 답글 백필
@@ -167,14 +176,16 @@ def fetch_golden_examples(db: Session, store_id: int, category: str, query_text:
     )
 
 
-def compute_golden_example_embedding(review_text: str) -> list[float] | None:
-    """골든 예시 생성 시점에 review_text를 벡터화한다. 실패해도(Voyage 키
+def compute_golden_example_embedding(text: str) -> list[float] | None:
+    """골든 예시 저장 시점에 텍스트 하나를 벡터화한다 — `embedding`(review_text)
+    과 `reply_embedding`(reply_text) 둘 다 이 함수를 쓴다. 실패해도(Voyage 키
     미설정, API 장애, 빈 문자열 등) None을 반환할 뿐 골든 예시 저장 자체를
-    막지 않는다 — embedding이 없는 행은 위 폴백대로 최신순으로 뒤에 붙는다."""
-    if not review_text.strip():
+    막지 않는다 — embedding이 없는 행은 위 폴백대로 최신순으로 뒤에 붙고,
+    reply_embedding이 없는 행은 말투 일관성 체크의 기준에서 빠진다."""
+    if not text.strip():
         return None
     try:
-        return embed_document(review_text)
+        return embed_document(text)
     except Exception:
         return None
 
@@ -183,13 +194,18 @@ def compute_golden_example_embedding_background(golden_example_id: int) -> None:
     """FastAPI BackgroundTasks가 호출하는 얇은 래퍼 — Voyage API 호출
     지연으로 답글 저장 요청 자체가 느려지지 않도록 응답 이후에 실행한다.
     요청 스코프 세션은 이미 닫혀 있을 수 있어 자체 SessionLocal을 연다
-    (app/llm/style_profile.py의 동일 패턴 참고)."""
+    (app/llm/style_profile.py의 동일 패턴 참고).
+
+    두 벡터를 한 번에 계산한다 — review_text(검색용 `embedding`)와
+    reply_text(말투 일관성 체크용 `reply_embedding`). 배경 작업을 두 개로
+    나누면 세션/조회가 두 배가 되는데 얻는 게 없다."""
     db = SessionLocal()
     try:
         example = db.get(GoldenExample, golden_example_id)
         if example is None:
             return
         example.embedding = compute_golden_example_embedding(example.review_text)
+        example.reply_embedding = compute_golden_example_embedding(example.reply_text)
         db.commit()
     finally:
         db.close()
@@ -205,31 +221,47 @@ def count_recent_same_category(db: Session, store_id: int, category: str, days: 
     )
 
 
-def check_voice_consistency(db: Session, store_id: int, category: str, candidate_embedding: list[float]) -> bool | None:
-    """경로 C(배민 직접 답글) 후보가 이미 신뢰할 수 있는 예시(organic/
-    backfill) 클러스터와 말투가 일관되는지 본다 — "AI가 썼는지"가 아니라
-    "이 가게 말투에 맞는지"를 묻는 질문으로 바꾼 것. 비교할 기준(organic/
-    backfill, embedding 있는 것)이 _CONSISTENCY_MIN_BASELINE개 미만이면
-    판단 불가로 None을 반환한다(신생 매장은 이 체크를 건너뛴다)."""
+def check_voice_consistency(db: Session, store_id: int, category: str, candidate_reply_embedding: list[float]) -> bool | None:
+    """경로 C(배민 직접 답글) 후보 **답글**이, 이미 신뢰할 수 있는 예시
+    (경로 A/B = organic/backfill/onboarding) **답글** 클러스터와 말투가
+    일관되는지 본다 — "AI가 썼는지"가 아니라 "이 가게 말투에 맞는지"를 묻는
+    질문으로 바꾼 것(스펙 1.4.1절). 비교할 기준이
+    _CONSISTENCY_MIN_BASELINE개 미만이면 판단 불가로 None을 반환한다
+    (신생 매장은 이 체크를 건너뛴다).
+
+    **답글끼리 비교한다**(2026-10-06 수정). 원래 구현은 `embedding` 컬럼을
+    기준으로 삼았는데, 그 컬럼은 이 파일 어디에서나 항상 **review_text**를
+    벡터화한 값이다 — 즉 "이 새 리뷰가 과거 리뷰들과 내용이 비슷한가"를
+    재던 셈이고, "이 답글이 사장님 말투인가"와는 아무 상관이 없었다
+    (최종 리뷰 C3, 설계 참고 코드 자체에 있던 버그). 그래서 reply_text를
+    벡터화한 `reply_embedding` 컬럼을 따로 두고 그걸 기준으로 삼는다.
+    reply_embedding이 아직 없는 행(백필 전/Voyage 실패)은 기준에서 제외한다
+    — 거리 계산에 쓸 값이 없으니 포함시킬 방법이 없다.
+
+    베이스라인에 onboarding도 넣는다(2026-10-06, 최종 리뷰 I6). 온보딩
+    답변도 사장님이 훈련카드 시나리오에 직접 쓴 글이라 똑같이 유효한 신뢰
+    신호이고(경로 B), 빼놓으면 온보딩 데이터밖에 없는 신생 매장은 베이스라인이
+    영원히 0이라 — 정작 이 체크가 가장 필요한 매장에서 체크가 통째로
+    무력화된다."""
     baseline_q = select(GoldenExample.id).where(
         GoldenExample.store_id == store_id,
         GoldenExample.category == category,
-        GoldenExample.source.in_(("organic", "backfill")),
-        GoldenExample.embedding.is_not(None),
+        GoldenExample.source.in_(_TRUSTED_BASELINE_SOURCES),
+        GoldenExample.reply_embedding.is_not(None),
     )
     baseline_count = len(db.scalars(baseline_q).all())
     if baseline_count < _CONSISTENCY_MIN_BASELINE:
         return None
 
     nearest = db.scalars(
-        select(GoldenExample.embedding.cosine_distance(candidate_embedding))
+        select(GoldenExample.reply_embedding.cosine_distance(candidate_reply_embedding))
         .where(
             GoldenExample.store_id == store_id,
             GoldenExample.category == category,
-            GoldenExample.source.in_(("organic", "backfill")),
-            GoldenExample.embedding.is_not(None),
+            GoldenExample.source.in_(_TRUSTED_BASELINE_SOURCES),
+            GoldenExample.reply_embedding.is_not(None),
         )
-        .order_by(GoldenExample.embedding.cosine_distance(candidate_embedding))
+        .order_by(GoldenExample.reply_embedding.cosine_distance(candidate_reply_embedding))
         .limit(3)
     ).all()
     avg_distance = sum(nearest) / len(nearest)
@@ -241,11 +273,17 @@ def promote_direct_reply_to_golden_example(db: Session, review: Review, reply_id
     사장님 답글을 golden_example로 승격한다(경로 C). 앱을 거치지 않은
     답글이라 진짜 사장님 말투인지 보장이 없다 — 이상치로 판정돼도 저장
     자체는 막지 않는다. needs_confirmation만 세워서 나중에 사장님 확인
-    UI(이 작업 범위 밖)가 쓸 수 있게 한다."""
+    UI(이 작업 범위 밖)가 쓸 수 있게 한다.
+
+    두 벡터를 각각 계산한다: `embedding`은 검색용(review_text),
+    `reply_embedding`은 말투 일관성 체크용(reply_text). 일관성 판정에 넘기는
+    건 반드시 후자다 — 리뷰 내용끼리 비교하면 말투를 전혀 못 본다(위
+    check_voice_consistency docstring 참고)."""
     embedding = compute_golden_example_embedding(review.content)
+    reply_embedding = compute_golden_example_embedding(reply_text)
     needs_confirmation = False
-    if embedding is not None:
-        consistent = check_voice_consistency(db, review.store_id, review.category, embedding)
+    if reply_embedding is not None:
+        consistent = check_voice_consistency(db, review.store_id, review.category, reply_embedding)
         needs_confirmation = consistent is False
 
     example = GoldenExample(
@@ -253,7 +291,8 @@ def promote_direct_reply_to_golden_example(db: Session, review: Review, reply_id
         review_text=review.content, reply_text=reply_text,
         is_manual=True, is_synthetic=False, source="organic_direct",
         source_review_id=review.id, source_reply_id=reply_id,
-        embedding=embedding, needs_confirmation=needs_confirmation,
+        embedding=embedding, reply_embedding=reply_embedding,
+        needs_confirmation=needs_confirmation,
         created_at=datetime.now(timezone.utc),
     )
     db.add(example)

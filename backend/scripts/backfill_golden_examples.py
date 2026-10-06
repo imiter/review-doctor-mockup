@@ -48,6 +48,10 @@ def backfill_negative_review_replies(db, store_id: int) -> int:
             is_manual=True, is_synthetic=False, source="backfill",
             source_review_id=review.id, source_reply_id=final_reply.id,
             embedding=compute_golden_example_embedding(review.content),
+            # reply_embedding은 답글 말투 일관성 체크(check_voice_consistency)의
+            # 기준이 되는 값이라, 백필 시점에 함께 채운다 — 이 스크립트가 만드는
+            # source='backfill' 행이 바로 그 기준 집합의 일부다.
+            reply_embedding=compute_golden_example_embedding(final_reply.content),
             created_at=final_reply.created_at,
         ))
         inserted += 1
