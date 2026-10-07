@@ -735,6 +735,61 @@ install` 단계는 양쪽 프로세스 모두에 반드시 같이 가야 한다.
 지적받았다 — 하한은 안 걸고 상한만 둬서 "버전 안 고정" 관례의 취지는
 유지하면서 이 위험만 막는다.
 
+### LangSmith 연동 + 순환 측정 장치 (예외 허용 아님 — 순수 관측성 추가,
+새 외부 호출 없음)
+LangGraph 에이전트 루프(위 "답글 생성의 LangGraph 에이전트화" 절)에
+LangSmith 트레이싱과, AI 초안과 사장님 최종본이 얼마나 비슷한지 재는
+측정 장치를 붙였다(2026-10-07, 설계 `docs/superpowers/specs/
+2026-10-03-ai-agent-llmops-reply-design.md` 3절+4.2절). `run_agent`
+(`backend/app/llm/agent_graph.py`)이 매 호출마다 `uuid4()`로 trace_id를
+만들어 `_GRAPH.invoke(state, config={"run_id": trace_id, "metadata":
+{"category": ..., "store_id": ...}, "tags": [...]}))`로 그래프 호출에
+실어 보낸다 — LangSmith가 설정 안 돼 있으면(기본값) 이 config는 그냥
+무시되고 아무 네트워크 호출도 없다.
+
+**측정(스펙 4.2절 "순환 측정 장치")**: 경로 A(사장님이 AI 초안을 보고
+고치거나 그대로 승인해서 `save_final_reply`로 저장)와 경로 B(훈련카드
+`answer_scenario`) 둘 다 해당하는 draft가 trace_id를 갖고 있으면(이
+작업 이후 생성된 초안만), AI 초안과 사장님 최종본을 Voyage로 각각
+벡터화해 코사인 유사도를 계산한다(`backend/app/llm/feedback.py`의
+`record_draft_feedback_background`, `BackgroundTasks`로 응답 이후
+실행). LLM-judge(모델에게 "비슷한가요?" 물어보는 방식)는 쓰지 않는다 —
+순수 벡터 연산만 쓴다(판단 편향 위험, 비용, 이 기능 전체의 "진짜
+사장님 말투 재현"이라는 북극성 목표와의 충돌 모두를 피하는 선택).
+결과는 신규 테이블 `draft_feedback_scores`(위 "테이블 용도" 참고)에
+한 건씩 쌓고, 같은 점수를 그 trace에 LangSmith feedback으로도
+기록한다(`LANGSMITH_API_KEY`가 설정돼 있을 때만 — 아래 참고). 임베딩
+호출이 실패하면(Voyage 키 미설정 등) 그 측정 자체를 통째로 스킵하고
+(점수 없이 행을 안 만듦), 그와 독립적으로 LangSmith feedback 기록이
+실패해도 이미 DB에 쓴 점수 행은 그대로 남는다(두 실패가 서로 영향을
+안 주도록 의도적으로 분리).
+
+**Plan 2의 자동답글 보류 경로도 측정 대상이다**: `review_sync.py`의
+자동답글 검증 실패 → 보류(`ReviewReply(reply_type="ai_draft")` +
+`status="pending"`) → 사장님이 나중에 고쳐서 저장하는 경로가 스펙
+4.2절이 명시한 1순위 대상("경로 A: 보류→교정")이라, 이 보류 분기 두
+곳(신규 리뷰/백로그)도 `trace_id=result.trace_id`를 같이 저장한다.
+
+**새 환경변수 — Railway와 크롤 워커 둘 다 알아야 할 수 있다**:
+`LANGSMITH_TRACING_V2`/`LANGSMITH_API_KEY`/`LANGSMITH_PROJECT`
+(`backend/.env.example` 참고, 기본값은 트레이싱 꺼짐). 비워두면 트레이싱도
+feedback 기록도 조용히 스킵되고 답글 생성 자체는 그대로 동작한다 — 다른
+LLM 폴백과 같은 원칙. **단, `review_sync.py`가 호출하는 `run_agent`(배민
+자동답글 경로)는 크롤 워커(맥북) 프로세스 안에서 실행되므로, 자동답글
+생성 트레이스를 LangSmith에서 보려면 크롤 워커의 `.env.worker`에도 같은
+키들을 넣어야 한다** — Railway 백엔드에만 설정하면 수동/훈련카드 생성
+트레이스만 보인다. 이 작업은 `langsmith`가 이미 `langchain-anthropic`/
+`langgraph`의 의존성으로 설치돼 있어서(`requirements.txt`에 상한
+핀(`langsmith>=0.14,<1`)만 명시적으로 추가함) **새로운 `pip install`
+단계가 필요 없다** — Plan 2의 `langchain-anthropic`/`langgraph` 추가와는
+다른 점.
+
+**운영 반영**: 새 마이그레이션 `0003`(review_replies/onboarding_scenarios
+trace_id 컬럼 + draft_feedback_scores 테이블, 전부 nullable/신규라 기존
+데이터에 영향 없음)이 Plan 1의 `0001`/`0002`와 함께 아직 운영 DB에 반영
+안 된 상태로 쌓여 있다 — 배포 시 `alembic upgrade head` 한 번으로 셋 다
+올라간다. 이 작업은 새 시드/백필 스크립트가 없다.
+
 ### 모바일 앱 (예외 허용)
 원래 "Flutter 앱 구현 금지"로 모바일 앱 자체를 범위 밖으로 뒀으나, 웹과 같은
 백엔드를 쓰는 React Native 앱을 추가하기로 결정했다(추후 결정으로 예외 허용 —
@@ -765,19 +820,22 @@ react-native-keychain 토큰 저장)를 그대로 따르되, 색상 팔레트는
 - users 테이블 컬럼은 최소화: id, email, nickname, phone_hash,
   marketing_agreed, created_at.
 
-## DB 설계 (28개 테이블)
+## DB 설계 (29개 테이블)
 users, stores, platforms, store_platform_connections, subscriptions,
 orders, reviews, golden_examples, store_style_profile, review_replies,
 reply_styles, reply_settings, daily_settlements, repurchase_metrics,
 ad_campaigns, ad_performance_metrics, ad_rank_snapshots, alerts,
 social_accounts, signup_verifications, review_sync_jobs,
 baemin_shop_brands, brand_ad_click_metrics, payments,
-onboarding_scenarios, brand_menu_info, procedural_rules, brand_ceo_notices.
+onboarding_scenarios, brand_menu_info, procedural_rules, brand_ceo_notices,
+draft_feedback_scores.
 
 > 테이블 수가 24 → 28로 늘었다(2026-10-06). procedural_rules/brand_ceo_notices가
 > 이번에 새로 생긴 두 개이고, brand_menu_info(2026-08-26 "RAG 메뉴 그라운딩" 절)와
 > onboarding_scenarios(답글 온보딩)는 그때 이 목록에 추가하는 걸 빠뜨린 것이라
-> 지금 같이 채웠다 — 둘 다 이미 `schema.sql`과 코드에는 있었다.
+> 지금 같이 채웠다 — 둘 다 이미 `schema.sql`과 코드에는 있었다. 28 → 29로
+> 다시 늘었다(2026-10-07, LangSmith 연동 + 측정 대시보드 플랜) —
+> draft_feedback_scores 신규 추가, 아래 "순환 측정 장치" 절 참고.
 
 ### 테이블 용도
 - users: 사장 계정. 전화번호는 phone_hash로 비식별화.
@@ -812,7 +870,9 @@ onboarding_scenarios, brand_menu_info, procedural_rules, brand_ceo_notices.
 - onboarding_scenarios: 답글 온보딩("훈련카드")이 보여주는 매장×카테고리별
   가상 리뷰 + 마중물 초안. 사장님이 답하면 그 답글이 golden_examples
   (source='onboarding', 경로 B)로 승격된다. UNIQUE(store_id, category)로
-  매장×카테고리당 1행만 두고 재사용한다.
+  매장×카테고리당 1행만 두고 재사용한다. trace_id(nullable, 2026-10-07
+  추가)는 이 draft_text를 만든 run_agent 호출의 LangSmith trace id — 아래
+  "순환 측정 장치" 절 참고.
 - brand_menu_info: 브랜드(shop_no)별 배민 메뉴관리 화면의 가게소개/원산지/
   메뉴소개 텍스트와 전체 메뉴 항목(JSONB). RAG 답글 생성의 "사실 근거"
   의미 기억이다(위 "RAG 메뉴 그라운딩" 절 참고).
@@ -822,7 +882,15 @@ onboarding_scenarios, brand_menu_info, procedural_rules, brand_ceo_notices.
   사장님공지" 절 참고).
 - store_style_profile: 매장별 답글 스타일 규칙(5~7줄) 캐싱. 진짜
   골든 예시로만 재생성한다.
-- review_replies: AI 추천 답글 Mock과 사장 최종 답글.
+- review_replies: AI 추천 답글 Mock과 사장 최종 답글. trace_id(nullable,
+  2026-10-07 추가)는 reply_type="ai_draft" 행에만 채워지며, 이 초안을
+  만든 run_agent 호출의 LangSmith trace id다 — 아래 "순환 측정 장치" 절
+  참고.
+- draft_feedback_scores: AI 초안과 사장님 최종본의 코사인 유사도
+  1건당 1행(2026-10-07 추가, "순환 측정 장치" 절). store_id/category/
+  similarity_score(-1~1, 클램핑 없음)/trace_id/source_review_id(선택적)/
+  source_scenario_id(선택적)/created_at. 요약을 캐싱하지 않고 대시보드가
+  조회 시점에 카테고리별로 집계한다(정규화 원칙).
 - reply_styles: 답글 말투 스타일 마스터(이모지 불맛, 담백한 손맛, 다정한
   슴슴함, 위트있는 칼칼함, 찐사장님 말투).
 - reply_settings: 가게별 답글 설정(홍보문구, 닉네임/메뉴/가게명 포함 여부, 부정 리뷰 홍보문구 포함 여부).
@@ -1083,6 +1151,8 @@ AI가 자기 산출물을 다시 학습하는 순환 오염이다. 그래서 제
 - brand_menu_info, brand_ceo_notices는 store_platform_connections 참조
   (shop_no는 FK가 아니라 값만 저장 — brand_ad_click_metrics와 같은 관례)
 - procedural_rules는 아무것도 참조하지 않는다 (전역 테이블, store_id 없음)
+- draft_feedback_scores는 store 참조, reviews/onboarding_scenarios를
+  선택적으로 참조(source_review_id/source_scenario_id)
 
 ### 정규화 원칙
 - 매출 요약은 별도 테이블로 저장하지 않는다. daily_settlements를 기간별로
