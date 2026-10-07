@@ -206,8 +206,8 @@ CREATE TABLE review_replies (
     reply_type VARCHAR(10) NOT NULL CHECK (reply_type IN ('ai_draft', 'final', 'secondary')),
     style_id   INT         REFERENCES reply_styles(id) ON DELETE SET NULL,  -- 생성 당시 스타일 (이력 보존)
     content    TEXT        NOT NULL,
-    trace_id   VARCHAR(36),  -- reply_type='ai_draft'에만 채워짐. 이 초안을 만든 run_agent 호출의 LangSmith trace id
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    trace_id   VARCHAR(36)  -- reply_type='ai_draft'에만 채워짐. 이 초안을 만든 run_agent 호출의 LangSmith trace id. 마이그레이션이 ALTER TABLE로 끝에 붙여 물리 순서가 created_at 뒤다.
 );
 
 CREATE INDEX idx_review_replies_review ON review_replies(review_id);
@@ -533,8 +533,8 @@ CREATE TABLE onboarding_scenarios (
     status              VARCHAR(10)  NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'answered', 'skipped')),
     shown_on            DATE,
-    trace_id            VARCHAR(36),  -- draft_text를 만든 run_agent 호출의 LangSmith trace id
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    trace_id            VARCHAR(36),  -- draft_text를 만든 run_agent 호출의 LangSmith trace id. 마이그레이션이 ALTER TABLE로 끝에 붙여 물리 순서가 created_at 뒤다.
     UNIQUE (store_id, category)
 );
 
