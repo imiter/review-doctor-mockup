@@ -38,13 +38,16 @@ def test_golden_example_round_trips(db_session, seeded_user):
 
 def test_store_style_profile_round_trips(db_session, seeded_user):
     profile = StoreStyleProfile(
-        store_id=seeded_user["store"].id, rules="- 구체적 원인을 설명한다\n- 재방문 고객을 언급한다",
+        store_id=seeded_user["store"].id, category="hygiene",
+        rules="- 구체적 원인을 설명한다\n- 재방문 고객을 언급한다",
         generated_from_count=5, updated_at=datetime.now(timezone.utc),
     )
     db_session.add(profile)
     db_session.commit()
 
-    row = db_session.query(StoreStyleProfile).filter_by(store_id=seeded_user["store"].id).one()
+    row = db_session.query(StoreStyleProfile).filter_by(
+        store_id=seeded_user["store"].id, category="hygiene",
+    ).one()
     assert row.generated_from_count == 5
 
 

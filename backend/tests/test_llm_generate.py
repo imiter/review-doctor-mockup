@@ -17,7 +17,7 @@ def test_generate_ai_reply_includes_style_profile_and_examples(db_session, seede
     sid = seeded_user["store"].id
     pid = platforms["baemin"].id
     db_session.add(StoreStyleProfile(
-        store_id=sid, rules="- 구체적 원인을 설명한다", generated_from_count=1,
+        store_id=sid, category="hygiene", rules="- 구체적 원인을 설명한다", generated_from_count=1,
         updated_at=datetime.now(timezone.utc),
     ))
     db_session.add(GoldenExample(
@@ -313,7 +313,7 @@ def test_generate_ai_reply_grounding_present_even_when_tone_overridden(db_sessio
     sid = seeded_user["store"].id
     pid = platforms["baemin"].id
     db_session.add(StoreStyleProfile(
-        store_id=sid, rules="- 항상 재방문을 유도한다", generated_from_count=1,
+        store_id=sid, category="hygiene", rules="- 항상 재방문을 유도한다", generated_from_count=1,
         updated_at=datetime.now(timezone.utc),
     ))
     review = Review(

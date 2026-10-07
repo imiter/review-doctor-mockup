@@ -136,7 +136,7 @@ def answer_scenario(
     db.add(example)
     scenario.status = "answered"
     db.commit()
-    background_tasks.add_task(refresh_store_style_profile_background, scenario.store_id)
+    background_tasks.add_task(refresh_store_style_profile_background, scenario.store_id, scenario.category)
     background_tasks.add_task(compute_golden_example_embedding_background, example.id)
     if scenario.trace_id is not None:
         # 경로 B 측정(스펙 4.2절) — 훈련카드 AI초안과 사장님 실제 답변의

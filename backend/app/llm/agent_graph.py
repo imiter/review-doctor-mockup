@@ -90,7 +90,7 @@ def retrieve_memory_node(state: AgentState) -> dict:
     것 — 절차/의미/일화 기억을 전부 조회해 state에 채운다."""
     db, review, store, style = state["db"], state["review"], state["store"], state["style"]
 
-    profile = db.scalar(select(StoreStyleProfile).where(StoreStyleProfile.store_id == store.id))
+    profile = db.get(StoreStyleProfile, (store.id, review.category))
     style_rules = profile.rules if profile is not None else _FALLBACK_STYLE_RULES
     rules = fetch_active_rules(db)
 

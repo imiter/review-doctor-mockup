@@ -53,7 +53,7 @@ def test_generate_reply_stores_trace_id_on_draft(client, auth_headers, db_sessio
 def test_save_final_reply_transitions_status_and_blocks_duplicate(client, db_session, seeded_user, platforms, reply_styles, auth_headers, monkeypatch):
     from app.routers import reviews as reviews_mod
 
-    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id, category: None)
     monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
 
     review = make_review(db_session, seeded_user["store"], platforms, rating=5)
@@ -72,7 +72,7 @@ def test_save_final_reply_schedules_feedback_when_draft_has_trace_id(client, aut
     import app.routers.reviews as reviews_mod
     from app.models import ReviewReply
 
-    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id, category: None)
     monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
     calls = []
     monkeypatch.setattr(reviews_mod, "record_draft_feedback_background", lambda **kwargs: calls.append(kwargs))
@@ -107,7 +107,7 @@ def test_save_final_reply_schedules_feedback_even_when_approved_verbatim(client,
     import app.routers.reviews as reviews_mod
     from app.models import GoldenExample, ReviewReply
 
-    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id, category: None)
     monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
     calls = []
     monkeypatch.setattr(reviews_mod, "record_draft_feedback_background", lambda **kwargs: calls.append(kwargs))
@@ -133,7 +133,7 @@ def test_save_final_reply_schedules_feedback_even_when_approved_verbatim(client,
 def test_save_final_reply_skips_feedback_when_no_draft_existed(client, auth_headers, db_session, seeded_user, platforms, monkeypatch):
     import app.routers.reviews as reviews_mod
 
-    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id, category: None)
     monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
     calls = []
     monkeypatch.setattr(reviews_mod, "record_draft_feedback_background", lambda **kwargs: calls.append(kwargs))
@@ -389,7 +389,7 @@ def test_save_final_reply_promotes_edited_problem_review_to_golden_example(clien
     db_session.commit()
 
     calls = []
-    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: calls.append(store_id))
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id, category: calls.append(store_id))
     monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
 
     res = client.post(
@@ -423,7 +423,7 @@ def test_save_final_reply_does_not_promote_when_final_matches_draft_verbatim(cli
     ))
     db_session.commit()
 
-    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id, category: None)
     monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
 
     client.post(
@@ -450,7 +450,7 @@ def test_save_final_reply_promotes_no_issue_review_too(client, db_session, seede
     db_session.add(review)
     db_session.commit()
 
-    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id: None)
+    monkeypatch.setattr(reviews_mod, "refresh_store_style_profile_background", lambda store_id, category: None)
     monkeypatch.setattr(reviews_mod, "compute_golden_example_embedding_background", lambda golden_example_id: None)
 
     client.post(

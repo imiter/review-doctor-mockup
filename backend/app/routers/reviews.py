@@ -191,7 +191,7 @@ def save_final_reply(
         )
         db.add(example)
         db.flush()  # 배경 작업에 넘길 id를 얻으려면 INSERT를 먼저 반영해야 한다
-        background_tasks.add_task(refresh_store_style_profile_background, review.store_id)
+        background_tasks.add_task(refresh_store_style_profile_background, review.store_id, review.category)
         background_tasks.add_task(compute_golden_example_embedding_background, example.id)
 
     if draft is not None and draft.trace_id is not None:
