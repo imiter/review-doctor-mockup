@@ -139,7 +139,7 @@ def draft_feedback_trend(store_id: int | None = None, user=Depends(get_current_u
         "categories": [
             {
                 "category": category,
-                "label": CATEGORY_LABELS.get(category, _NO_ISSUE_LABEL if category == "no_issue" else category),
+                "label": {**CATEGORY_LABELS, "no_issue": _NO_ISSUE_LABEL}.get(category, category),
                 "avg_similarity": round(float(avg_score), 4),
                 "sample_count": count,
             }
