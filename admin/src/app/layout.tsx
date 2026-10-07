@@ -15,6 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "스토어 타겟 Admin",
   description: "관리자 전용 — 외부에 공개되지 않음",
+  robots: { index: false, follow: false },
 };
 
 export default function RootLayout({

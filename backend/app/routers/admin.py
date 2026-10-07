@@ -1,6 +1,7 @@
 """관리자 전용 엔드포인트 — 결제 이력 조회, 배민 연결 매장 운영 현황, 유저 조회+플랜
-수동 변경. require_admin으로 전부 보호된다. 설계 배경은
-docs/superpowers/specs/2026-09-01-admin-panel-design.md 참고."""
+수동 변경. require_admin_token(admin 전용, 사장님 users 테이블과 무관)으로
+전부 보호된다. 설계 배경은
+docs/superpowers/specs/2026-10-07-admin-panel-separation-design.md 참고."""
 
 from datetime import timedelta
 from typing import Literal

@@ -871,6 +871,37 @@ react-native-keychain 토큰 저장)를 그대로 따르되, 색상 팔레트는
 `/kakao/callback`은 웹과 동일한 authorization code 방식만 받아 아직
 미해결 — 첫 MVP는 이메일 로그인으로만 시작했다.
 
+### 관리자 패널 완전 분리 (admin/, 2026-10-08)
+관리자 패널(결제 이력/매장 운영 현황/유저 관리/LLMOps)을 사장님이 쓰는
+SaaS 프론트엔드(`frontend/`)에서 완전히 떼어내 별도 Next.js 앱 `admin/`
+(frontend/, backend/와 같은 레벨)으로 분리했다 — 사용자가 "관리자 페이지를
+SaaS에 들어가서 보는 게 아니라 따로 나만 보게" 요청해서 결정했다. 기존
+`/ops-4k9x2m`(사장님 계정의 `users.role` 체크) 경로는 완전히 삭제했고,
+`backend`는 새 서비스를 만들지 않고 그대로 유지한다 — `admin/`은 기존
+backend API를 그대로 호출한다. 인증은 사장님 회원(`users` 테이블)과
+완전히 무관한 단일 비밀번호(`ADMIN_PASSWORD`) 하나뿐이고, 별도 시크릿
+(`ADMIN_JWT_SECRET`)으로 서명한 JWT를 쓴다(`backend/app/routers/
+admin_auth.py`의 `require_admin_token`, DB 조회 없음). 설계/계획 상세는
+`docs/superpowers/specs/2026-10-07-admin-panel-separation-design.md`,
+`docs/superpowers/plans/2026-10-08-admin-panel-separation.md` 참고.
+
+**운영 반영 시 필수 — `ADMIN_PASSWORD`/`ADMIN_JWT_SECRET`을 설정해야 하는
+프로세스가 Railway 백엔드 하나가 아니다**: 크롤 워커(맥북)도 정확히 같은
+`app.main:app`을 띄우는 프로세스라(위 "배포 환경(Railway)에서의 로그인
+위임" 절 참고) 이 라우터도 함께 뜬다. 처음 설계는 `JWT_SECRET`과 같은
+패턴으로 미설정 시 레포에 박힌 고정 기본값으로 폴백하게 했었는데, 최종
+리뷰(2026-10-08)에서 이게 `JWT_SECRET`과 성격이 다르다는 지적을 받고
+번복했다 — `JWT_SECRET`을 안다고 바로 침입할 수 있는 게 아니라 여전히
+실제 `users` 행이 있어야 하지만, `ADMIN_PASSWORD`는 그 자체로 완결된
+자격증명이라 기본값이 그대로 레포에 노출된 채 배포되면 누구든 관리자
+패널 전체(유저 정보/결제이력/Pro 플랜 부여/자동답글 on-off)에 들어갈 수
+있다. 그래서 두 값 중 하나라도 미설정이면 admin 로그인 자체를 503으로
+거부하도록 바꿨다(fail-closed) — Railway 백엔드엔 반드시 설정하고,
+**크롤 워커의 `.env.worker`에는 설정하지 않는다**(설정하면 그 워커가
+서빙하는 공개 ngrok URL로 admin 패널이 열린다 — 아래 "배포 환경(Railway)
+에서의 로그인 위임" 절의 자격증명 복호화 키처럼 두 프로세스에 똑같이
+맞춰야 하는 값이 아니라, 오히려 한쪽에만 있어야 하는 값이다).
+
 ## 개인정보 원칙
 - 실제 개인정보는 저장하지 않는다.
 - 전화번호는 원문 대신 phone_hash로만 저장한다.

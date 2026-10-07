@@ -37,6 +37,19 @@ def _no_voyage_key(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _admin_env_defaults(monkeypatch):
+    """admin_auth가 fail-closed라(ADMIN_PASSWORD/ADMIN_JWT_SECRET 미설정 시
+    503) — 이 값을 직접 다루는 게 아닌 나머지 전체 테스트(예: 비-admin
+    토큰으로 /admin/* 호출 시 401을 기대하는 테스트)가 503을 받지 않도록
+    기본값을 깔아둔다. admin_headers나 테스트 본문이 다시 monkeypatch하면
+    그 값이 우선한다."""
+    from app.routers import admin_auth
+
+    monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "test-admin-pw")
+    monkeypatch.setattr(admin_auth, "ADMIN_JWT_SECRET", "test-admin-secret")
+
+
+@pytest.fixture(autouse=True)
 def _no_langsmith_key(monkeypatch):
     for key in ("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY", "LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2"):
         monkeypatch.delenv(key, raising=False)
@@ -149,6 +162,7 @@ def admin_headers(client, monkeypatch):
     from app.routers import admin_auth
 
     monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "test-admin-pw")
+    monkeypatch.setattr(admin_auth, "ADMIN_JWT_SECRET", "test-admin-secret")
     res = client.post("/admin-auth/login", json={"password": "test-admin-pw"})
     token = res.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}

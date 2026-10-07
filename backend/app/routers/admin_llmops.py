@@ -1,6 +1,6 @@
 """관리자 LLMOps 대시보드 — 답글 생성 LangGraph 파이프라인의 노드 구성,
 실제 실행 트레이스(LangSmith), 카테고리별 정확도(AI초안-사장님최종본
-유사도, draft_feedback_scores)를 보여준다. require_admin으로 보호된다.
+유사도, draft_feedback_scores)를 보여준다. require_admin_token(admin 전용)으로 보호된다.
 노드 구성도 자체는 고정된 구조라 프론트에서 하드코딩해 그린다 — 이
 라우터는 "실제로 무슨 일이 있었는지"(실행 이력, 정확도)만 담당한다.
 실사용 중 "노드 간에 어떤 데이터가 오가는지, 리뷰가 어떻게 생성되는지

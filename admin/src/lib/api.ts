@@ -36,7 +36,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     cache: "no-store",
   });
 
-  if (res.status === 401) {
+  if (res.status === 401 && path !== "/admin-auth/login") {
     clearToken();
     if (typeof window !== "undefined" && window.location.pathname !== "/login") {
       window.location.href = "/login";
