@@ -7,12 +7,34 @@
 별도 화면이라 shop_no만으로 URL을 구성할 수 없다(실측 확인된 URL
 패턴이 없음)."""
 
+import re
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 
 class BaeminNoticesScrapeError(Exception):
     pass
+
+
+def _dismiss_backdrop_if_present(page) -> None:
+    # baemin_stats.py/baemin_ads.py와 동일한 패턴(2026-10-08) — 프로모션
+    # 팝업이 사이드바 클릭을 가로챈 게 사용자 실측으로 재현됐다. "N일간
+    # 보지 않기"류 옵션을 먼저 찾아 눌러 같은 세션 동안 다시 안 뜨게
+    # 만들고, 없으면 Escape로 넘어간다.
+    if page.get_by_test_id("backdrop").count() == 0:
+        return
+    dont_show_again = page.get_by_text(
+        re.compile(r"(\d+일|오늘\s*하루)\s*(간)?\s*(다시\s*)?(보지|열지)\s*않기")
+    ).first
+    if dont_show_again.count() > 0:
+        try:
+            dont_show_again.click(timeout=2_000)
+            page.wait_for_timeout(500)
+            return
+        except Exception:
+            pass
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(500)
 
 
 def map_notices(raw: dict) -> list[dict]:
@@ -56,10 +78,17 @@ def fetch_ceo_notices(page, shop_no: int) -> list[dict]:
 
     page.on("response", _on_response)
     try:
+        nav_item = page.get_by_text("사장님공지", exact=True)
         try:
-            page.get_by_text("사장님공지", exact=True).click()
-        except Exception as e:
-            raise BaeminNoticesScrapeError(f"사장님공지 메뉴 진입에 실패했습니다: {e}") from e
+            nav_item.click(timeout=5_000)
+        except Exception:
+            # 낯선 프로모션 팝업이 가로막았을 수 있다 — 치우고 한 번 더
+            # 시도한다(2026-10-08, 사용자 실측 재현).
+            _dismiss_backdrop_if_present(page)
+            try:
+                nav_item.click(timeout=5_000)
+            except Exception as e:
+                raise BaeminNoticesScrapeError(f"사장님공지 메뉴 진입에 실패했습니다: {e}") from e
         page.wait_for_timeout(3_000)
     finally:
         page.remove_listener("response", _on_response)

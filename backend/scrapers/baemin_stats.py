@@ -303,9 +303,27 @@ def _dismiss_backdrop_if_present(page) -> None:
     # 모달이 조사 도중 언제든 다시 뜰 수 있다(실 계정으로 확인됨). 단,
     # 우리 자신의 다이얼로그가 열려있는 도중에는 호출하지 않는다(모듈
     # docstring의 "backdrop 처리 시 주의" 참고).
-    if page.get_by_test_id("backdrop").count() > 0:
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
+    #
+    # 2026-10-08 보강: Escape로 닫기만 하면 같은 프로모션 팝업이 동기화
+    # 한 번 안에서(다음 달/다음 브랜드로 넘어갈 때마다) 계속 다시 떠서
+    # 매번 클릭을 가로채는 게 실측 확인됐다(사용자 실행 중 반복 재현).
+    # "N일간 보지 않기"류 옵션이 있으면 그걸 먼저 눌러 같은 세션 동안
+    # 다시 안 뜨게 만들고, 그런 옵션이 없는 (우리 자신의 다이얼로그가
+    # 아닌) 팝업만 Escape로 넘어간다.
+    if page.get_by_test_id("backdrop").count() == 0:
+        return
+    dont_show_again = page.get_by_text(
+        re.compile(r"(\d+일|오늘\s*하루)\s*(간)?\s*(다시\s*)?(보지|열지)\s*않기")
+    ).first
+    if dont_show_again.count() > 0:
+        try:
+            dont_show_again.click(timeout=2_000)
+            page.wait_for_timeout(500)
+            return
+        except Exception:
+            pass
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(500)
 
 
 def _loading_overlay_visible(page) -> bool:
@@ -676,7 +694,13 @@ def _select_month_dropdown(page, month: str) -> bool:
     이번 달) 아무것도 적용하지 않고 다이얼로그를 닫은 뒤 False를 반환한다 —
     호출자(`fetch_shop_stats`)는 그 달을 건너뛴다."""
     header = page.locator("text=/^\\d+월$/").first
-    header.click(timeout=5_000)
+    try:
+        header.click(timeout=5_000)
+    except PlaywrightTimeoutError:
+        # 낯선 프로모션 팝업이 가로막았을 수 있다 — 치우고 한 번 더
+        # 시도한다(2026-10-08, 사용자 실측 재현).
+        _dismiss_backdrop_if_present(page)
+        header.click(timeout=5_000)
     page.wait_for_timeout(500)
 
     select_btn = page.locator("button[aria-haspopup='dialog']").filter(
@@ -1063,12 +1087,16 @@ def _set_date_range(page, start_date: str, end_date: str) -> None:
         except (PlaywrightTimeoutError, BaeminStatsScrapeError) as e:
             # 캘린더가 안 열렸거나 클릭이 가로채인 경우 — 마지막 시도가
             # 아니면 상태를 정리하고 다시 해본다(한 번의 일시적 방해로
-            # 이 소스 전체를 실패시키지 않는다).
+            # 이 소스 전체를 실패시키지 않는다). 2026-10-08: 가로챈 게
+            # 낯선 프로모션 팝업일 수 있어 재시도 전에 치운다 — 이전에는
+            # 그냥 기다리기만 해서 같은 팝업이 떠 있는 한 매번 똑같이
+            # 실패했다(사용자 실측 재현).
             if attempt == _MAX_DATE_RANGE_ATTEMPTS - 1:
                 raise BaeminStatsScrapeError(
                     f"날짜 범위를 {start_date}~{end_date}로 지정하지 못했습니다: {e}"
                 ) from e
             applied_text = ""
+            _dismiss_backdrop_if_present(page)
             page.wait_for_timeout(1_000)
             continue
         if parse_applied_range(applied_text) == expected:

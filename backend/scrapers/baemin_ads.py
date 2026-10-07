@@ -22,6 +22,7 @@ discrepancy 절과 동일한 근거). `_should_count_click_metrics_response`가
 직전에만 `True`로 바뀐다.
 """
 
+import re
 from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -54,9 +55,23 @@ class BaeminAdsScrapeError(Exception):
 
 
 def _dismiss_backdrop_if_present(page) -> None:
-    if page.get_by_test_id("backdrop").count() > 0:
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
+    # 2026-10-08 보강(baemin_stats.py와 동일한 이유): Escape만으로는 같은
+    # 프로모션 팝업이 매번 다시 떠서 계속 클릭을 가로챈다(사용자 실측
+    # 재현) — "N일간 보지 않기"류 옵션을 먼저 찾아 누른다.
+    if page.get_by_test_id("backdrop").count() == 0:
+        return
+    dont_show_again = page.get_by_text(
+        re.compile(r"(\d+일|오늘\s*하루)\s*(간)?\s*(다시\s*)?(보지|열지)\s*않기")
+    ).first
+    if dont_show_again.count() > 0:
+        try:
+            dont_show_again.click(timeout=2_000)
+            page.wait_for_timeout(500)
+            return
+        except Exception:
+            pass
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(500)
 
 
 def _select_click_metrics_month(page, month: str) -> None:
@@ -64,10 +79,14 @@ def _select_click_metrics_month(page, month: str) -> None:
     열고, 그 안의 네이티브 `<select>`로 `month`("YYYY-MM")를 고른 뒤 "적용"을
     누른다. 라벨 텍스트는 현재 선택된 달에 따라 바뀌므로("8월", "6월" 등)
     정규식으로 "N월" 형태를 찾는다."""
-    import re
-
     month_label = page.get_by_text(re.compile(r"^\d+월$"), exact=True)
-    month_label.first.click(timeout=5_000)
+    try:
+        month_label.first.click(timeout=5_000)
+    except PlaywrightTimeoutError:
+        # 낯선 프로모션 팝업이 가로막았을 수 있다 — 치우고 한 번 더
+        # 시도한다(2026-10-08, 사용자 실측 재현).
+        _dismiss_backdrop_if_present(page)
+        month_label.first.click(timeout=5_000)
     page.wait_for_timeout(1_000)
 
     select_el = page.locator("select").last
