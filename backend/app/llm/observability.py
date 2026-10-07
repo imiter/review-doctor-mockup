@@ -10,7 +10,14 @@ style_rules, draft, violations, examples_preview 등은 전부 유용한 값
 
 LANGSMITH_API_KEY가 없으면(로컬 개발 등) 빈 결과로 조용히 폴백한다 —
 이 관측 기능이 안 된다고 핵심 기능(답글 생성)에 영향을 주면 안 된다는
-이 프로젝트의 다른 LLM 폴백들과 같은 원칙."""
+이 프로젝트의 다른 LLM 폴백들과 같은 원칙.
+
+토큰/비용(2026-10-08 추가): LangSmith를 쓰는 핵심 이유 중 하나가 토큰/비용
+추적인데 기존 구현엔 전혀 없었다 — LangSmith Run 객체는 LLM 호출
+(ChatAnthropic)의 토큰/비용을 자동으로 계산해 그 run 자신뿐 아니라 부모
+chain run(generate_draft)과 최상위 루트 run(LangGraph)까지 전부 롤업해서
+올려준다는 걸 실측 확인했다 — 그래서 별도 집계 코드 없이 루트 run의
+total_tokens/total_cost를 "이 실행 전체"의 요약으로 그대로 쓴다."""
 
 import os
 from datetime import datetime, timezone
@@ -66,6 +73,9 @@ def list_recent_runs(limit: int = 20) -> list[dict]:
     rows = []
     for r in runs:
         outputs = r.outputs or {}
+        latency_ms = None
+        if r.start_time is not None and r.end_time is not None:
+            latency_ms = int((r.end_time - r.start_time).total_seconds() * 1000)
         rows.append({
             "trace_id": str(r.id),
             "started_at": _iso(r.start_time),
@@ -74,6 +84,12 @@ def list_recent_runs(limit: int = 20) -> list[dict]:
             "passed_verification": outputs.get("passed_verification"),
             "retry_count": outputs.get("retry_count"),
             "final_content_preview": (outputs.get("final_content") or "")[:80],
+            # LangGraph 루트 run은 그 안의 모든 LLM 호출(ChatAnthropic)의 토큰/비용이
+            # 자동으로 합산돼 올라온다(LangSmith가 부모 run에 롤업) — 사장님이 LangSmith를
+            # 쓰는 이유 자체가 토큰/비용 추적이라, 실행 목록에서부터 바로 보여준다.
+            "total_tokens": r.total_tokens,
+            "total_cost": float(r.total_cost) if r.total_cost is not None else None,
+            "latency_ms": latency_ms,
         })
     return rows
 
@@ -96,19 +112,35 @@ def get_run_detail(trace_id: str) -> dict | None:
     children.sort(key=lambda r: r.start_time or datetime.min.replace(tzinfo=timezone.utc))
 
     nodes = []
+    summary = {"total_tokens": None, "total_cost": None, "latency_ms": None, "llm_call_count": 0}
     for r in children:
-        if r.name == _WRAPPER_RUN_NAME:
-            continue
         latency_ms = None
         if r.start_time is not None and r.end_time is not None:
             latency_ms = int((r.end_time - r.start_time).total_seconds() * 1000)
+
+        if r.name == _WRAPPER_RUN_NAME:
+            # 노드 목록엔 안 넣지만(그래프 자체를 감싸는 run이라 "노드"가
+            # 아니다), 토큰/비용/전체 소요시간은 여기(루트 run)에 전체 합산
+            # 값이 이미 올라와 있어 그대로 요약으로 쓴다.
+            summary["total_tokens"] = r.total_tokens
+            summary["total_cost"] = float(r.total_cost) if r.total_cost is not None else None
+            summary["latency_ms"] = latency_ms
+            continue
+
+        if r.run_type == "llm":
+            summary["llm_call_count"] += 1
+
         nodes.append({
             "name": r.name,
             "run_type": r.run_type,
             "status": r.status,
             "start_time": _iso(r.start_time),
             "latency_ms": latency_ms,
+            "total_tokens": r.total_tokens,
+            "prompt_tokens": r.prompt_tokens,
+            "completion_tokens": r.completion_tokens,
+            "total_cost": float(r.total_cost) if r.total_cost is not None else None,
             "inputs": _summarize(r.inputs),
             "outputs": _summarize(r.outputs),
         })
-    return {"trace_id": trace_id, "nodes": nodes}
+    return {"trace_id": trace_id, "summary": summary, "nodes": nodes}
