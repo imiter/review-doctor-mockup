@@ -145,6 +145,16 @@ def auth_headers(client, seeded_user):
 
 
 @pytest.fixture()
+def admin_headers(client, monkeypatch):
+    from app.routers import admin_auth
+
+    monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "test-admin-pw")
+    res = client.post("/admin-auth/login", json={"password": "test-admin-pw"})
+    token = res.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture()
 def signup_flow(client, monkeypatch):
     """이메일 인증 코드를 고정값("123456")으로 monkeypatch해서 /auth/signup까지 한 번에
     통과시켜주는 헬퍼. 실제 이메일 발송은 no-op으로 막는다."""

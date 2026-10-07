@@ -10,11 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.auth import require_admin
 from app.db import get_db
 from app.llm import observability
 from app.llm.generate import CATEGORY_LABELS
-from app.models import DraftFeedbackScore, User
+from app.models import DraftFeedbackScore
+from app.routers.admin_auth import require_admin_token
 
 router = APIRouter(tags=["admin-llmops"])
 
@@ -26,12 +26,12 @@ def _label(category: str) -> str:
 
 
 @router.get("/admin/llmops/runs")
-def list_runs(limit: int = 20, admin: User = Depends(require_admin)):
+def list_runs(limit: int = 20, _: None = Depends(require_admin_token)):
     return {"runs": observability.list_recent_runs(limit=limit)}
 
 
 @router.get("/admin/llmops/runs/{trace_id}")
-def run_detail(trace_id: str, admin: User = Depends(require_admin)):
+def run_detail(trace_id: str, _: None = Depends(require_admin_token)):
     detail = observability.get_run_detail(trace_id)
     if detail is None:
         raise HTTPException(404, "트레이스를 찾을 수 없습니다(LangSmith 미설정이거나 존재하지 않는 trace_id)")
@@ -39,7 +39,7 @@ def run_detail(trace_id: str, admin: User = Depends(require_admin)):
 
 
 @router.get("/admin/llmops/accuracy")
-def accuracy_by_category(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+def accuracy_by_category(_: None = Depends(require_admin_token), db: Session = Depends(get_db)):
     """전체 매장 통합 집계 — 관리자 화면이라 특정 매장에 한정하지 않는다
     (다른 admin 엔드포인트들, 예: admin_list_stores도 전체 매장을 본다)."""
     rows = db.execute(

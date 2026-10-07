@@ -1,20 +1,14 @@
 from datetime import datetime, timezone
 
-from app.models import DraftFeedbackScore, User
+from app.models import DraftFeedbackScore
 
 
-def _promote_to_admin(db_session, user: User) -> None:
-    user.role = "admin"
-    db_session.commit()
-
-
-def test_list_runs_requires_admin_role(client, seeded_user, auth_headers):
+def test_list_runs_requires_admin_auth(client, seeded_user, auth_headers):
     res = client.get("/admin/llmops/runs", headers=auth_headers)
-    assert res.status_code == 403
+    assert res.status_code == 401
 
 
-def test_list_runs_returns_shaped_rows(client, db_session, seeded_user, auth_headers, monkeypatch):
-    _promote_to_admin(db_session, seeded_user["user"])
+def test_list_runs_returns_shaped_rows(client, db_session, seeded_user, admin_headers, monkeypatch):
     import app.routers.admin_llmops as admin_llmops_mod
 
     monkeypatch.setattr(
@@ -22,48 +16,45 @@ def test_list_runs_returns_shaped_rows(client, db_session, seeded_user, auth_hea
         lambda limit: [{"trace_id": "t1", "category_label": "배달(지연/파손)", "passed_verification": True}],
     )
 
-    res = client.get("/admin/llmops/runs?limit=5", headers=auth_headers)
+    res = client.get("/admin/llmops/runs?limit=5", headers=admin_headers)
 
     assert res.status_code == 200
     assert res.json() == {"runs": [{"trace_id": "t1", "category_label": "배달(지연/파손)", "passed_verification": True}]}
 
 
-def test_run_detail_requires_admin_role(client, seeded_user, auth_headers):
+def test_run_detail_requires_admin_auth(client, seeded_user, auth_headers):
     res = client.get("/admin/llmops/runs/some-trace-id", headers=auth_headers)
-    assert res.status_code == 403
+    assert res.status_code == 401
 
 
-def test_run_detail_returns_404_when_not_found(client, db_session, seeded_user, auth_headers, monkeypatch):
-    _promote_to_admin(db_session, seeded_user["user"])
+def test_run_detail_returns_404_when_not_found(client, db_session, seeded_user, admin_headers, monkeypatch):
     import app.routers.admin_llmops as admin_llmops_mod
 
     monkeypatch.setattr(admin_llmops_mod.observability, "get_run_detail", lambda trace_id: None)
 
-    res = client.get("/admin/llmops/runs/nonexistent", headers=auth_headers)
+    res = client.get("/admin/llmops/runs/nonexistent", headers=admin_headers)
 
     assert res.status_code == 404
 
 
-def test_run_detail_returns_node_data(client, db_session, seeded_user, auth_headers, monkeypatch):
-    _promote_to_admin(db_session, seeded_user["user"])
+def test_run_detail_returns_node_data(client, db_session, seeded_user, admin_headers, monkeypatch):
     import app.routers.admin_llmops as admin_llmops_mod
 
     detail = {"trace_id": "t1", "nodes": [{"name": "retrieve_memory", "outputs": {"style_rules": "규칙"}}]}
     monkeypatch.setattr(admin_llmops_mod.observability, "get_run_detail", lambda trace_id: detail)
 
-    res = client.get("/admin/llmops/runs/t1", headers=auth_headers)
+    res = client.get("/admin/llmops/runs/t1", headers=admin_headers)
 
     assert res.status_code == 200
     assert res.json() == detail
 
 
-def test_accuracy_requires_admin_role(client, seeded_user, auth_headers):
+def test_accuracy_requires_admin_auth(client, seeded_user, auth_headers):
     res = client.get("/admin/llmops/accuracy", headers=auth_headers)
-    assert res.status_code == 403
+    assert res.status_code == 401
 
 
-def test_accuracy_aggregates_across_all_stores(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
+def test_accuracy_aggregates_across_all_stores(client, db_session, seeded_user, admin_headers):
     sid = seeded_user["store"].id
     db_session.add_all([
         DraftFeedbackScore(
@@ -81,7 +72,7 @@ def test_accuracy_aggregates_across_all_stores(client, db_session, seeded_user, 
     ])
     db_session.commit()
 
-    res = client.get("/admin/llmops/accuracy", headers=auth_headers)
+    res = client.get("/admin/llmops/accuracy", headers=admin_headers)
 
     assert res.status_code == 200
     by_category = {c["category"]: c for c in res.json()["categories"]}
@@ -91,10 +82,8 @@ def test_accuracy_aggregates_across_all_stores(client, db_session, seeded_user, 
     assert by_category["no_issue"]["label"] == "특이 불만 없음"
 
 
-def test_accuracy_empty_when_no_scores(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
-
-    res = client.get("/admin/llmops/accuracy", headers=auth_headers)
+def test_accuracy_empty_when_no_scores(client, db_session, seeded_user, admin_headers):
+    res = client.get("/admin/llmops/accuracy", headers=admin_headers)
 
     assert res.status_code == 200
     assert res.json() == {"categories": []}

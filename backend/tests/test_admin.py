@@ -21,25 +21,19 @@ def test_auth_me_includes_role(client, seeded_user, auth_headers):
     assert res.json()["role"] == "owner"
 
 
-def _promote_to_admin(db_session, user: User) -> None:
-    user.role = "admin"
-    db_session.commit()
-
-
-def test_admin_payments_requires_admin_role(client, seeded_user, auth_headers):
+def test_admin_payments_requires_admin_auth(client, seeded_user, auth_headers):
     res = client.get("/admin/payments", headers=auth_headers)
-    assert res.status_code == 403
+    assert res.status_code == 401
 
 
-def test_admin_payments_lists_recent_payments(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
+def test_admin_payments_lists_recent_payments(client, db_session, seeded_user, admin_headers):
     db_session.add(Payment(
         user_id=seeded_user["user"].id, order_id="order-1", plan="pro", amount=19900,
         status="approved", requested_at=datetime.now(timezone.utc), approved_at=datetime.now(timezone.utc),
     ))
     db_session.commit()
 
-    res = client.get("/admin/payments", headers=auth_headers)
+    res = client.get("/admin/payments", headers=admin_headers)
     assert res.status_code == 200
     body = res.json()
     assert len(body) == 1
@@ -48,8 +42,7 @@ def test_admin_payments_lists_recent_payments(client, db_session, seeded_user, a
     assert body[0]["status"] == "approved"
 
 
-def test_admin_payments_filters_by_status(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
+def test_admin_payments_filters_by_status(client, db_session, seeded_user, admin_headers):
     db_session.add_all([
         Payment(user_id=seeded_user["user"].id, order_id="order-a", plan="pro", amount=19900,
                 status="approved", requested_at=datetime.now(timezone.utc)),
@@ -58,7 +51,7 @@ def test_admin_payments_filters_by_status(client, db_session, seeded_user, auth_
     ])
     db_session.commit()
 
-    res = client.get("/admin/payments?status=failed", headers=auth_headers)
+    res = client.get("/admin/payments?status=failed", headers=admin_headers)
     assert res.status_code == 200
     body = res.json()
     assert len(body) == 1
@@ -67,21 +60,19 @@ def test_admin_payments_filters_by_status(client, db_session, seeded_user, auth_
 
 
 def test_admin_stores_only_includes_baemin_connections_with_credentials(
-    client, db_session, seeded_user, platforms, auth_headers,
+    client, db_session, seeded_user, platforms, admin_headers,
 ):
-    _promote_to_admin(db_session, seeded_user["user"])
     store = seeded_user["store"]
 
     # seeded_user가 이미 만들어둔 연결은 credential_ciphertext가 NULL이라 제외돼야 한다
-    res = client.get("/admin/stores", headers=auth_headers)
+    res = client.get("/admin/stores", headers=admin_headers)
     assert res.status_code == 200
     assert res.json() == []
 
 
 def test_admin_stores_includes_latest_sync_job_and_auto_reply_state(
-    client, db_session, seeded_user, platforms, reply_styles, auth_headers,
+    client, db_session, seeded_user, platforms, reply_styles, admin_headers,
 ):
-    _promote_to_admin(db_session, seeded_user["user"])
     store = seeded_user["store"]
 
     conn = db_session.scalar(
@@ -106,7 +97,7 @@ def test_admin_stores_includes_latest_sync_job_and_auto_reply_state(
     ))
     db_session.commit()
 
-    res = client.get("/admin/stores", headers=auth_headers)
+    res = client.get("/admin/stores", headers=admin_headers)
     assert res.status_code == 200
     body = res.json()
     assert len(body) == 1
@@ -120,9 +111,8 @@ def test_admin_stores_includes_latest_sync_job_and_auto_reply_state(
 
 
 def test_admin_stores_handles_store_with_no_sync_history(
-    client, db_session, seeded_user, platforms, auth_headers,
+    client, db_session, seeded_user, platforms, admin_headers,
 ):
-    _promote_to_admin(db_session, seeded_user["user"])
     store = seeded_user["store"]
     conn = db_session.scalar(
         select(StorePlatformConnection).where(StorePlatformConnection.store_id == store.id)
@@ -130,7 +120,7 @@ def test_admin_stores_handles_store_with_no_sync_history(
     conn.credential_ciphertext = "encrypted-blob"
     db_session.commit()
 
-    res = client.get("/admin/stores", headers=auth_headers)
+    res = client.get("/admin/stores", headers=admin_headers)
     assert res.status_code == 200
     body = res.json()
     assert len(body) == 1
@@ -139,16 +129,15 @@ def test_admin_stores_handles_store_with_no_sync_history(
 
 
 def test_admin_toggle_auto_reply_updates_setting(
-    client, db_session, seeded_user, reply_styles, auth_headers,
+    client, db_session, seeded_user, reply_styles, admin_headers,
 ):
-    _promote_to_admin(db_session, seeded_user["user"])
     store = seeded_user["store"]
     rs = ReplySetting(store_id=store.id, style_id=reply_styles.id, auto_reply_enabled=True, auto_reply_min_rating=5)
     db_session.add(rs)
     db_session.commit()
 
     res = client.patch(
-        f"/admin/stores/{store.id}/auto-reply", json={"enabled": False}, headers=auth_headers,
+        f"/admin/stores/{store.id}/auto-reply", json={"enabled": False}, headers=admin_headers,
     )
     assert res.status_code == 200
     assert res.json()["auto_reply_enabled"] is False
@@ -157,18 +146,16 @@ def test_admin_toggle_auto_reply_updates_setting(
     assert rs.auto_reply_enabled is False
 
 
-def test_admin_toggle_auto_reply_404_when_no_settings(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
+def test_admin_toggle_auto_reply_404_when_no_settings(client, db_session, seeded_user, admin_headers):
     store = seeded_user["store"]
 
     res = client.patch(
-        f"/admin/stores/{store.id}/auto-reply", json={"enabled": True}, headers=auth_headers,
+        f"/admin/stores/{store.id}/auto-reply", json={"enabled": True}, headers=admin_headers,
     )
     assert res.status_code == 404
 
 
-def test_admin_users_search_by_email_or_nickname(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
+def test_admin_users_search_by_email_or_nickname(client, db_session, seeded_user, admin_headers):
     other = User(
         email="another@example.com", nickname="다른사장",
         password_hash="x", marketing_agreed=False, created_at=datetime.now(timezone.utc),
@@ -176,7 +163,7 @@ def test_admin_users_search_by_email_or_nickname(client, db_session, seeded_user
     db_session.add(other)
     db_session.commit()
 
-    res = client.get("/admin/users?q=demo", headers=auth_headers)
+    res = client.get("/admin/users?q=demo", headers=admin_headers)
     assert res.status_code == 200
     body = res.json()
     assert len(body) == 1
@@ -185,21 +172,17 @@ def test_admin_users_search_by_email_or_nickname(client, db_session, seeded_user
     assert body[0]["store_count"] == 1
 
 
-def test_admin_users_no_query_returns_recent_users(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
-
-    res = client.get("/admin/users", headers=auth_headers)
+def test_admin_users_no_query_returns_recent_users(client, db_session, seeded_user, admin_headers):
+    res = client.get("/admin/users", headers=admin_headers)
     assert res.status_code == 200
     assert len(res.json()) >= 1
 
 
-def test_admin_set_plan_to_pro_sets_expires_at_from_days(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
-
+def test_admin_set_plan_to_pro_sets_expires_at_from_days(client, db_session, seeded_user, admin_headers):
     res = client.patch(
         f"/admin/users/{seeded_user['user'].id}/plan",
         json={"plan": "pro", "days": 14},
-        headers=auth_headers,
+        headers=admin_headers,
     )
     assert res.status_code == 200
     body = res.json()
@@ -207,12 +190,11 @@ def test_admin_set_plan_to_pro_sets_expires_at_from_days(client, db_session, see
     assert body["expires_at"] == str(date.today() + timedelta(days=14))
 
 
-def test_admin_set_plan_to_pro_extends_existing_future_expiry(client, db_session, seeded_user, auth_headers):
+def test_admin_set_plan_to_pro_extends_existing_future_expiry(client, db_session, seeded_user, admin_headers):
     # 이미 Pro로 30일 남은 사용자에게 관리자가 "7일 더" 부여하면, 오늘부터 7일이
     # 아니라 기존 만료일(오늘+30일)부터 7일을 더 연장해서 오늘+37일이 돼야 한다.
     # billing.py의 _approve_payment(결제 승인 자동 연장)와 동일한 규칙이다 —
     # 그렇지 않으면 관리자의 지원성 플랜 부여가 오히려 구독을 단축시킨다.
-    _promote_to_admin(db_session, seeded_user["user"])
     sub = db_session.scalar(select(Subscription).where(Subscription.user_id == seeded_user["user"].id))
     sub.plan = "pro"
     sub.expires_at = date.today() + timedelta(days=30)
@@ -221,7 +203,7 @@ def test_admin_set_plan_to_pro_extends_existing_future_expiry(client, db_session
     res = client.patch(
         f"/admin/users/{seeded_user['user'].id}/plan",
         json={"plan": "pro", "days": 7},
-        headers=auth_headers,
+        headers=admin_headers,
     )
     assert res.status_code == 200
     body = res.json()
@@ -229,76 +211,67 @@ def test_admin_set_plan_to_pro_extends_existing_future_expiry(client, db_session
     assert body["expires_at"] == str(date.today() + timedelta(days=37))
 
 
-def test_admin_set_plan_to_pro_defaults_to_30_days(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
-
+def test_admin_set_plan_to_pro_defaults_to_30_days(client, db_session, seeded_user, admin_headers):
     res = client.patch(
-        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "pro"}, headers=auth_headers,
+        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "pro"}, headers=admin_headers,
     )
     assert res.status_code == 200
     assert res.json()["expires_at"] == str(date.today() + timedelta(days=30))
 
 
-def test_admin_set_plan_to_basic_clears_expires_at(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
+def test_admin_set_plan_to_basic_clears_expires_at(client, db_session, seeded_user, admin_headers):
     client.patch(
-        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "pro", "days": 30}, headers=auth_headers,
+        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "pro", "days": 30}, headers=admin_headers,
     )
 
     res = client.patch(
-        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "basic"}, headers=auth_headers,
+        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "basic"}, headers=admin_headers,
     )
     assert res.status_code == 200
     assert res.json()["plan"] == "basic"
     assert res.json()["expires_at"] is None
 
 
-def test_admin_set_plan_rejects_out_of_range_days(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
-
+def test_admin_set_plan_rejects_out_of_range_days(client, db_session, seeded_user, admin_headers):
     res = client.patch(
         f"/admin/users/{seeded_user['user'].id}/plan",
         json={"plan": "pro", "days": 400},
-        headers=auth_headers,
+        headers=admin_headers,
     )
     assert res.status_code == 422
 
 
-def test_admin_set_plan_404_for_unknown_user(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
-
-    res = client.patch("/admin/users/999999/plan", json={"plan": "pro"}, headers=auth_headers)
+def test_admin_set_plan_404_for_unknown_user(client, db_session, seeded_user, admin_headers):
+    res = client.patch("/admin/users/999999/plan", json={"plan": "pro"}, headers=admin_headers)
     assert res.status_code == 404
 
 
-def test_admin_set_plan_rejects_invalid_plan_value(client, db_session, seeded_user, auth_headers):
-    _promote_to_admin(db_session, seeded_user["user"])
-
+def test_admin_set_plan_rejects_invalid_plan_value(client, db_session, seeded_user, admin_headers):
     res = client.patch(
-        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "enterprise"}, headers=auth_headers,
+        f"/admin/users/{seeded_user['user'].id}/plan", json={"plan": "enterprise"}, headers=admin_headers,
     )
     assert res.status_code == 422
 
 
 @pytest.mark.parametrize("path", ["/admin/payments", "/admin/stores", "/admin/users"])
-def test_admin_get_endpoints_reject_non_admin(client, seeded_user, auth_headers, path):
+def test_admin_get_endpoints_reject_store_owner_token(client, seeded_user, auth_headers, path):
     res = client.get(path, headers=auth_headers)
-    assert res.status_code == 403
+    assert res.status_code == 401
 
 
-def test_admin_toggle_auto_reply_rejects_non_admin(client, seeded_user, auth_headers):
+def test_admin_toggle_auto_reply_rejects_store_owner_token(client, seeded_user, auth_headers):
     res = client.patch(
         f"/admin/stores/{seeded_user['store'].id}/auto-reply",
         json={"enabled": True},
         headers=auth_headers,
     )
-    assert res.status_code == 403
+    assert res.status_code == 401
 
 
-def test_admin_set_plan_rejects_non_admin(client, seeded_user, auth_headers):
+def test_admin_set_plan_rejects_store_owner_token(client, seeded_user, auth_headers):
     res = client.patch(
         f"/admin/users/{seeded_user['user'].id}/plan",
         json={"plan": "pro"},
         headers=auth_headers,
     )
-    assert res.status_code == 403
+    assert res.status_code == 401

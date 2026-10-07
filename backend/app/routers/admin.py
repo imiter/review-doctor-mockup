@@ -10,10 +10,10 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.auth import require_admin
 from app.db import get_db
 from app.models import Payment, Platform, ReplySetting, ReviewSyncJob, Store, StorePlatformConnection, Subscription, User
 from app.plan import effective_plan, kst_today
+from app.routers.admin_auth import require_admin_token
 
 router = APIRouter(tags=["admin"])
 
@@ -22,7 +22,7 @@ router = APIRouter(tags=["admin"])
 def admin_list_payments(
     status: str | None = None,
     limit: int = 50,
-    admin: User = Depends(require_admin),
+    _: None = Depends(require_admin_token),
     db: Session = Depends(get_db),
 ):
     query = select(Payment).order_by(Payment.requested_at.desc()).limit(limit)
@@ -48,7 +48,7 @@ def admin_list_payments(
 
 
 @router.get("/admin/stores")
-def admin_list_stores(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+def admin_list_stores(_: None = Depends(require_admin_token), db: Session = Depends(get_db)):
     baemin = db.scalar(select(Platform).where(Platform.code == "baemin"))
     if baemin is None:
         return []
@@ -97,7 +97,7 @@ class AutoReplyToggleRequest(BaseModel):
 def admin_toggle_auto_reply(
     store_id: int,
     body: AutoReplyToggleRequest,
-    admin: User = Depends(require_admin),
+    _: None = Depends(require_admin_token),
     db: Session = Depends(get_db),
 ):
     rs = db.scalar(select(ReplySetting).where(ReplySetting.store_id == store_id))
@@ -111,7 +111,7 @@ def admin_toggle_auto_reply(
 @router.get("/admin/users")
 def admin_list_users(
     q: str | None = None,
-    admin: User = Depends(require_admin),
+    _: None = Depends(require_admin_token),
     db: Session = Depends(get_db),
 ):
     query = select(User).order_by(User.created_at.desc()).limit(50)
@@ -145,7 +145,7 @@ class AdminPlanUpdateRequest(BaseModel):
 def admin_set_plan(
     user_id: int,
     body: AdminPlanUpdateRequest,
-    admin: User = Depends(require_admin),
+    _: None = Depends(require_admin_token),
     db: Session = Depends(get_db),
 ):
     target_user = db.get(User, user_id)
