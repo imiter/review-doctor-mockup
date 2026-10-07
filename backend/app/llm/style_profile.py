@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.llm import client
+from app.llm.embedding import cosine_similarity, embed_documents
 from app.models import GoldenExample, StoreStyleProfile
 
 _SYSTEM_PROMPT = """너는 배달 음식점 사장님의 답글 스타일을 분석한다.
@@ -33,14 +34,51 @@ _SYSTEM_PROMPT = """너는 배달 음식점 사장님의 답글 스타일을 분
 아니라, 이 예시들에서 실제로 관찰되는 구체적 특징만 적어라. 규칙
 목록만 출력하고 다른 설명은 붙이지 마라."""
 
+# 실측으로 보정 전이라 보수적으로 높게 잡은 잠정값(이 프로젝트의 다른
+# 유사도 임계값들 — agent_graph.py의 복붙 체크 0.8, rag.py의 말투
+# 일관성 체크 0.5 — 과 같은 종류, 운영하면서 조정 대상). 두 원칙
+# 텍스트가 같은 예시 집합을 요약한 "표현만 다른 같은 뜻"인지, 진짜
+# 다른 내용인지를 가르는 데 쓴다.
+_RULES_SIMILARITY_THRESHOLD = 0.95
+
+
+def _rules_materially_changed(old_rules: str, new_rules: str) -> bool:
+    """두 원칙 텍스트가 의미상 실질적으로 다른지 판단한다. client.call_sonnet은
+    temperature 기본값(1.0)이라 완전히 같은 예시로 다시 요약해도 표현이
+    매번 달라진다(의미는 같은데 글자가 다름) — 바이트 비교(!=)로는 이
+    경우를 거의 매번 "바뀌었다"로 오판해서 needs_confirmation이 사실상
+    매 재생성마다 서는 문제가 생긴다(2026-10-07 최종 리뷰에서 지적).
+    Voyage 임베딩 코사인 유사도로 재서, 임계값 아래로 떨어질 때만
+    "실질적으로 바뀌었다"고 본다. 임베딩 호출이 실패하면(Voyage 키
+    미설정 등) 보수적으로 "바뀌었다"로 처리한다 — 이 신호를 놓쳐서
+    사장님이 확인할 기회를 못 얻는 것보다, 가끔 불필요한 확인 요청이
+    한 번 더 뜨는 쪽이 안전하다."""
+    if old_rules == new_rules:
+        return False
+    try:
+        old_vec, new_vec = embed_documents([old_rules, new_rules])
+        similarity = cosine_similarity(old_vec, new_vec)
+    except Exception:
+        return True
+    return similarity < _RULES_SIMILARITY_THRESHOLD
+
 
 def refresh_store_style_profile(db: Session, store_id: int, category: str) -> None:
     examples = db.scalars(
         select(GoldenExample).where(
             GoldenExample.store_id == store_id,
             GoldenExample.category == category,
+            # is_manual/is_synthetic는 현재 모든 생성 경로가 항상
+            # True/False로 고정해서 넣기 때문에 사실상 항상 참이다 —
+            # 실질적으로 거르는 조건은 needs_confirmation뿐이다(2026-10-07
+            # 최종 리뷰에서 지적, app/llm/rag.py의 fetch_golden_examples가
+            # source 기반 3단계로 재작성된 것과 같은 종류의 정리가 이
+            # 쿼리에는 아직 반영 안 됨 — 별도 작업으로 남겨둠).
             GoldenExample.is_manual.is_(True),
             GoldenExample.is_synthetic.is_(False),
+            # ↓ golden_examples 쪽 플래그(경로 C 이상치, 말투 일관성
+            # 체크 미통과) — 바로 아래 StoreStyleProfile.needs_confirmation
+            # (원칙 확인 UI 대상 표시)과 이름만 같고 의미는 완전히 다르다.
             GoldenExample.needs_confirmation.is_(False),
         )
     ).all()
@@ -53,17 +91,20 @@ def refresh_store_style_profile(db: Session, store_id: int, category: str) -> No
     rules = client.call_sonnet(_SYSTEM_PROMPT, user_message, max_tokens=500)
 
     profile = db.get(StoreStyleProfile, (store_id, category))
-    changed = profile is None or profile.rules != rules
+    changed = profile is None or _rules_materially_changed(profile.rules, rules)
     if profile is None:
         db.add(StoreStyleProfile(
             store_id=store_id, category=category, rules=rules, generated_from_count=len(examples),
-            needs_confirmation=changed, updated_at=datetime.now(timezone.utc),
+            needs_confirmation=True, updated_at=datetime.now(timezone.utc),
         ))
     else:
         profile.rules = rules
         profile.generated_from_count = len(examples)
         profile.updated_at = datetime.now(timezone.utc)
         if changed:
+            # ↑ 이 테이블 쪽 플래그(원칙 확인 UI 대상 표시) — 바로 위
+            # golden_examples 쪽 needs_confirmation과 이름만 같고
+            # 의미는 완전히 다르다.
             profile.needs_confirmation = True
     db.commit()
 

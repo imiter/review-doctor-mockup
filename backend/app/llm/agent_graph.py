@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.llm.generate import (

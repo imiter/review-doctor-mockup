@@ -171,3 +171,61 @@ def test_refresh_does_not_reset_needs_confirmation_when_rules_text_unchanged(db_
 
     profile = db_session.get(StoreStyleProfile, (sid, "hygiene"))
     assert profile.needs_confirmation is False
+
+
+def test_refresh_does_not_flag_when_rules_are_semantically_equivalent_paraphrase(db_session, seeded_user, monkeypatch):
+    """call_sonnet의 temperature 기본값(1.0) 때문에 같은 예시로 다시
+    요약해도 표현만 바뀌는 경우가 흔하다 — 바이트는 다르지만 의미가
+    거의 같으면(코사인 유사도가 임계값 이상) needs_confirmation을
+    세우면 안 된다(2026-10-07 최종 리뷰)."""
+    sid = seeded_user["store"].id
+    db_session.add(StoreStyleProfile(
+        store_id=sid, category="hygiene", rules="원래 문장", generated_from_count=1,
+        needs_confirmation=False, updated_at=datetime.now(timezone.utc),
+    ))
+    _make_example(db_session, sid, is_manual=True, is_synthetic=False)
+    db_session.commit()
+    monkeypatch.setattr(style_profile.client, "call_sonnet", lambda system, user, **kw: "표현만 다른 같은 뜻 문장")
+    monkeypatch.setattr(style_profile, "embed_documents", lambda texts: [[1.0, 0.0], [0.99, 0.01]])
+
+    style_profile.refresh_store_style_profile(db_session, sid, "hygiene")
+
+    profile = db_session.get(StoreStyleProfile, (sid, "hygiene"))
+    assert profile.needs_confirmation is False
+
+
+def test_refresh_flags_when_rules_are_semantically_different(db_session, seeded_user, monkeypatch):
+    sid = seeded_user["store"].id
+    db_session.add(StoreStyleProfile(
+        store_id=sid, category="hygiene", rules="원래 문장", generated_from_count=1,
+        needs_confirmation=False, updated_at=datetime.now(timezone.utc),
+    ))
+    _make_example(db_session, sid, is_manual=True, is_synthetic=False)
+    db_session.commit()
+    monkeypatch.setattr(style_profile.client, "call_sonnet", lambda system, user, **kw: "완전히 다른 뜻의 새 문장")
+    monkeypatch.setattr(style_profile, "embed_documents", lambda texts: [[1.0, 0.0], [0.0, 1.0]])
+
+    style_profile.refresh_store_style_profile(db_session, sid, "hygiene")
+
+    profile = db_session.get(StoreStyleProfile, (sid, "hygiene"))
+    assert profile.needs_confirmation is True
+
+
+def test_refresh_falls_back_to_flagging_when_embedding_fails(db_session, seeded_user, monkeypatch):
+    """Voyage 호출이 실패하면(키 미설정 등) 보수적으로 "바뀌었다"로
+    처리한다 — 확인 기회를 놓치는 것보다 과하게 뜨는 쪽이 안전하다.
+    VOYAGE_API_KEY를 몽키패치로 지울 필요 없다 — conftest의 autouse
+    _no_voyage_key 픽스처가 이미 매 테스트마다 지운다."""
+    sid = seeded_user["store"].id
+    db_session.add(StoreStyleProfile(
+        store_id=sid, category="hygiene", rules="원래 문장", generated_from_count=1,
+        needs_confirmation=False, updated_at=datetime.now(timezone.utc),
+    ))
+    _make_example(db_session, sid, is_manual=True, is_synthetic=False)
+    db_session.commit()
+    monkeypatch.setattr(style_profile.client, "call_sonnet", lambda system, user, **kw: "다른 표현의 문장")
+
+    style_profile.refresh_store_style_profile(db_session, sid, "hygiene")
+
+    profile = db_session.get(StoreStyleProfile, (sid, "hygiene"))
+    assert profile.needs_confirmation is True
