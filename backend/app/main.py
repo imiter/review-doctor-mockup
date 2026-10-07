@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import admin, ads, auth, billing, dashboard, orders, reply_onboarding, reply_settings, reviews, sales, store_connections, style_principles
+from app.routers import admin, admin_llmops, ads, auth, billing, dashboard, orders, reply_onboarding, reply_settings, reviews, sales, store_connections, style_principles
 from app.scheduler import run_scheduler_loop
 
 # 스케줄러는 기본 OFF다 — Railway 백엔드 프로세스에서만 명시적으로 켠다.
@@ -66,3 +66,4 @@ app.include_router(style_principles.router)
 app.include_router(store_connections.router)
 app.include_router(billing.router)
 app.include_router(admin.router)
+app.include_router(admin_llmops.router)

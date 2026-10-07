@@ -73,6 +73,37 @@ def test_retrieve_memory_node_populates_state(db_session, seeded_user, platforms
     assert result["repeat_count"] == 1  # 방금 커밋한 리뷰 자신이 집계에 포함됨
     assert result["menu_context"] is None  # platform_shop_no 없음
     assert result["retry_count"] == 0
+    assert result["examples_preview"] == []  # 골든 예시 없는 신규 매장
+
+
+def test_retrieve_memory_node_examples_preview_mirrors_examples(db_session, seeded_user, platforms, reply_styles):
+    """examples_preview는 LangSmith 트레이스에서 사람이 읽을 수 있게 하려는
+    순수 관측용 필드다 — examples와 내용이 일치해야 한다."""
+    from app.models import GoldenExample
+
+    store = seeded_user["store"]
+    db_session.add(GoldenExample(
+        store_id=store.id, category="no_issue", review_text="맛있어요 최고입니다",
+        reply_text="감사합니다 또 찾아주세요", is_manual=True, is_synthetic=False,
+        source="backfill", created_at=datetime.now(timezone.utc),
+    ))
+    review = Review(
+        store_id=store.id, platform_id=platforms["baemin"].id, menu_summary="치킨", rating=5,
+        content="맛있어요", customer_nickname="손님", category="no_issue",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    state = {"db": db_session, "review": review, "store": store, "style": reply_styles}
+    result = retrieve_memory_node(state)
+
+    assert len(result["examples_preview"]) == 1
+    preview = result["examples_preview"][0]
+    assert preview["category"] == "no_issue"
+    assert preview["source"] == "backfill"
+    assert preview["review_text"] == "맛있어요 최고입니다"
+    assert preview["reply_text"] == "감사합니다 또 찾아주세요"
 
 
 def test_retrieve_memory_node_overrides_tone_for_complaint_review(db_session, seeded_user, platforms, reply_styles):

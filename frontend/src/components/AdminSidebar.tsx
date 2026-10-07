@@ -10,6 +10,7 @@ const NAV = [
   { href: "/ops-4k9x2m/payments", label: "결제 이력" },
   { href: "/ops-4k9x2m/stores", label: "매장 운영 현황" },
   { href: "/ops-4k9x2m/users", label: "유저 관리" },
+  { href: "/ops-4k9x2m/llmops", label: "LLMOps" },
 ];
 
 export function AdminSidebar() {

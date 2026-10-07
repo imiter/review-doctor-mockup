@@ -65,6 +65,13 @@ class AgentState(TypedDict, total=False):
     rules: dict[str, str]
     style_rules: str
     examples: list[GoldenExample]
+    # examples와 같은 내용을 사람이 읽을 수 있는 형태로도 담아둔다 —
+    # GoldenExample은 LangSmith 트레이스에 object repr(예:
+    # "<app.models.GoldenExample object at ...>")로만 찍혀서, 트레이스만
+    # 보고는 실제로 어떤 예시가 few-shot으로 쓰였는지 알 수 없었다
+    # (2026-10-07 관리자 LLMOps 대시보드 작업 중 실측 확인). 로직에서는
+    # 안 쓰고 순수하게 관측용이다.
+    examples_preview: list[dict]
     repeat_count: int
     category_label: str
     tone_instruction: str
@@ -104,9 +111,14 @@ def retrieve_memory_node(state: AgentState) -> dict:
 
     display_name = _resolve_display_name(db, store, review)
     menu_context = _find_menu_context(db, store, review)
+    examples_preview = [
+        {"category": ex.category, "source": ex.source, "review_text": ex.review_text[:120], "reply_text": ex.reply_text[:120]}
+        for ex in examples
+    ]
 
     return {
         "rules": rules, "style_rules": style_rules, "examples": examples,
+        "examples_preview": examples_preview,
         "repeat_count": repeat_count, "category_label": category_label,
         "tone_instruction": tone_instruction, "tone_overridden": tone_overridden,
         "display_name": display_name, "menu_context": menu_context,
