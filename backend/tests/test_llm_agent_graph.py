@@ -74,6 +74,10 @@ def test_retrieve_memory_node_populates_state(db_session, seeded_user, platforms
     assert result["menu_context"] is None  # platform_shop_no 없음
     assert result["retry_count"] == 0
     assert result["examples_preview"] == []  # 골든 예시 없는 신규 매장
+    assert result["review_preview"] == {
+        "content": "맛있어요", "rating": 5, "customer_nickname": "손님",
+        "category": "no_issue", "is_sensitive": False, "sentiment_conflict": False,
+    }
 
 
 def test_retrieve_memory_node_examples_preview_mirrors_examples(db_session, seeded_user, platforms, reply_styles):
@@ -219,6 +223,9 @@ def test_verify_draft_flags_copy_paste_violation():
 
     assert "copy_paste" in result["violations"]
     assert result["copy_paste_match"] is example
+    assert result["copy_paste_match_preview"] == {
+        "review_text": example.review_text[:120], "reply_text": example.reply_text[:120],
+    }
 
 
 def test_verify_draft_flags_near_verbatim_copy_not_only_exact():
@@ -248,6 +255,7 @@ def test_verify_draft_allows_paraphrase_of_example():
 
     assert result["violations"] == []
     assert result["copy_paste_match"] is None
+    assert result["copy_paste_match_preview"] is None
 
 
 def test_verify_draft_picks_the_most_similar_example_as_match():

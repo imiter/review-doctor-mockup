@@ -65,6 +65,12 @@ class AgentState(TypedDict, total=False):
     rules: dict[str, str]
     style_rules: str
     examples: list[GoldenExample]
+    # review 자체는 opaque object repr로만 트레이스에 찍혀서(observability.py의
+    # _OPAQUE_KEYS), 관리자 LLMOps 대시보드에서 "실제로 어떤 리뷰가
+    # 들어왔는지"를 보여줄 방법이 없었다(2026-10-08 노드별 실제 예시
+    # 표시 작업 중 실측 확인). examples_preview와 같은 이유로 순수
+    # 관측용으로만 둔다 — 로직에서는 안 쓴다.
+    review_preview: dict
     # examples와 같은 내용을 사람이 읽을 수 있는 형태로도 담아둔다 —
     # GoldenExample은 LangSmith 트레이스에 object repr(예:
     # "<app.models.GoldenExample object at ...>")로만 찍혀서, 트레이스만
@@ -83,6 +89,13 @@ class AgentState(TypedDict, total=False):
     # verify_draft가 채움
     violations: list[str]
     copy_paste_match: GoldenExample | None
+    # copy_paste_match와 같은 내용을 사람이 읽을 수 있는 형태로도 담아둔다
+    # — examples_preview와 같은 이유(2026-10-08 관리자 LLMOps 대시보드
+    # 노드별 실제 예시 표시 작업 중 실측 확인): LangSmith 트레이스에는
+    # GoldenExample이 opaque object repr로만 찍혀서, 어떤 과거 답글과
+    # 겹쳤는지 트레이스만 보고는 알 수 없었다. 로직에서는 안 쓰고 순수하게
+    # 관측용이다.
+    copy_paste_match_preview: dict | None
     # 루프 제어
     retry_count: int
     # finalize가 채움
@@ -115,10 +128,18 @@ def retrieve_memory_node(state: AgentState) -> dict:
         {"category": ex.category, "source": ex.source, "review_text": ex.review_text[:120], "reply_text": ex.reply_text[:120]}
         for ex in examples
     ]
+    review_preview = {
+        "content": review.content[:200],
+        "rating": review.rating,
+        "customer_nickname": review.customer_nickname,
+        "category": review.category,
+        "is_sensitive": review.is_sensitive,
+        "sentiment_conflict": review.sentiment_conflict,
+    }
 
     return {
         "rules": rules, "style_rules": style_rules, "examples": examples,
-        "examples_preview": examples_preview,
+        "examples_preview": examples_preview, "review_preview": review_preview,
         "repeat_count": repeat_count, "category_label": category_label,
         "tone_instruction": tone_instruction, "tone_overridden": tone_overridden,
         "display_name": display_name, "menu_context": menu_context,
@@ -182,7 +203,16 @@ def verify_draft_node(state: AgentState) -> dict:
     if copy_paste_match is not None:
         violations.append("copy_paste")
 
-    return {"violations": violations, "copy_paste_match": copy_paste_match}
+    copy_paste_match_preview = (
+        {"review_text": copy_paste_match.review_text[:120], "reply_text": copy_paste_match.reply_text[:120]}
+        if copy_paste_match is not None else None
+    )
+
+    return {
+        "violations": violations,
+        "copy_paste_match": copy_paste_match,
+        "copy_paste_match_preview": copy_paste_match_preview,
+    }
 
 
 def _find_copy_paste_match(

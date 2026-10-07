@@ -27,6 +27,19 @@ type RunDetail = { trace_id: string; nodes: RunNode[] };
 
 type AccuracyCategory = { category: string; label: string; avg_similarity: number; sample_count: number };
 
+type ReviewPreview = {
+  content: string;
+  rating: number;
+  customer_nickname: string;
+  category: string;
+  is_sensitive: boolean;
+  sentiment_conflict: boolean;
+};
+
+type ExamplePreview = { category: string; source: string; review_text: string; reply_text: string };
+
+type CopyPasteMatchPreview = { review_text: string; reply_text: string } | null;
+
 const NODE_NAME_LABEL: Record<string, string> = {
   retrieve_memory: "기억 조회",
   generate_draft: "초안 생성",
@@ -64,16 +77,52 @@ const PIPELINE_NODES: { key: string; title: string; summary: string; touches: st
   },
 ];
 
+// 백엔드 _EMOJI_PATTERN과 완전히 동일할 필요는 없다 — 여기서는 "실제로
+// 이모지가 섞여 있었다"는 걸 눈으로 바로 확인시키는 시각적 보조 용도다.
+const EMOJI_SPLIT = /([\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}])/gu;
+const EMOJI_TEST = /^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}]$/u;
+
+function asString(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
+function asStringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+function HighlightEmoji({ text }: { text: string }) {
+  if (!text) return null;
+  const parts = text.split(EMOJI_SPLIT);
+  return (
+    <>
+      {parts.map((part, i) =>
+        EMOJI_TEST.test(part) ? (
+          // line-through은 이모지(컬러 글리프)에서 대부분 브라우저가 그려주지
+          // 않아(실측 확인, 2026-10-08) 대신 배경 하이라이트로 표시한다 —
+          // 글자 장식과 달리 배경색은 글리프 종류와 무관하게 항상 보인다.
+          <span key={i} className="rounded bg-danger/25 px-0.5 ring-1 ring-danger/60">
+            {part}
+          </span>
+        ) : (
+          <span key={i}>{part}</span>
+        ),
+      )}
+    </>
+  );
+}
+
 function NodeCard({
   title,
   summary,
   touches,
   variant = "default",
+  example,
 }: {
   title: string;
   summary: string;
   touches: string;
   variant?: "default" | "warning";
+  example?: React.ReactNode;
 }) {
   return (
     <div
@@ -84,41 +133,139 @@ function NodeCard({
       <p className={`text-sm font-semibold ${variant === "warning" ? "text-warning" : "text-accent"}`}>{title}</p>
       <p className="mt-1 text-xs text-foreground">{summary}</p>
       <p className="mt-2 text-[11px] text-muted">{touches}</p>
+      {example}
     </div>
   );
 }
 
-function HArrow({ label, tone = "muted" }: { label?: string; tone?: "muted" | "success" }) {
-  const colorClass = tone === "success" ? "text-success" : "text-muted";
+function ExampleSection({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-1">
-      {label && <span className={`text-[10px] font-medium ${colorClass}`}>{label}</span>}
-      <svg viewBox="0 0 40 16" className={`h-4 w-8 ${colorClass}`} fill="none" aria-hidden="true">
-        <line x1="1" y1="8" x2="30" y2="8" stroke="currentColor" strokeWidth="2" />
-        <polygon points="30,2 39,8 30,14" fill="currentColor" />
-      </svg>
+    <div className="mt-3 space-y-2 border-t border-border-subtle pt-3">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-muted">{label}</p>
+      {children}
     </div>
   );
 }
 
-function VArrow({ direction, label }: { direction: "down" | "up"; label: string }) {
+function MemoryExample({ node }: { node: RunNode | undefined }) {
+  if (!node) return null;
+  const review = node.outputs.review_preview as ReviewPreview | undefined;
+  const examples = (node.outputs.examples_preview as ExamplePreview[] | undefined) ?? [];
   return (
-    <div className="flex items-center gap-2">
-      <svg viewBox="0 0 16 40" className="h-10 w-4 shrink-0 text-warning" fill="none" aria-hidden="true">
-        {direction === "down" ? (
-          <>
-            <line x1="8" y1="1" x2="8" y2="30" stroke="currentColor" strokeWidth="2" />
-            <polygon points="2,30 8,39 14,30" fill="currentColor" />
-          </>
-        ) : (
-          <>
-            <line x1="8" y1="39" x2="8" y2="10" stroke="currentColor" strokeWidth="2" />
-            <polygon points="2,10 8,1 14,10" fill="currentColor" />
-          </>
-        )}
-      </svg>
-      <span className="text-[11px] text-muted">{label}</span>
-    </div>
+    <ExampleSection label="실제 예시">
+      {review && (
+        <div className="rounded-lg bg-surface px-2.5 py-2">
+          <div className="mb-1 flex flex-wrap items-center gap-1.5">
+            <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted">
+              {review.customer_nickname} · 별점 {review.rating}
+            </span>
+            {review.sentiment_conflict && (
+              <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] text-warning">별점-내용 불일치</span>
+            )}
+            {review.is_sensitive && (
+              <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[10px] text-danger">민감 리뷰</span>
+            )}
+          </div>
+          <p className="text-xs text-foreground">&ldquo;{review.content}&rdquo;</p>
+        </div>
+      )}
+      <p className="text-[11px] text-muted">
+        {examples.length > 0 ? `과거 답글 ${examples.length}건을 참고함` : "참고할 과거 답글 없음(신규 매장이거나 데이터 부족)"}
+      </p>
+      {examples.map((ex, i) => (
+        <div key={i} className="rounded-lg bg-surface px-2.5 py-1.5">
+          <p className="text-[10px] text-accent">
+            {ex.source} · {ex.category}
+          </p>
+          <p className="text-xs text-muted">
+            &ldquo;{ex.review_text}&rdquo; → &ldquo;{ex.reply_text}&rdquo;
+          </p>
+        </div>
+      ))}
+    </ExampleSection>
+  );
+}
+
+function DraftExample({ node }: { node: RunNode | undefined }) {
+  if (!node) return null;
+  const draft = asString(node.outputs.draft);
+  return (
+    <ExampleSection label="AI가 쓴 초안">
+      <p className="rounded-lg bg-surface px-2.5 py-2 text-xs text-foreground">{draft}</p>
+    </ExampleSection>
+  );
+}
+
+function VerifyExample({ nodes }: { nodes: RunNode[] }) {
+  if (nodes.length === 0) return null;
+  return (
+    <ExampleSection label="검증 시도">
+      {nodes.map((node, i) => {
+        const violations = asStringArray(node.outputs.violations);
+        const draft = asString(node.inputs.draft);
+        const match = (node.outputs.copy_paste_match_preview as CopyPasteMatchPreview) ?? null;
+        return (
+          <div key={i} className="rounded-lg bg-surface px-2.5 py-2">
+            <div className="mb-1 flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] font-medium text-foreground">{i + 1}차 검증</span>
+              {violations.length === 0 ? (
+                <span className="rounded bg-success/15 px-1.5 py-0.5 text-[10px] text-success">위반 없음</span>
+              ) : (
+                violations.map((v) => (
+                  <span key={v} className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] text-warning">
+                    {v === "emoji" ? "이모지 위반" : "복붙 의심"}
+                  </span>
+                ))
+              )}
+            </div>
+            <p className="text-xs text-foreground">
+              <HighlightEmoji text={draft} />
+            </p>
+            {match && (
+              <div className="mt-1.5 rounded-lg border border-warning/30 bg-warning/5 px-2 py-1.5">
+                <p className="text-[10px] text-warning">과거 답글과 유사도 높음 — 이 예시와 거의 똑같이 썼어요</p>
+                <p className="text-xs text-muted">&ldquo;{match.reply_text}&rdquo;</p>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </ExampleSection>
+  );
+}
+
+function FixExample({ nodes }: { nodes: RunNode[] }) {
+  if (nodes.length === 0) {
+    return (
+      <ExampleSection label="실제 예시">
+        <p className="text-xs text-muted">이번 실행에서는 재시도가 없었어요 — 처음부터 통과했습니다.</p>
+      </ExampleSection>
+    );
+  }
+  return (
+    <ExampleSection label="수정 시도">
+      {nodes.map((node, i) => (
+        <div key={i} className="rounded-lg bg-surface px-2.5 py-2">
+          <p className="mb-1 text-[11px] font-medium text-foreground">{i + 1}차 수정 결과</p>
+          <p className="text-xs text-foreground">{asString(node.outputs.draft)}</p>
+        </div>
+      ))}
+    </ExampleSection>
+  );
+}
+
+function FinalizeExample({ node, retryCount }: { node: RunNode | undefined; retryCount: number | null }) {
+  if (!node) return null;
+  const finalContent = asString(node.outputs.final_content);
+  const passed = node.outputs.passed_verification as boolean | undefined;
+  return (
+    <ExampleSection label="최종 답글">
+      <div className="flex items-center gap-1.5">
+        <StatusBadge passed={passed ?? null} />
+        {retryCount != null && retryCount > 0 && <span className="text-[11px] text-muted">재시도 {retryCount}회</span>}
+      </div>
+      <p className="rounded-lg bg-surface px-2.5 py-2 text-xs text-foreground">{finalContent}</p>
+    </ExampleSection>
   );
 }
 
@@ -158,17 +305,24 @@ function NodeIO({ title, data }: { title: string; data: Record<string, unknown> 
   );
 }
 
-function RunDetailPanel({ trace_id }: { trace_id: string }) {
+function useRunDetail(traceId: string | null) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setDetail(null);
     setError(null);
-    apiGet<RunDetail>(`/admin/llmops/runs/${trace_id}`)
+    if (!traceId) return;
+    apiGet<RunDetail>(`/admin/llmops/runs/${traceId}`)
       .then(setDetail)
       .catch(() => setError("LangSmith에서 이 트레이스를 찾을 수 없어요(보관 기간이 지났거나 설정 문제일 수 있어요)."));
-  }, [trace_id]);
+  }, [traceId]);
+
+  return { detail, error };
+}
+
+function RunDetailPanel({ trace_id }: { trace_id: string }) {
+  const { detail, error } = useRunDetail(trace_id);
 
   if (error) return <p className="px-4 py-3 text-xs text-danger">{error}</p>;
   if (!detail) return <p className="px-4 py-3 text-xs text-muted">노드별 상세 불러오는 중...</p>;
@@ -198,11 +352,40 @@ export default function AdminLlmopsPage() {
   const [runs, setRuns] = useState<RunRow[] | null>(null);
   const [accuracy, setAccuracy] = useState<AccuracyCategory[] | null>(null);
   const [openTraceId, setOpenTraceId] = useState<string | null>(null);
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
 
   useEffect(() => {
     apiGet<{ runs: RunRow[] }>("/admin/llmops/runs?limit=20").then((r) => setRuns(r.runs));
     apiGet<{ categories: AccuracyCategory[] }>("/admin/llmops/accuracy").then((r) => setAccuracy(r.categories));
   }, []);
+
+  useEffect(() => {
+    if (runs && runs.length > 0 && selectedTraceId === null) {
+      setSelectedTraceId(runs[0].trace_id);
+    }
+  }, [runs, selectedTraceId]);
+
+  const { detail, error: detailError } = useRunDetail(selectedTraceId);
+  const selectedRun = runs?.find((r) => r.trace_id === selectedTraceId) ?? null;
+
+  // detail이 아직 안 불러와졌으면(또는 실행 이력 자체가 없으면) 어떤 카드도
+  // "실제 예시"를 보여주면 안 된다 — 특히 ⑤수정(재시도)는 "이번 실행에서는
+  // 재시도가 없었어요"라는 정상적인 빈 상태 문구를 갖고 있어서, detail 로딩
+  // 중에도 fixNodes가 빈 배열이라는 이유만으로 그 문구가 먼저 잘못 깜빡이는
+  // 문제가 있었다(2026-10-08 실측 확인) — detail이 실제로 준비된 뒤에만
+  // 노드 조회를 해서 이 깜빡임을 없앤다.
+  const examplesReady = detail !== null;
+  const nodesNamed = (name: string) => (detail?.nodes.filter((n) => n.name === name) ?? []);
+  const retrieveNode = examplesReady ? nodesNamed("retrieve_memory")[0] : undefined;
+  const draftNode = examplesReady ? nodesNamed("generate_draft")[0] : undefined;
+  const verifyNodes = examplesReady ? nodesNamed("verify_draft") : [];
+  const fixNodes = examplesReady ? nodesNamed("fix_draft") : [];
+  const finalizeNode = examplesReady ? nodesNamed("finalize")[0] : undefined;
+
+  const selectRun = (trace_id: string) => {
+    setSelectedTraceId(trace_id);
+    setOpenTraceId((prev) => (prev === trace_id ? prev : trace_id));
+  };
 
   return (
     <div className="max-w-5xl space-y-6">
@@ -215,9 +398,27 @@ export default function AdminLlmopsPage() {
 
       <div className="rounded-2xl border border-border-subtle bg-surface p-5">
         <h2 className="mb-1 text-sm font-semibold text-foreground">노드 구성도</h2>
-        <p className="mb-4 text-[11px] text-muted">
+        <p className="mb-1 text-[11px] text-muted">
           리뷰 한 건이 답글로 나오기까지 거치는 노드와, 노드 사이에 오가는 데이터입니다.
         </p>
+        {runs === null ? (
+          <p className="mb-4 text-[11px] text-muted">예시 불러오는 중...</p>
+        ) : runs.length === 0 ? (
+          <p className="mb-4 text-[11px] text-muted">
+            아직 답글 생성 이력이 없어서 실제 예시를 보여줄 수 없어요 — 리뷰 답글을 한 번 생성하면 여기 채워집니다.
+          </p>
+        ) : detailError ? (
+          <p className="mb-4 text-[11px] text-danger">{detailError}</p>
+        ) : !detail ? (
+          <p className="mb-4 text-[11px] text-muted">예시 불러오는 중...</p>
+        ) : (
+          <p className="mb-4 text-[11px] text-accent">
+            표시 중인 예시: {selectedRun?.category_label ?? "—"} ·{" "}
+            {selectedRun?.started_at ? new Date(selectedRun.started_at).toLocaleString("ko-KR") : ""}
+            {" — 아래 "}
+            <span className="text-muted">최근 실행 이력</span>에서 다른 사례를 고를 수 있어요.
+          </p>
+        )}
         <div className="overflow-x-auto">
           <div
             className="grid min-w-[900px] gap-x-2 gap-y-2"
@@ -231,25 +432,45 @@ export default function AdminLlmopsPage() {
             }}
           >
             <div style={{ gridArea: "c1" }}>
-              <NodeCard title={PIPELINE_NODES[0].title} summary={PIPELINE_NODES[0].summary} touches={PIPELINE_NODES[0].touches} />
+              <NodeCard
+                title={PIPELINE_NODES[0].title}
+                summary={PIPELINE_NODES[0].summary}
+                touches={PIPELINE_NODES[0].touches}
+                example={<MemoryExample node={retrieveNode} />}
+              />
             </div>
             <div style={{ gridArea: "a1" }} className="flex items-center justify-center">
               <HArrow />
             </div>
             <div style={{ gridArea: "c2" }}>
-              <NodeCard title={PIPELINE_NODES[1].title} summary={PIPELINE_NODES[1].summary} touches={PIPELINE_NODES[1].touches} />
+              <NodeCard
+                title={PIPELINE_NODES[1].title}
+                summary={PIPELINE_NODES[1].summary}
+                touches={PIPELINE_NODES[1].touches}
+                example={<DraftExample node={draftNode} />}
+              />
             </div>
             <div style={{ gridArea: "a2" }} className="flex items-center justify-center">
               <HArrow />
             </div>
             <div style={{ gridArea: "c3" }}>
-              <NodeCard title={PIPELINE_NODES[2].title} summary={PIPELINE_NODES[2].summary} touches={PIPELINE_NODES[2].touches} />
+              <NodeCard
+                title={PIPELINE_NODES[2].title}
+                summary={PIPELINE_NODES[2].summary}
+                touches={PIPELINE_NODES[2].touches}
+                example={<VerifyExample nodes={verifyNodes} />}
+              />
             </div>
             <div style={{ gridArea: "a3" }} className="flex items-center justify-center">
               <HArrow label="통과" tone="success" />
             </div>
             <div style={{ gridArea: "c4" }}>
-              <NodeCard title={PIPELINE_NODES[3].title} summary={PIPELINE_NODES[3].summary} touches={PIPELINE_NODES[3].touches} />
+              <NodeCard
+                title={PIPELINE_NODES[3].title}
+                summary={PIPELINE_NODES[3].summary}
+                touches={PIPELINE_NODES[3].touches}
+                example={<FinalizeExample node={finalizeNode} retryCount={selectedRun?.retry_count ?? null} />}
+              />
             </div>
             <div style={{ gridArea: "lp" }} className="flex items-center justify-center gap-6 py-2">
               <VArrow direction="down" label="위반 발견" />
@@ -261,6 +482,7 @@ export default function AdminLlmopsPage() {
                 summary="이모지는 코드로 즉시 제거하고, 복붙은 겹친 예시를 빼고 좁게 재지시한다."
                 touches="최대 2회까지 반복 — 그래도 안 풀리면 보류 상태로 ④최종화"
                 variant="warning"
+                example={examplesReady ? <FixExample nodes={fixNodes} /> : undefined}
               />
             </div>
           </div>
@@ -301,7 +523,9 @@ export default function AdminLlmopsPage() {
 
       <div className="rounded-2xl border border-border-subtle bg-surface p-5">
         <h2 className="mb-1 text-sm font-semibold text-foreground">최근 실행 이력</h2>
-        <p className="mb-4 text-xs text-muted">눌러서 열면 그 실행이 각 노드에서 실제로 주고받은 데이터를 볼 수 있어요.</p>
+        <p className="mb-4 text-xs text-muted">
+          눌러서 열면 위 노드 구성도가 그 실행의 실제 데이터로 바뀌고, 아래에서 각 노드가 주고받은 원본 데이터도 볼 수 있어요.
+        </p>
         {runs === null ? (
           <p className="text-sm text-muted">불러오는 중...</p>
         ) : runs.length === 0 ? (
@@ -311,9 +535,14 @@ export default function AdminLlmopsPage() {
         ) : (
           <div className="space-y-2">
             {runs.map((r) => (
-              <div key={r.trace_id} className="overflow-hidden rounded-xl border border-border-subtle">
+              <div
+                key={r.trace_id}
+                className={`overflow-hidden rounded-xl border ${
+                  selectedTraceId === r.trace_id ? "border-accent" : "border-border-subtle"
+                }`}
+              >
                 <button
-                  onClick={() => setOpenTraceId(openTraceId === r.trace_id ? null : r.trace_id)}
+                  onClick={() => selectRun(r.trace_id)}
                   className="flex w-full items-center justify-between gap-3 bg-surface-2 px-4 py-3 text-left"
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -333,6 +562,40 @@ export default function AdminLlmopsPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function HArrow({ label, tone = "muted" }: { label?: string; tone?: "muted" | "success" }) {
+  const colorClass = tone === "success" ? "text-success" : "text-muted";
+  return (
+    <div className="flex flex-col items-center justify-center gap-1">
+      {label && <span className={`text-[10px] font-medium ${colorClass}`}>{label}</span>}
+      <svg viewBox="0 0 40 16" className={`h-4 w-8 ${colorClass}`} fill="none" aria-hidden="true">
+        <line x1="1" y1="8" x2="30" y2="8" stroke="currentColor" strokeWidth="2" />
+        <polygon points="30,2 39,8 30,14" fill="currentColor" />
+      </svg>
+    </div>
+  );
+}
+
+function VArrow({ direction, label }: { direction: "down" | "up"; label: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <svg viewBox="0 0 16 40" className="h-10 w-4 shrink-0 text-warning" fill="none" aria-hidden="true">
+        {direction === "down" ? (
+          <>
+            <line x1="8" y1="1" x2="8" y2="30" stroke="currentColor" strokeWidth="2" />
+            <polygon points="2,30 8,39 14,30" fill="currentColor" />
+          </>
+        ) : (
+          <>
+            <line x1="8" y1="39" x2="8" y2="10" stroke="currentColor" strokeWidth="2" />
+            <polygon points="2,10 8,1 14,10" fill="currentColor" />
+          </>
+        )}
+      </svg>
+      <span className="text-[11px] text-muted">{label}</span>
     </div>
   );
 }
