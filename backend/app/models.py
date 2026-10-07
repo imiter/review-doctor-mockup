@@ -314,11 +314,22 @@ class GoldenExample(Base):
 
 
 class StoreStyleProfile(Base):
+    """매장×카테고리별 답글 스타일 원칙 캐싱(2026-10-07부터 카테고리별로
+    분리 — 스펙 4.1절 "원칙 레이어 고도화"). golden_examples 중
+    is_manual=true AND is_synthetic=false AND needs_confirmation=false인
+    데이터로만, 그 카테고리 안에서만 재생성한다(app/llm/style_profile.py).
+
+    needs_confirmation(이 테이블 고유 플래그 — golden_examples의 동명
+    컬럼과는 다른 의미)은 재생성 결과가 이전 rules 텍스트와 실제로
+    다를 때만 선다. 사장님이 확인/수정하면 꺼진다 — 새 원칙은 이 플래그와
+    무관하게 이미 적용 중이라, 이건 순수하게 "검수했는지" 표시다."""
     __tablename__ = "store_style_profile"
 
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("stores.id"), primary_key=True)
+    category: Mapped[str] = mapped_column(String(24), primary_key=True)
     rules: Mapped[str] = mapped_column(Text)
     generated_from_count: Mapped[int]
+    needs_confirmation: Mapped[bool] = mapped_column(default=False)
     updated_at: Mapped[datetime]
 
 

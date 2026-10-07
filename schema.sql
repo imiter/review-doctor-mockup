@@ -400,16 +400,23 @@ CREATE INDEX idx_golden_examples_lookup
     ON golden_examples(store_id, category, source, created_at DESC);
 
 -- ----------------------------------------------------------------------------
--- 16-2. store_style_profile — 매장별 답글 스타일 규칙 캐싱. golden_examples
---       중 is_manual=true AND is_synthetic=false인 데이터로만 재생성한다
---       (가상 데이터로 스타일을 뽑으면 AI가 자기 산출물을 학습하는
---       순환 오염이 생긴다).
+-- 16-2. store_style_profile — 매장×카테고리별 답글 스타일 원칙 캐싱
+--       (2026-10-07부터 카테고리별 분리 — DeepTwin 원칙 UI 플랜). golden_examples
+--       중 is_manual=true AND is_synthetic=false AND needs_confirmation=false인
+--       데이터로, 그 카테고리 안에서만 재생성한다(가상 데이터로 스타일을
+--       뽑으면 AI가 자기 산출물을 학습하는 순환 오염이 생긴다). 이 테이블의
+--       needs_confirmation은 golden_examples의 동명 컬럼과 다른 의미다 —
+--       재생성 결과가 이전 rules와 실제로 다를 때만 선다("원칙 확인" UI
+--       대상 표시일 뿐, 새 원칙 자체는 이 플래그와 무관하게 이미 적용 중).
 -- ----------------------------------------------------------------------------
 CREATE TABLE store_style_profile (
-    store_id             BIGINT       PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+    store_id             BIGINT       NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    category             VARCHAR(24)  NOT NULL,
     rules                TEXT         NOT NULL,
     generated_from_count INT          NOT NULL,
-    updated_at           TIMESTAMPTZ  NOT NULL DEFAULT now()
+    needs_confirmation   BOOLEAN      NOT NULL DEFAULT false,
+    updated_at           TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (store_id, category)
 );
 
 -- ----------------------------------------------------------------------------
