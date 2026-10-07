@@ -20,7 +20,7 @@ function LoginForm() {
   useEffect(() => {
     if (!getToken()) return;
     apiGet<{ role: string }>("/auth/me")
-      .then((me) => router.replace(me.role === "admin" ? "/ops-4k9x2m" : "/dashboard"))
+      .then(() => router.replace("/dashboard"))
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -37,7 +37,7 @@ function LoginForm() {
         password: overridePassword ?? password,
       });
       setToken(res.access_token);
-      router.push(res.user.role === "admin" ? "/ops-4k9x2m" : "/dashboard");
+      router.push("/dashboard");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "로그인에 실패했습니다");
     } finally {
