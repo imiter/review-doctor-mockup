@@ -27,6 +27,10 @@ def test_record_draft_feedback_background_writes_score_row(db_session, seeded_us
     store = seeded_user["store"]
     monkeypatch.setattr(feedback_mod, "embed_documents", lambda texts: [[1.0, 0.0], [1.0, 0.0]])
     monkeypatch.setattr(feedback_mod, "SessionLocal", lambda: db_session)
+    # feedback.py가 LANGSMITH_API_KEY 미설정 시 LangSmith 호출 자체를 건너뛰는
+    # 가드를 추가했다(2026-10-07 최종 리뷰) — 이 테스트는 실제로 호출이
+    # 일어나는지(_FakeClient.create_feedback) 검증하므로 키를 켜줘야 한다.
+    monkeypatch.setenv("LANGSMITH_API_KEY", "test-key")
     created_feedback = []
 
     class _FakeClient:
@@ -79,6 +83,10 @@ def test_record_draft_feedback_background_keeps_db_row_when_langsmith_fails(db_s
     store = seeded_user["store"]
     monkeypatch.setattr(feedback_mod, "embed_documents", lambda texts: [[1.0, 0.0], [0.0, 1.0]])
     monkeypatch.setattr(feedback_mod, "SessionLocal", lambda: db_session)
+    # 아래 _FailingClient가 실제로 호출돼야 "LangSmith 실패해도 DB는
+    # 남는다"를 검증하는 의미가 있다 — 키 없으면 가드가 호출 자체를 막아
+    # 이 테스트가 무의미해진다(2026-10-07 최종 리뷰).
+    monkeypatch.setenv("LANGSMITH_API_KEY", "test-key")
 
     class _FailingClient:
         def create_feedback(self, **kwargs):
@@ -104,6 +112,9 @@ def test_record_draft_feedback_background_stores_negative_similarity_without_cla
     store = seeded_user["store"]
     monkeypatch.setattr(feedback_mod, "embed_documents", lambda texts: [[1.0, 0.0], [-1.0, 0.0]])
     monkeypatch.setattr(feedback_mod, "SessionLocal", lambda: db_session)
+    # 위 test_record_draft_feedback_background_writes_score_row와 동일한
+    # 이유(2026-10-07 최종 리뷰) — 가드를 통과시켜 실제 호출을 검증한다.
+    monkeypatch.setenv("LANGSMITH_API_KEY", "test-key")
     created_feedback = []
 
     class _FakeClient:

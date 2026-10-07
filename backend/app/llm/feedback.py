@@ -16,6 +16,7 @@ LangSmith 쪽은 DB 기록이 끝난 뒤 별도로 시도하고 실패해도 이
 행에는 영향 없다."""
 
 import logging
+import os
 from datetime import datetime, timezone
 
 from app.db import SessionLocal
@@ -53,7 +54,8 @@ def record_draft_feedback_background(
     finally:
         db.close()
 
-    try:
-        _LangSmithClient().create_feedback(run_id=trace_id, key="draft_final_similarity", score=score)
-    except Exception:
-        logger.exception("LangSmith feedback 기록 실패, trace_id=%s", trace_id)
+    if _LangSmithClient is not None and os.environ.get("LANGSMITH_API_KEY"):
+        try:
+            _LangSmithClient().create_feedback(run_id=trace_id, key="draft_final_similarity", score=score)
+        except Exception:
+            logger.exception("LangSmith feedback 기록 실패, trace_id=%s", trace_id)
