@@ -31,6 +31,8 @@ type StylePrinciple = {
   updated_at: string;
 };
 
+type AllStylePrinciple = StylePrinciple & { needs_confirmation: boolean };
+
 const ONBOARDING_CATEGORY_LABEL: Record<string, string> = {
   food_quality: "음식 품질(맛/온도/양)",
   delivery: "배달(지연/파손)",
@@ -218,6 +220,106 @@ function PrincipleReviewCard({ storeId }: { storeId: number }) {
   );
 }
 
+function AllPrinciplesCard({ storeId }: { storeId: number }) {
+  const [principles, setPrinciples] = useState<AllStylePrinciple[] | null>(null);
+  const [openCategory, setOpenCategory] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = () => {
+    apiGet<{ principles: AllStylePrinciple[] }>(`/style-principles/all?store_id=${storeId}`)
+      .then((r) => setPrinciples(r.principles))
+      .catch(() => setPrinciples([]));
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId]);
+
+  const openEdit = (p: AllStylePrinciple) => {
+    setOpenCategory(p.category);
+    setDraft(p.rules);
+    setError(null);
+  };
+
+  const save = async (category: string) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await apiPost(`/style-principles/${category}/confirm?store_id=${storeId}`, { rules: draft });
+      setOpenCategory(null);
+      load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "저장에 실패했습니다");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!principles) return null;
+
+  return (
+    <Card title="AI 원칙 전체 보기">
+      <p className="mb-3 text-xs text-muted">
+        카테고리별로 AI가 파악한 사장님 말투 원칙이에요. &quot;확인 대기&quot; 표시가 없어도
+        아무 때나 열어서 다시 고칠 수 있어요.
+      </p>
+      {principles.length === 0 ? (
+        <p className="text-sm text-muted">아직 생성된 원칙이 없습니다.</p>
+      ) : (
+        <div className="space-y-2">
+          {principles.map((p) => (
+            <div key={p.category} className="rounded-lg border border-border-subtle bg-surface-2">
+              <button
+                onClick={() => (openCategory === p.category ? setOpenCategory(null) : openEdit(p))}
+                className="flex w-full items-center justify-between px-3 py-2 text-left text-sm"
+              >
+                <span className="text-foreground">{p.label}</span>
+                <span className="flex items-center gap-2 text-xs text-muted">
+                  {p.needs_confirmation && (
+                    <span className="rounded bg-accent-soft px-1.5 py-0.5 text-accent">확인 대기</span>
+                  )}
+                  {openCategory === p.category ? "접기" : "수정"}
+                </span>
+              </button>
+              {openCategory === p.category && (
+                <div className="border-t border-border-subtle p-3">
+                  <textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    disabled={saving}
+                    rows={6}
+                    className="w-full resize-none rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm outline-none focus:border-accent disabled:opacity-60"
+                  />
+                  {error && <p className="mt-2 text-xs text-danger">{error}</p>}
+                  <div className="mt-2 flex justify-end gap-2">
+                    <button
+                      onClick={() => setOpenCategory(null)}
+                      disabled={saving}
+                      className="rounded-lg px-4 py-2 text-sm text-muted transition hover:bg-surface disabled:opacity-60"
+                    >
+                      취소
+                    </button>
+                    <button
+                      onClick={() => save(p.category)}
+                      disabled={saving || !draft.trim()}
+                      className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+                    >
+                      저장
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export default function ReplyStylesPage() {
   const { storeId } = useStoreContext();
   const [styles, setStyles] = useState<ReplyStyle[]>([]);
@@ -318,6 +420,8 @@ export default function ReplyStylesPage() {
         </div>
         <p className="mt-4 text-xs text-muted">{saving ? "저장 중..." : ""}</p>
       </Card>
+
+      {storeId && <AllPrinciplesCard storeId={storeId} />}
     </div>
   );
 }
