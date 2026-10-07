@@ -64,6 +64,64 @@ const PIPELINE_NODES: { key: string; title: string; summary: string; touches: st
   },
 ];
 
+function NodeCard({
+  title,
+  summary,
+  touches,
+  variant = "default",
+}: {
+  title: string;
+  summary: string;
+  touches: string;
+  variant?: "default" | "warning";
+}) {
+  return (
+    <div
+      className={`h-full rounded-xl border p-3 ${
+        variant === "warning" ? "border-warning/40 bg-warning/5" : "border-border-subtle bg-surface-2"
+      }`}
+    >
+      <p className={`text-sm font-semibold ${variant === "warning" ? "text-warning" : "text-accent"}`}>{title}</p>
+      <p className="mt-1 text-xs text-foreground">{summary}</p>
+      <p className="mt-2 text-[11px] text-muted">{touches}</p>
+    </div>
+  );
+}
+
+function HArrow({ label, tone = "muted" }: { label?: string; tone?: "muted" | "success" }) {
+  const colorClass = tone === "success" ? "text-success" : "text-muted";
+  return (
+    <div className="flex flex-col items-center justify-center gap-1">
+      {label && <span className={`text-[10px] font-medium ${colorClass}`}>{label}</span>}
+      <svg viewBox="0 0 40 16" className={`h-4 w-8 ${colorClass}`} fill="none" aria-hidden="true">
+        <line x1="1" y1="8" x2="30" y2="8" stroke="currentColor" strokeWidth="2" />
+        <polygon points="30,2 39,8 30,14" fill="currentColor" />
+      </svg>
+    </div>
+  );
+}
+
+function VArrow({ direction, label }: { direction: "down" | "up"; label: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <svg viewBox="0 0 16 40" className="h-10 w-4 shrink-0 text-warning" fill="none" aria-hidden="true">
+        {direction === "down" ? (
+          <>
+            <line x1="8" y1="1" x2="8" y2="30" stroke="currentColor" strokeWidth="2" />
+            <polygon points="2,30 8,39 14,30" fill="currentColor" />
+          </>
+        ) : (
+          <>
+            <line x1="8" y1="39" x2="8" y2="10" stroke="currentColor" strokeWidth="2" />
+            <polygon points="2,10 8,1 14,10" fill="currentColor" />
+          </>
+        )}
+      </svg>
+      <span className="text-[11px] text-muted">{label}</span>
+    </div>
+  );
+}
+
 function StatusBadge({ passed }: { passed: boolean | null }) {
   if (passed === null) return <span className="rounded bg-surface-2 px-2 py-0.5 text-[11px] text-muted">알 수 없음</span>;
   return passed ? (
@@ -156,29 +214,58 @@ export default function AdminLlmopsPage() {
       </div>
 
       <div className="rounded-2xl border border-border-subtle bg-surface p-5">
-        <h2 className="mb-4 text-sm font-semibold text-foreground">노드 구성도</h2>
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-stretch">
-          {PIPELINE_NODES.map((node, i) => (
-            <div key={node.key} className="flex flex-1 items-stretch gap-3">
-              <div className="flex-1 rounded-xl border border-border-subtle bg-surface-2 p-3">
-                <p className="text-sm font-semibold text-accent">{node.title}</p>
-                <p className="mt-1 text-xs text-foreground">{node.summary}</p>
-                <p className="mt-2 text-[11px] text-muted">{node.touches}</p>
-              </div>
-              {i < PIPELINE_NODES.length - 1 && (
-                <div className="hidden items-center text-muted sm:flex">→</div>
-              )}
+        <h2 className="mb-1 text-sm font-semibold text-foreground">노드 구성도</h2>
+        <p className="mb-4 text-[11px] text-muted">
+          리뷰 한 건이 답글로 나오기까지 거치는 노드와, 노드 사이에 오가는 데이터입니다.
+        </p>
+        <div className="overflow-x-auto">
+          <div
+            className="grid min-w-[900px] gap-x-2 gap-y-2"
+            style={{
+              gridTemplateColumns: "210px 36px 210px 36px 210px 36px 210px",
+              gridTemplateAreas: `
+                "c1 a1 c2 a2 c3 a3 c4"
+                ".  .  .  .  lp .  ."
+                ".  .  .  .  c5 .  ."
+              `,
+            }}
+          >
+            <div style={{ gridArea: "c1" }}>
+              <NodeCard title={PIPELINE_NODES[0].title} summary={PIPELINE_NODES[0].summary} touches={PIPELINE_NODES[0].touches} />
             </div>
-          ))}
+            <div style={{ gridArea: "a1" }} className="flex items-center justify-center">
+              <HArrow />
+            </div>
+            <div style={{ gridArea: "c2" }}>
+              <NodeCard title={PIPELINE_NODES[1].title} summary={PIPELINE_NODES[1].summary} touches={PIPELINE_NODES[1].touches} />
+            </div>
+            <div style={{ gridArea: "a2" }} className="flex items-center justify-center">
+              <HArrow />
+            </div>
+            <div style={{ gridArea: "c3" }}>
+              <NodeCard title={PIPELINE_NODES[2].title} summary={PIPELINE_NODES[2].summary} touches={PIPELINE_NODES[2].touches} />
+            </div>
+            <div style={{ gridArea: "a3" }} className="flex items-center justify-center">
+              <HArrow label="통과" tone="success" />
+            </div>
+            <div style={{ gridArea: "c4" }}>
+              <NodeCard title={PIPELINE_NODES[3].title} summary={PIPELINE_NODES[3].summary} touches={PIPELINE_NODES[3].touches} />
+            </div>
+            <div style={{ gridArea: "lp" }} className="flex items-center justify-center gap-6 py-2">
+              <VArrow direction="down" label="위반 발견" />
+              <VArrow direction="up" label="재검증 (최대 2회)" />
+            </div>
+            <div style={{ gridArea: "c5" }}>
+              <NodeCard
+                title="⑤ 수정(재시도)"
+                summary="이모지는 코드로 즉시 제거하고, 복붙은 겹친 예시를 빼고 좁게 재지시한다."
+                touches="최대 2회까지 반복 — 그래도 안 풀리면 보류 상태로 ④최종화"
+                variant="warning"
+              />
+            </div>
+          </div>
         </div>
-        <div className="mt-3 rounded-xl border border-dashed border-border-subtle bg-surface-2/60 p-3">
-          <p className="text-xs text-foreground">
-            <span className="font-semibold text-warning">⑤ 수정(재시도)</span> — ③검증에서 위반이 발견되면(이모지는
-            코드로 즉시 제거, 복붙은 겹친 예시를 빼고 좁게 재지시) 여기서 고친 뒤 ③검증으로 다시 돌아갑니다.
-            최대 2회까지 반복하고, 그래도 안 풀리면 보류 상태로 ④최종화합니다.
-          </p>
-        </div>
-        <p className="mt-3 text-[11px] text-muted">
+        <p className="mt-4 text-[11px] text-muted">
           전체 실행은 LangSmith로 트레이싱되고, 재시도 루프가 끝나면 AI 초안과 사장님 최종본의 유사도가
           측정돼 아래 정확도 지표에 반영됩니다.
         </p>
