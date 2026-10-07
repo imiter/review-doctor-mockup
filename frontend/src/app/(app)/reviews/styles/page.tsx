@@ -23,6 +23,14 @@ type OnboardingScenario = {
   status: string;
 };
 
+type StylePrinciple = {
+  category: string;
+  label: string;
+  rules: string;
+  generated_from_count: number;
+  updated_at: string;
+};
+
 const ONBOARDING_CATEGORY_LABEL: Record<string, string> = {
   food_quality: "음식 품질(맛/온도/양)",
   delivery: "배달(지연/파손)",
@@ -132,6 +140,84 @@ function OnboardingTrainingCard({ storeId }: { storeId: number }) {
   );
 }
 
+function PrincipleReviewCard({ storeId }: { storeId: number }) {
+  const [principles, setPrinciples] = useState<StylePrinciple[] | null>(null);
+  const [index, setIndex] = useState(0);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    apiGet<{ principles: StylePrinciple[] }>(`/style-principles?store_id=${storeId}`)
+      .then((r) => setPrinciples(r.principles))
+      .catch(() => setPrinciples([]));
+  }, [storeId]);
+
+  const current = principles?.[index] ?? null;
+
+  useEffect(() => {
+    if (current) setDraft(current.rules);
+  }, [current]);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight + 24}px`;
+  }, [draft]);
+
+  if (!principles || principles.length === 0 || !current) return null;
+
+  const advance = () => {
+    if (index + 1 < principles.length) {
+      setIndex(index + 1);
+    } else {
+      setPrinciples([]);
+    }
+  };
+
+  const confirm = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await apiPost(`/style-principles/${current.category}/confirm?store_id=${storeId}`, { rules: draft });
+      advance();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "확인에 실패했습니다");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card title={`AI 원칙 확인 (${index + 1}/${principles.length})`}>
+      <p className="mb-3 rounded-lg bg-surface-2 p-3 text-xs text-muted">
+        &quot;{current.label}&quot; 유형 답글에서 AI가 파악한 사장님 말투 원칙이 바뀌었어요
+        (실제 답글 {current.generated_from_count}건 기준). 맞는지 확인하거나, 틀린 부분이 있으면
+        고쳐서 저장해주세요 — 새 원칙은 이미 답글 생성에 적용되고 있어요.
+      </p>
+      <textarea
+        ref={textareaRef}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        disabled={saving}
+        className="w-full resize-none overflow-hidden rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent disabled:opacity-60"
+      />
+      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
+      <div className="mt-3 flex justify-end gap-2">
+        <button
+          onClick={confirm}
+          disabled={saving || !draft.trim()}
+          className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+        >
+          확인
+        </button>
+      </div>
+    </Card>
+  );
+}
+
 export default function ReplyStylesPage() {
   const { storeId } = useStoreContext();
   const [styles, setStyles] = useState<ReplyStyle[]>([]);
@@ -174,6 +260,7 @@ export default function ReplyStylesPage() {
   return (
     <div className="max-w-4xl space-y-6">
       {storeId && <OnboardingTrainingCard storeId={storeId} />}
+      {storeId && <PrincipleReviewCard storeId={storeId} />}
 
       <div>
         <h1 className="text-xl font-semibold">답글 스타일 설정</h1>
