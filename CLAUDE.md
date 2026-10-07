@@ -790,6 +790,65 @@ trace_id 컬럼 + draft_feedback_scores 테이블, 전부 nullable/신규라 기
 안 된 상태로 쌓여 있다 — 배포 시 `alembic upgrade head` 한 번으로 셋 다
 올라간다. 이 작업은 새 시드/백필 스크립트가 없다.
 
+### DeepTwin 원칙 UI (예외 허용 아님 — 기존 캐싱 테이블 재설계 + 비차단
+확인 UI 추가)
+스펙 4.1절 "원칙 레이어 고도화"를 구현했다(2026-10-07) — `store_style_profile`을
+매장당 1행에서 매장×카테고리당 1행으로 세분화해 "배달지연 불만엔
+이렇게, 맛 불만엔 저렇게" 같은 상황별 판단 원칙을 따로 증류한다. PK가
+`(store_id, category)`로 바뀌었다(위 "테이블 용도" 참고). 재생성
+메커니즘 자체(golden_examples 중 is_manual=true AND is_synthetic=false
+AND needs_confirmation=false인 데이터를 Sonnet이 5~7줄로 요약) 는
+그대로고, `category` 필터만 추가됐다 — `retrieve_memory_node`
+(`app/llm/agent_graph.py`)의 조회 키도 `store_id` 단독에서
+`(store_id, review.category)`로 바뀌어, 새 원칙은 재생성 즉시 다음
+답글 생성부터 그대로 적용된다(아래 확인 여부와 무관하게).
+
+**원칙 확인("원칙 확인" UI, 훈련카드와는 별개 장치)**: `StoreStyleProfile.
+needs_confirmation`(이 테이블 고유 플래그 — `golden_examples`의 동명
+컬럼은 경로 C 이상치 표시로 완전히 다른 의미)이 재생성 결과가 이전
+텍스트와 **의미상 실질적으로** 다를 때만 선다. 처음엔 바이트
+비교(`!=`)로 구현했는데, `client.call_sonnet`이 temperature 기본값
+(1.0)이라 같은 예시로 다시 요약해도 표현만 매번 달라져서 사실상 매
+재생성마다 선다는 게 2026-10-07 최종 리뷰에서 지적됐다 — Plan 3이 만든
+Voyage 임베딩 코사인 유사도(`app/llm/embedding.py`)로 바꿔, 의미가
+실질적으로 달라졌을 때만(`_RULES_SIMILARITY_THRESHOLD`, 실측 보정
+전 잠정값) 선다. 임베딩 호출이 실패하면 보수적으로 "바뀌었다"로
+처리한다(확인 기회를 놓치는 것보다 안전). `needs_confirmation=true`인
+카테고리만 `GET /style-principles`(`backend/app/routers/
+style_principles.py`)로 노출되고, "답글 스타일 설정" 화면
+(`reviews/styles`)의 훈련카드 바로 아래 카드가 보여준다 — 훈련카드
+(판단사례 수집)와 원칙 확인(그 사례의 AI 요약 검수)이 데이터 흐름상
+이어지는 보완 관계라 같은 화면에 나란히 둔다. `POST /style-principles/
+{category}/confirm`으로 확인/수정하면 플래그만 꺼진다 — 수정한 텍스트는
+다음 재생성(그 카테고리에 새 golden_example이 쌓일 때)이 오면 AI
+요약으로 덮어써진다(의도된 동작, 이 테이블이 golden_examples에서
+파생되는 캐시라는 원칙을 그대로 따름 — 사장님 수정을 영구 보존하려면
+별도 설계가 필요하고 아직 하지 않았다).
+
+**운영 배포 시 전체 콜드스타트 — 백필 스크립트 필수**: 마이그레이션
+`0004`가 기존 `store_style_profile`을 통째로 `DROP`하고 새 스키마로
+다시 만든다 — 이 테이블은 Alembic 이전 시절(2026-08-21)부터 운영에
+실 데이터가 쌓여 있었지만, 옛 "매장 전체 통합" 행이 새 카테고리별
+스키마의 어떤 카테고리에도 정확히 대응하지 않아 버리는 게 맞는
+선택이다(golden_examples는 그대로 보존되므로 캐시를 버리는 것뿐,
+데이터 유실 아님). 단, **안 돌리면** 배포 직후 모든 카테고리가 다음
+저장 시점까지 `_FALLBACK_STYLE_RULES`(일반 사과문 원칙)로 떨어지고,
+이 가게는 리뷰의 99%가 no_issue라 정작 이 플랜이 서비스하려는 불만
+카테고리들은 몇 주씩 안 채워질 수 있다. `alembic upgrade head` 직후
+`python -m scripts.backfill_store_style_profiles`(golden_examples에서
+(store_id, category) 조합마다 한 번씩 재생성, 여러 번 돌려도 안전)를
+반드시 돌린다(위 "스키마 변경 절차" 절의 운영 반영 순서에 포함).
+
+**알려진 한계(아직 고치지 않음)**: `fetch_golden_examples`(`app/llm/
+rag.py`)는 2026-10-06에 `source` 기반 3단계로 재작성됐지만,
+`refresh_store_style_profile`의 golden_examples 조회는 여전히 옛
+`is_manual`/`is_synthetic` 플래그를 쓴다 — 지금 모든 생성 경로가 이
+둘을 항상 True/False로 고정해서 넣기 때문에 사실상 항상 참이고, 실제로
+거르는 조건은 `needs_confirmation`뿐이다(2026-10-07 최종 리뷰에서
+지적). 원칙 레이어에는 경로 C(`organic_direct`, 구조적 보증이 가장
+약한 경로)의 예시도 다른 경로와 동등하게 반영된다는 뜻 — `rag.py`와
+같은 `source` 기반 우선순위로 맞추는 건 별도 작업으로 남겨뒀다.
+
 ### 모바일 앱 (예외 허용)
 원래 "Flutter 앱 구현 금지"로 모바일 앱 자체를 범위 밖으로 뒀으나, 웹과 같은
 백엔드를 쓰는 React Native 앱을 추가하기로 결정했다(추후 결정으로 예외 허용 —
@@ -880,8 +939,12 @@ draft_feedback_scores.
   procedural_rules" 절 참고). 전역 테이블 — store_id가 없다.
 - brand_ceo_notices: 브랜드(shop_no)별 배민 사장님공지(아래 "의미 기억:
   사장님공지" 절 참고).
-- store_style_profile: 매장별 답글 스타일 규칙(5~7줄) 캐싱. 진짜
-  골든 예시로만 재생성한다.
+- store_style_profile: 매장×카테고리별 답글 스타일 원칙(5~7줄) 캐싱
+  (2026-10-07부터 카테고리별 분리 — PK가 `(store_id, category)` —
+  아래 "DeepTwin 원칙 UI" 절 참고). 진짜 골든 예시로만, 그 카테고리
+  안에서만 재생성한다. needs_confirmation(이 테이블 고유 플래그,
+  golden_examples의 동명 컬럼과 다른 의미)은 재생성 결과가 이전
+  텍스트와 의미상 실질적으로 다를 때만 선다.
 - review_replies: AI 추천 답글 Mock과 사장 최종 답글. trace_id(nullable,
   2026-10-07 추가)는 reply_type="ai_draft" 행에만 채워지며, 이 초안을
   만든 run_agent 호출의 LangSmith trace id다 — 아래 "순환 측정 장치" 절
@@ -994,7 +1057,7 @@ brand_ceo_notices, golden_examples 컬럼 3개)을 운영에 반영하려면 사
 
       alembic current          # 비어 있으면 아직 추적 안 되는 상태
       alembic stamp 0001       # DDL을 돌리지 않고 기준선 도달만 기록
-      alembic upgrade head     # 0002만 실제로 적용된다
+      alembic upgrade head     # 0002/0003/0004가 순서대로 적용된다(2026-10-07 기준)
 
       # 1) procedural_rules 시드 — 안 돌리면 에러는 안 나지만
       #    generate.py의 _FALLBACK_RULES(축약된 대체 문구)로 조용히
@@ -1010,16 +1073,27 @@ brand_ceo_notices, golden_examples 컬럼 3개)을 운영에 반영하려면 사
       #    그냥 작동을 안 하는 상태로 남는다. 이 스텝이 제일 중요하다.
       python -m scripts.backfill_golden_example_reply_embeddings
 
+      # 3) store_style_profile 재생성(2026-10-07, DeepTwin 원칙 UI
+      #    플랜) — 0004가 이 테이블을 통째로 지우고 카테고리별 스키마로
+      #    새로 만든다(golden_examples는 그대로 보존됨, 캐시라 버려도
+      #    안전 — 아래 "DeepTwin 원칙 UI" 절 참고). 안 돌리면 모든
+      #    카테고리의 답글 생성이 다음 저장 시점까지 일반 폴백
+      #    원칙(_FALLBACK_STYLE_RULES)으로 떨어진다 — 이 가게는 리뷰의
+      #    99%가 no_issue라 정작 이 플랜이 서비스하려는 불만 카테고리들은
+      #    몇 주씩 안 채워질 수 있다.
+      python -m scripts.backfill_store_style_profiles
+
   이후 배포할 때마다 DDL이 또 바뀌었으면 `alembic upgrade head`만 다시
   돌리면 된다(시드/백필은 최초 1회성 — 새 마이그레이션이 새 규칙/컬럼을
   또 추가하지 않는 한 반복 불필요). 0001을 stamp 하지 않고 바로
   `upgrade head`를 돌리면 이미 있는 테이블을 다시 만들려다 실패한다
   (실패로 끝나고 DDL은 한 트랜잭션이라 깨진 상태로 남지는 않는다). 이
-  절차는 로컬 Postgres의 임시 DB로 양쪽 경로를 실측 검증했다 — 빈 DB에서
+  절차는 로컬 Postgres의 임시 DB로 경로를 실측 검증했다 — 빈 DB에서
   `upgrade head`를 돌린 결과가 `schema.sql` 적용 결과와 `alembic_version`
   테이블만 빼고 완전히 동일하고, ae2b960 스키마 + 데이터가 있는 DB에서
-  stamp 후 upgrade하면 0002만 적용되고 기존 행이 그대로 남는다. **운영
-  DB에는 아직 돌리지 않았다.**
+  stamp 후 upgrade하면 0002부터만 적용되고 기존 행이 그대로 남는다.
+  **운영 DB에는 아직 돌리지 않았다**(0002/0003/0004 전부 — Plan 2/3/4
+  해당).
 
 ### 절차 기억: procedural_rules (2026-10-06)
 답글 생성 프롬프트에 꽂히던 지시문들이 `backend/app/llm/generate.py`에
@@ -1136,7 +1210,7 @@ AI가 자기 산출물을 다시 학습하는 순환 오염이다. 그래서 제
 - reviews 1:N review_replies
 - stores 1:N golden_examples, golden_examples는 reviews/review_replies를
   선택적으로 참조(source_review_id/source_reply_id)
-- stores 1:1 store_style_profile
+- stores 1:N store_style_profile (PK가 `(store_id, category)`, 2026-10-07부터 — 매장당 카테고리별로 1행)
 - stores 1:1 reply_settings, reply_settings는 reply_styles 참조
 - daily_settlements는 store와 platform 참조, 매출액과 입금액에 더해 배민
   정산 상세 실측 컬럼 4개(nullable)도 함께 가진다

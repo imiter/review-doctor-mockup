@@ -11,10 +11,19 @@ DeepTwin 원칙 UI 플랜(docs/superpowers/plans/
 
 기존 행은 전부 버린다 — store_style_profile은 golden_examples에서 언제든
 다시 뽑아낼 수 있는 캐시이고, 바뀐 스키마에서는 기존 "매장 전체 통합" 행이
-어떤 카테고리에도 정확히 대응하지 않는다. 다음 저장(save_final_reply/
-answer_scenario) 시점에 해당 카테고리 행이 자연히 다시 생긴다 — 데이터
-유실이 아니라 콜드스타트다. 이 테이블의 이전 마이그레이션(0001)도 아직
-운영 DB에 적용 전이라 실제로 버려지는 운영 데이터는 없다.
+어떤 카테고리에도 정확히 대응하지 않는다. **정정(2026-10-07 최종
+리뷰)**: 이전 초안은 "이 테이블의 이전 마이그레이션(0001)도 아직 운영
+DB에 적용 전이라 실제로 버려지는 운영 데이터는 없다"고 적었는데 이건
+틀렸다 — store_style_profile 자체는 Alembic 이전 시절(2026-08-21,
+"LLM 기반 답글 생성" 절)에 schema.sql로 이미 운영에 만들어졌고 그 이후
+계속 실 데이터가 쌓여왔다. "0001이 아직 안 적용됐다"는 사실과 "이
+테이블에 운영 데이터가 없다"는 사실은 다른 말이다. 진짜 이유는 위
+문단 그대로다 — golden_examples에서 다시 뽑아낼 수 있는 캐시이기
+때문에 버려도 안전하다. 다만 실제로 배포하면 이 DROP 직후 모든
+카테고리가 다음 저장 시점까지 일반 폴백 원칙으로 떨어지므로, 배포
+직후 `backend/scripts/backfill_store_style_profiles.py`를 한 번
+돌려서 golden_examples로부터 한 번에 다시 채워야 한다(CLAUDE.md
+"DeepTwin 원칙 UI" 절 참고).
 """
 from typing import Sequence, Union
 

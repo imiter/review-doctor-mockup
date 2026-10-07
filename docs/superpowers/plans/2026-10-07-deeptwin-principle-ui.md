@@ -13,7 +13,7 @@
 - **재생성 메커니즘 자체는 바꾸지 않는다** — golden_examples(is_manual=true AND is_synthetic=false AND needs_confirmation=false)로만 Sonnet을 호출해 5~7줄 규칙을 뽑는 방식은 그대로다. 이번에 추가하는 건 `category` 필터와 `needs_confirmation`(원칙 확인용, golden_examples의 동명 컬럼과는 다른 테이블의 별개 플래그) 하나뿐이다.
 - **원칙 확인은 비정기적·비차단이다** — 그 카테고리의 원칙이 **실제로 바뀔 때만**(이전 `rules` 텍스트와 다를 때만) `needs_confirmation=true`가 선다. 새 원칙은 사장님 확인 여부와 무관하게 **즉시 자동 적용**된다(`retrieve_memory_node`가 그 행을 바로 읽는다) — 확인 화면은 "여유 있을 때 검토, 틀리면 수정"하는 선택 사항이고 답글 생성을 막지 않는다.
 - **훈련카드(OnboardingScenario)와 원칙 확인은 별개 장치**다 — 훈련카드는 판단사례(원재료)를 새로 만드는 장치, 원칙 확인은 이미 쌓인 사례에서 AI가 뽑아낸 요약이 맞는지 검수하는 장치. 데이터 흐름상 훈련카드(사례 수집) → 원칙 확인(그 사례의 요약 검증) 순서로 이어지는 보완 관계라 같은 화면(`reviews/styles`)에 나란히 둔다.
-- **기존 `store_style_profile` 데이터는 이번 마이그레이션으로 버린다** — 이 테이블은 golden_examples에서 언제든 다시 뽑아낼 수 있는 캐시이고(기존 CLAUDE.md 설명), 바뀐 스키마(카테고리별)에서는 기존 "매장 전체 통합" 행이 어떤 카테고리에도 정확히 대응하지 않는다. 다음 저장 시점에 해당 카테고리 행이 자연히 다시 생긴다 — 데이터 유실이 아니라 콜드스타트다. 아직 운영 DB에 이 테이블의 마이그레이션(0001/0002/0003)이 적용 전이라 실제로 버려지는 운영 데이터도 없다.
+- **기존 `store_style_profile` 데이터는 이번 마이그레이션으로 버린다** — 이 테이블은 golden_examples에서 언제든 다시 뽑아낼 수 있는 캐시이고(기존 CLAUDE.md 설명), 바뀐 스키마(카테고리별)에서는 기존 "매장 전체 통합" 행이 어떤 카테고리에도 정확히 대응하지 않는다. 다음 저장 시점에 해당 카테고리 행이 자연히 다시 생긴다 — 데이터 유실이 아니라 콜드스타트다. **정정(2026-10-07 최종 리뷰)**: 이 테이블 자체는 Alembic 이전 시절(2026-08-21)에 schema.sql로 이미 운영에 만들어져 실 데이터가 쌓여 있다 — "마이그레이션 0001이 아직 안 적용됐다"는 별개 사실과 혼동하면 안 된다. 버려도 안전한 진짜 이유는 캐시라는 것뿐이고, 배포 직후 `backend/scripts/backfill_store_style_profiles.py`로 golden_examples에서 한 번에 다시 채워야 콜드스타트 기간이 생기지 않는다.
 - **새 엔드포인트도 기존 ownership 체크 패턴을 그대로 따른다** — `reply_settings.py`의 `store = db.get(Store, sid); if store is None or store.user_id != user.id: raise HTTPException(404, ...)` 패턴을 그대로 쓴다.
 
 ---
@@ -137,8 +137,11 @@ DeepTwin 원칙 UI 플랜(docs/superpowers/plans/
 다시 뽑아낼 수 있는 캐시이고, 바뀐 스키마에서는 기존 "매장 전체 통합" 행이
 어떤 카테고리에도 정확히 대응하지 않는다. 다음 저장(save_final_reply/
 answer_scenario) 시점에 해당 카테고리 행이 자연히 다시 생긴다 — 데이터
-유실이 아니라 콜드스타트다. 이 테이블의 이전 마이그레이션(0001)도 아직
-운영 DB에 적용 전이라 실제로 버려지는 운영 데이터는 없다.
+유실이 아니라 콜드스타트다. 정정(2026-10-07 최종 리뷰): 이 테이블
+자체는 Alembic 이전 시절(2026-08-21)에 schema.sql로 이미 운영에
+만들어져 실 데이터가 있다 — 버려도 안전한 진짜 이유는 캐시라는
+것뿐이다. 배포 직후 backend/scripts/backfill_store_style_profiles.py로
+한 번에 다시 채운다(Global Constraints 참고).
 """
 from typing import Sequence, Union
 
