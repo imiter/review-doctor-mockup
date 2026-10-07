@@ -2476,9 +2476,10 @@ def test_sync_holds_review_as_ai_draft_when_verification_fails(db_session, sync_
         review_sync_mod, "classify_review",
         lambda content, rating: ReviewClassification(category="no_issue", is_sensitive=False, sentiment_conflict=False),
     )
+    fake_trace_id = str(uuid.uuid4())
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="검증 실패한 초안", passed_verification=False, retry_count=2, trace_id=str(uuid.uuid4())),
+        lambda db, review, store, style: AgentResult(content="검증 실패한 초안", passed_verification=False, retry_count=2, trace_id=fake_trace_id),
     )
     submit_calls = []
     monkeypatch.setattr(
@@ -2494,6 +2495,10 @@ def test_sync_holds_review_as_ai_draft_when_verification_fails(db_session, sync_
     draft = db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="ai_draft").one()
     assert draft.content == "검증 실패한 초안"
     assert draft.style_id == reply_styles.id
+    # 측정 1순위 대상(경로 A: 보류→교정)이 재지려면 trace_id가 반드시
+    # 남아야 한다 — save_final_reply가 draft.trace_id is not None을
+    # 게이트로 쓴다(2026-10-07 최종 리뷰 보완).
+    assert draft.trace_id == fake_trace_id
     # final 답글은 저장되지 않았어야 한다 — ai_draft만 있어야 정상.
     assert db_session.query(ReviewReply).filter_by(review_id=review.id, reply_type="final").count() == 0
     # 보류가 조용히 사라지면 안 된다 — 대시보드/기본 필터가 보는 unanswered_review
@@ -2960,9 +2965,10 @@ def test_sync_holds_preexisting_review_as_ai_draft_when_verification_fails(db_se
     fake_session = _FakeSession()
     monkeypatch.setattr(review_sync_mod, "baemin_login", lambda login_id, password: fake_session)
     monkeypatch.setattr(review_sync_mod, "fetch_all_reviews", lambda page, shop_no, **kwargs: [])  # 이번엔 새 리뷰 없음
+    fake_trace_id = str(uuid.uuid4())
     monkeypatch.setattr(
         review_sync_mod, "run_agent",
-        lambda db, review, store, style: AgentResult(content="소급 보류 초안", passed_verification=False, retry_count=2, trace_id=str(uuid.uuid4()))
+        lambda db, review, store, style: AgentResult(content="소급 보류 초안", passed_verification=False, retry_count=2, trace_id=fake_trace_id)
     )
     submit_calls = []
     monkeypatch.setattr(
@@ -2979,6 +2985,10 @@ def test_sync_holds_preexisting_review_as_ai_draft_when_verification_fails(db_se
     draft = db_session.query(ReviewReply).filter_by(review_id=backlog_review.id, reply_type="ai_draft").one()
     assert draft.content == "소급 보류 초안"
     assert draft.style_id == reply_styles.id
+    # 측정 1순위 대상(경로 A: 보류→교정)이 재지려면 trace_id가 반드시
+    # 남아야 한다 — save_final_reply가 draft.trace_id is not None을
+    # 게이트로 쓴다(2026-10-07 최종 리뷰 보완).
+    assert draft.trace_id == fake_trace_id
     # final 답글은 저장되지 않았어야 한다 — ai_draft만 있어야 정상.
     assert db_session.query(ReviewReply).filter_by(review_id=backlog_review.id, reply_type="final").count() == 0
     # 보류는 실패가 아니다 — auto_reply_errors에 집계돼 job을 실패로 만들면

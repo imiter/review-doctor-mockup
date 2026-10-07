@@ -555,7 +555,8 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                             # 한다 — 새 테이블/컬럼 없음.
                             db.add(ReviewReply(
                                 review_id=review.id, reply_type="ai_draft", style_id=auto_reply_style.id,
-                                content=result.content, created_at=datetime.now(timezone.utc),
+                                content=result.content, trace_id=result.trace_id,
+                                created_at=datetime.now(timezone.utc),
                             ))
                             review.status = "pending"
                             db.add(Alert(
@@ -640,7 +641,8 @@ def _run_sync(job: ReviewSyncJob, conn: StorePlatformConnection, db: Session) ->
                             # 한다(위 신규 리뷰 블록 주석 참고).
                             db.add(ReviewReply(
                                 review_id=review.id, reply_type="ai_draft", style_id=auto_reply_style.id,
-                                content=result.content, created_at=datetime.now(timezone.utc),
+                                content=result.content, trace_id=result.trace_id,
+                                created_at=datetime.now(timezone.utc),
                             ))
                             review.status = "pending"
                             db.add(Alert(
